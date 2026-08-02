@@ -70,4 +70,10 @@ async def fold_feedback(feedback_id: uuid.UUID) -> None:
 
     # The lesson line is derived from screened parts; skip the whole-document
     # screen so one historic false positive can't freeze learning forever.
-    await memory.write_memory(agent.id, content, job.id, screen=False)
+    await memory.write_memory(
+        agent.id,
+        content,
+        job.id,
+        screen=False,
+        pending=memory.approval_required(agent.options or {}),
+    )

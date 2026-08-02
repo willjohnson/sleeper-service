@@ -65,12 +65,18 @@ async def fold_feedback(ctx: dict, feedback_id: str) -> None:
     await fold(uuid.UUID(feedback_id))
 
 
+async def run_eval(ctx: dict, eval_run_id: str) -> None:
+    from sleeper_service.runtime.evals import run_eval as run
+
+    await run(uuid.UUID(eval_run_id))
+
+
 async def startup(ctx: dict) -> None:
     setup_tracing()
 
 
 class WorkerSettings:
-    functions: ClassVar = [run_job, deliver_callback, fold_feedback]
+    functions: ClassVar = [run_job, deliver_callback, fold_feedback, run_eval]
     on_startup = startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     max_tries = max(get_settings().job_max_tries, get_settings().callback_max_tries)

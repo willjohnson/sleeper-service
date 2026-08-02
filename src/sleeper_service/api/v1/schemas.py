@@ -404,6 +404,7 @@ class MemoryVersionOut(OrmModel):
     id: uuid.UUID
     agent_id: uuid.UUID
     version_no: int
+    status: str
     source_job_id: uuid.UUID | None
     created_at: datetime
 
@@ -415,3 +416,40 @@ class MemoryVersionWithContentOut(MemoryVersionOut):
 class AgentMemoryOut(BaseModel):
     current: MemoryVersionWithContentOut | None
     versions: list[MemoryVersionOut]
+
+
+# --- Eval harness ---
+
+
+class EvalCaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    input: JobContext
+    checks: list[dict] = Field(min_length=1)
+
+
+class EvalCaseOut(OrmModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    name: str
+    input: dict
+    checks: list
+    created_by: uuid.UUID | None
+    created_at: datetime
+
+
+class EvalRunCreate(BaseModel):
+    version_no: int | None = None
+    agent_version_id: uuid.UUID | None = None  # both omitted = current version
+
+
+class EvalRunOut(OrmModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    agent_version_id: uuid.UUID
+    memory_version_id: uuid.UUID | None
+    status: str
+    pass_rate: Decimal | None
+    results: list
+    created_by: uuid.UUID | None
+    created_at: datetime
+    finished_at: datetime | None

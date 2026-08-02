@@ -26,6 +26,7 @@ from sleeper_service.db.models import (
     File,
     Job,
     JobEvent,
+    MemoryVersion,
     Model,
     Tenant,
 )
@@ -90,8 +91,9 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         tenant = await db.get(Tenant, agent.tenant_id)
         model_row = await db.get(Model, version.model_id)
 
-        # Budget pre-flight (re-checked here so queued backlogs can't overrun)
-        spend = await spending.budget_exhausted(db, agent)
+        # Budget pre-flight (re-checked here so queued backlogs can't overrun);
+        # eval jobs are exempt — they neither consume nor get refused by limits
+        spend = None if job.is_eval else await spending.budget_exhausted(db, agent)
         if spend is not None:
             await _finalize(
                 job_id,
@@ -107,14 +109,21 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
             )
             return
 
-        # Memory: inject the latest version and pin it on the job record
+        # Memory: inject the latest active version and pin it on the job.
+        # A pre-pinned memory_version_id (eval-gate runs) wins — that's how a
+        # pending memory gets evaluated before approval.
         memory_text: str | None = None
         agent_options = agent.options or {}
         if memory.memory_enabled(agent_options):
-            mem_version = await memory.latest_memory(db, agent.id)
-            if mem_version is not None:
-                job.memory_version_id = mem_version.id
-                memory_text = mem_version.content
+            if job.memory_version_id is not None:
+                pinned = await db.get(MemoryVersion, job.memory_version_id)
+                if pinned is not None:
+                    memory_text = pinned.content
+            else:
+                mem_version = await memory.latest_memory(db, agent.id)
+                if mem_version is not None:
+                    job.memory_version_id = mem_version.id
+                    memory_text = mem_version.content
 
         job.status = "running"
         job.started_at = _now()
@@ -248,8 +257,14 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         if redactions:
             events.append(("pii_redacted", {"count": redactions}))
     if status == "succeeded" and memory_proposals:
-        # Post-hook memory write: screened (poisoning defense) and size-capped
-        await memory.write_memory(agent.id, memory_proposals[-1], job_id)
+        # Post-hook memory write: screened (poisoning defense), size-capped,
+        # and pending owner approval when governance requires it
+        await memory.write_memory(
+            agent.id,
+            memory_proposals[-1],
+            job_id,
+            pending=memory.approval_required(agent_options),
+        )
 
     await _finalize(
         job_id,

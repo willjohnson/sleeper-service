@@ -215,6 +215,9 @@ class Job(UUIDPKMixin, Base):
     callback_url: Mapped[str | None]
     user_ctx: Mapped[dict | None] = mapped_column(JSONB)
     idempotency_key: Mapped[str | None]
+    # Eval jobs run through the normal pipeline but are excluded from spend
+    # rollups and budget refusals (BUILD_PLAN § Eval design)
+    is_eval: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
@@ -253,11 +256,17 @@ class NotifChannel(UUIDPKMixin, CreatedAtMixin, Base):
 
 class MemoryVersion(UUIDPKMixin, Base):
     __tablename__ = "memory_versions"
-    __table_args__ = (UniqueConstraint("agent_id", "version_no"),)
+    __table_args__ = (
+        UniqueConstraint("agent_id", "version_no"),
+        CheckConstraint("status IN ('active', 'pending', 'rejected')", name="status_valid"),
+    )
 
     agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"))
     version_no: Mapped[int]
     content: Mapped[str] = mapped_column(Text)
+    # active: injectable; pending: awaiting owner approval (memory_approval
+    # option); rejected: never injected (also how rollback retires a version)
+    status: Mapped[str] = mapped_column(default="active", server_default="active")
     source_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -269,3 +278,31 @@ class Feedback(UUIDPKMixin, CreatedAtMixin, Base):
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     vote: Mapped[int] = mapped_column(SmallInteger)
     comment: Mapped[str | None] = mapped_column(Text)
+
+
+class EvalCase(UUIDPKMixin, CreatedAtMixin, Base):
+    __tablename__ = "eval_cases"
+    __table_args__ = (UniqueConstraint("agent_id", "name"),)
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"))
+    name: Mapped[str]
+    input: Mapped[dict] = mapped_column(JSONB)  # job context: {prompt, ...}
+    checks: Mapped[list] = mapped_column(JSONB)  # [{path, op, value}, ...]
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
+class EvalRun(UUIDPKMixin, Base):
+    __tablename__ = "eval_runs"
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True
+    )
+    agent_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_versions.id"))
+    # pin a memory version (e.g. a pending one being gated); None = latest active
+    memory_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("memory_versions.id"))
+    status: Mapped[str] = mapped_column(default="running")
+    results: Mapped[list] = mapped_column(JSONB, default=list)
+    pass_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]

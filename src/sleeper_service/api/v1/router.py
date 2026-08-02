@@ -4,11 +4,13 @@ from sleeper_service.api.v1 import (
     agents,
     api_keys,
     data_stores,
+    evals,
     events,
     feedback,
     files,
     jobs,
     mcp_servers,
+    memory_admin,
     models,
     notif_channels,
     provider_creds,
@@ -34,3 +36,5 @@ v1_router.include_router(data_stores.router)
 v1_router.include_router(notif_channels.router)
 v1_router.include_router(events.router)
 v1_router.include_router(feedback.router)
+v1_router.include_router(evals.router)
+v1_router.include_router(memory_admin.router)

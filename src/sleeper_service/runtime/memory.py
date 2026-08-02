@@ -32,10 +32,15 @@ def learning_enabled(agent_options: dict) -> bool:
     return memory_enabled(agent_options) and agent_options.get("learning") is True
 
 
+def approval_required(agent_options: dict) -> bool:
+    return agent_options.get("memory_approval") is True
+
+
 async def latest_memory(db: AsyncSession, agent_id: uuid.UUID) -> MemoryVersion | None:
+    """Latest ACTIVE version — pending and rejected versions are never injected."""
     return await db.scalar(
         select(MemoryVersion)
-        .where(MemoryVersion.agent_id == agent_id)
+        .where(MemoryVersion.agent_id == agent_id, MemoryVersion.status == "active")
         .order_by(MemoryVersion.version_no.desc())
         .limit(1)
     )
@@ -68,9 +73,14 @@ async def write_memory(
     source_job_id: uuid.UUID | None,
     *,
     screen: bool = True,
+    pending: bool = False,
 ) -> uuid.UUID | None:
     """Create a new memory version. Returns its id, or None if the write was
-    blocked by the injection screen (logged as a job event)."""
+    blocked by the injection screen (logged as a job event). With
+    pending=True (memory_approval governance) the version awaits owner
+    approval and is not injected; if the agent has an eval suite, an eval run
+    pinned to the pending version is triggered automatically (the eval gate).
+    """
     if screen:
         matched = hooks.screen_injection([content])
         if matched is not None:
@@ -101,15 +111,22 @@ async def write_memory(
             version_no=next_no,
             content=content,
             source_job_id=source_job_id,
+            status="pending" if pending else "active",
         )
         db.add(version)
         if source_job_id is not None:
             db.add(
                 JobEvent(
                     job_id=source_job_id,
-                    type="memory_updated",
+                    type="memory_update_pending" if pending else "memory_updated",
                     data={"memory_version_no": next_no},
                 )
             )
         await db.commit()
-        return version.id
+        version_id = version.id
+
+    if pending:
+        from sleeper_service.runtime.evals import maybe_trigger_memory_eval
+
+        await maybe_trigger_memory_eval(agent_id, version_id)
+    return version_id

@@ -13,6 +13,10 @@ from sleeper_service.db.session import get_db
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
+# Learning governance (decided 2026-08-02): flipping these requires the team
+# owner — editors manage everything else about an agent.
+GOVERNED_OPTION_KEYS = ("memory", "learning", "memory_approval")
+
 
 @router.post("", response_model=AgentOut, status_code=status.HTTP_201_CREATED)
 async def create_agent(
@@ -24,6 +28,8 @@ async def create_agent(
     if team is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     require_role(principal, team.id, Role.EDITOR)
+    if any(body.options.get(k) for k in GOVERNED_OPTION_KEYS):
+        require_role(principal, team.id, Role.OWNER)
     if await db.scalar(
         select(Agent).where(Agent.tenant_id == team.tenant_id, Agent.name == body.name)
     ):
@@ -90,6 +96,11 @@ async def update_agent(
     agent = await _get_visible_agent(agent_id, db, principal)
     require_role(principal, agent.team_id, Role.EDITOR)
     updates = body.model_dump(exclude_unset=True)
+    if "options" in updates:
+        old = agent.options or {}
+        new = updates["options"] or {}
+        if any(old.get(k) != new.get(k) for k in GOVERNED_OPTION_KEYS):
+            require_role(principal, agent.team_id, Role.OWNER)
     if "name" in updates and updates["name"] != agent.name:
         dup = await db.scalar(
             select(Agent).where(Agent.tenant_id == agent.tenant_id, Agent.name == updates["name"])
