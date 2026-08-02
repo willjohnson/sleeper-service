@@ -32,6 +32,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "adlfs>=2024.12",
     "gcsfs>=2025.1",
+    "pydantic-monty>=0.0.19",
 ]
 
 [project.scripts]

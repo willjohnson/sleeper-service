@@ -7,6 +7,7 @@ winner is promoted via the existing /promote endpoint.
 
 import uuid
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,7 +39,8 @@ async def create_eval_case(
 ) -> EvalCase:
     agent = await _get_visible_agent(agent_id, db, principal)
     require_role(principal, agent.team_id, Role.EDITOR)
-    error = validate_checks(body.checks)
+    # thread: code-check validation executes the grader in the sandbox
+    error = await anyio.to_thread.run_sync(validate_checks, body.checks)
     if error is not None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
     dup = await db.scalar(

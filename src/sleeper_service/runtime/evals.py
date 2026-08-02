@@ -11,6 +11,8 @@ Check format ({"path": "risk_level", "op": ..., "value": ...}):
 - in_range      value = [min, max], inclusive
 - matches_regex re.search(value, str(output[path]))
 - is_valid      output validates against the version's output_schema (no path)
+- code          {"op": "code", "code": "def grade(output): ..."} — grade(output)
+                runs in the sandbox (runtime/sandbox.py); truthy return = pass
 
 The eval gate: a pending memory version (memory_approval governance) with an
 eval suite triggers a run pinned to that memory; a pass rate below the last
@@ -23,14 +25,20 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import anyio
 import jsonschema
 from sqlalchemy import func, select
 
 from sleeper_service.db.models import Agent, AgentVersion, EvalCase, EvalRun, Job
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import notify
+from sleeper_service.runtime import notify, sandbox
 
-VALID_OPS = {"equals", "contains", "in_range", "matches_regex", "is_valid"}
+VALID_OPS = {"equals", "contains", "in_range", "matches_regex", "is_valid", "code"}
+PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
+
+# Validation runs editor-supplied top-level statements at case-creation time,
+# in the API process — keep the cap tight so a hostile def can't stall a route
+GRADER_VALIDATE_LIMITS = {**sandbox.DEFAULT_LIMITS, "max_duration_secs": 1.0}
 
 
 def _dig(output: Any, path: str) -> Any:
@@ -57,6 +65,13 @@ def run_check(check: dict, output: dict | None, output_schema: dict | None) -> t
         except jsonschema.ValidationError as e:
             return False, f"schema violation: {e.message}"
 
+    if op == "code":
+        try:
+            result = sandbox.run_function(check.get("code", ""), "grade", output)
+        except sandbox.SandboxError as e:
+            return False, f"grader error: {e}"
+        return bool(result), f"grade(output) -> {result!r}"
+
     path = check.get("path", "")
     actual = _dig(output, path)
     value = check.get("value")
@@ -82,16 +97,34 @@ def run_check(check: dict, output: dict | None, output_schema: dict | None) -> t
 
 
 def validate_checks(checks: list) -> str | None:
+    """May block for up to GRADER_VALIDATE_LIMITS on code checks — async
+    callers should offload to a thread."""
     if not checks:
         return "at least one check is required"
     for check in checks:
         if not isinstance(check, dict) or check.get("op") not in VALID_OPS:
             return f"invalid check {check!r}; ops: {sorted(VALID_OPS)}"
-        if check["op"] != "is_valid" and not check.get("path"):
+        op = check["op"]
+        if op in PATH_OPS and not check.get("path"):
             return f"check {check!r} requires a path"
-        if check["op"] != "is_valid" and "value" not in check:
+        if op in PATH_OPS and "value" not in check:
             return f"check {check!r} requires a value"
+        if op == "code":
+            code = check.get("code")
+            if not isinstance(code, str) or not code.strip():
+                return "code check requires a 'code' string defining grade(output)"
+            detail = sandbox.validate_function(code, "grade", limits=GRADER_VALIDATE_LIMITS)
+            if detail is not None:
+                return f"invalid grader: {detail}"
     return None
+
+
+def _grade_output(checks: list, output: dict | None, output_schema: dict | None) -> list[dict]:
+    return [
+        {"check": check, "passed": ok, "detail": detail}
+        for check in checks
+        for ok, detail in [run_check(check, output, output_schema)]
+    ]
 
 
 async def run_eval(eval_run_id: uuid.UUID) -> None:
@@ -135,11 +168,11 @@ async def run_eval(eval_run_id: uuid.UUID) -> None:
             job = await db.get(Job, job_id)
 
         if job.status == "succeeded":
-            check_results = [
-                {"check": check, "passed": ok, "detail": detail}
-                for check in case.checks
-                for ok, detail in [run_check(check, job.output, version.output_schema)]
-            ]
+            # in a thread: code graders hold the (GIL-released) call for up
+            # to their duration cap
+            check_results = await anyio.to_thread.run_sync(
+                _grade_output, case.checks, job.output, version.output_schema
+            )
         else:
             check_results = [
                 {

@@ -38,6 +38,29 @@ def test_check_ops() -> None:
     assert validate_checks([{"op": "is_valid"}]) is None
 
 
+def test_code_grader_check() -> None:
+    output = {"risk_level": "high", "factors": ["weather", "staffing"], "score": 7}
+    grader = "def grade(output):\n    return output['score'] > 5 and 'weather' in output['factors']"
+    ok, detail = run_check({"op": "code", "code": grader}, output, None)
+    assert ok, detail
+    ok, detail = run_check({"op": "code", "code": grader}, {"score": 1, "factors": []}, None)
+    assert not ok
+    assert "grade(output) -> False" in detail
+    # a grader that raises fails the check with the error surfaced
+    ok, detail = run_check(
+        {"op": "code", "code": "def grade(output):\n    return output['nope']"}, output, None
+    )
+    assert not ok
+    assert "grader error" in detail
+
+
+def test_code_grader_validation() -> None:
+    assert validate_checks([{"op": "code", "code": "def grade(output):\n    return True"}]) is None
+    assert validate_checks([{"op": "code"}]) is not None  # no code
+    assert validate_checks([{"op": "code", "code": "def grade(:"}]) is not None  # syntax
+    assert validate_checks([{"op": "code", "code": "x = 1"}]) is not None  # no grade()
+
+
 # --- Eval runs ---
 
 
@@ -110,6 +133,51 @@ async def test_eval_run_version_pinning(client: AsyncClient, eval_cases: dict) -
 
     r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={"version_no": 99})
     assert r.status_code == 422
+
+
+async def test_code_grader_end_to_end(client: AsyncClient, risk_agent: dict) -> None:
+    """A code-grader case runs in the sandbox against real job output."""
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+
+    # a grader that doesn't parse is rejected at case creation
+    r = await client.post(
+        f"/v1/agents/{agent_id}/eval-cases",
+        headers=bob,
+        json={
+            "name": "bad-grader",
+            "input": {"prompt": "x"},
+            "checks": [{"op": "code", "code": "def grade(:"}],
+        },
+    )
+    assert r.status_code == 422
+    assert "invalid grader" in r.json()["detail"]
+
+    grader = (
+        "def grade(output):\n"
+        "    return output['risk_level'] == 'low' and len(output['factors']) >= 1"
+    )
+    r = await client.post(
+        f"/v1/agents/{agent_id}/eval-cases",
+        headers=bob,
+        json={
+            "name": "01-code-grade",
+            "input": {"prompt": "calm markets today"},
+            "checks": [{"op": "code", "code": grader}],
+        },
+    )
+    assert r.status_code == 201
+
+    r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={})
+    assert r.status_code == 202
+    run_id = r.json()["id"]
+    await run_eval(uuid.UUID(run_id))  # as the worker would
+
+    r = await client.get(f"/v1/agents/{agent_id}/eval-runs/{run_id}", headers=bob)
+    run = r.json()
+    assert run["status"] == "completed"
+    assert float(run["pass_rate"]) == 1.0
+    assert "grade(output) -> True" in run["results"][0]["checks"][0]["detail"]
 
 
 async def test_invalid_checks_rejected(client: AsyncClient, risk_agent: dict) -> None:

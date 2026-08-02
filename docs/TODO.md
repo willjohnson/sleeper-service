@@ -1,19 +1,19 @@
 # Outstanding work
 
-State as of 2026-08-02 (evening): Phases 0–3 complete; Phase 4 mostly complete
-(evals, governance, admin UI, ops hardening shipped). Quick-win batch landed
-2026-08-02: version aliases, true mid-loop budget checks, team/agent-scoped
-provider creds, Azure Blob/GCS data stores. 76 tests green. See BUILD_PLAN.md
-for design intent and the decision log embedded in each section.
+State as of 2026-08-02 (late evening): Phases 0–3 complete; Phase 4 mostly
+complete (evals, governance, admin UI, ops hardening shipped). Quick-win batch
+landed 2026-08-02: version aliases, true mid-loop budget checks, team/agent-
+scoped provider creds, Azure Blob/GCS data stores. Tier-1 sandboxed runner
+(Pydantic Monty, `runtime/sandbox.py`) + eval code graders (check op `code`)
+landed later that evening. 86 tests green. See BUILD_PLAN.md for design intent
+and the decision log embedded in each section.
 
 ## Remaining from the build plan
 
-1. **Sandboxed code runners** (BUILD_PLAN § Runner design) — tiered:
-   WASM in-process first (evaluate micropython-wasm vs Pydantic Monty),
-   disposable containers second (evaluate Anthropic srt), hosted third.
-   Unblocks **eval code graders** (`grade(output) -> pass/fail`), which are
-   deliberately not implemented — running editor-supplied Python in-worker
-   without a sandbox would be RCE by design.
+1. **Runner tiers 2/3** (BUILD_PLAN § Runner design) — tier 1 (in-process
+   Monty sandbox) shipped and powers eval code graders. Disposable
+   containers (evaluate Anthropic srt) and hosted sandboxes remain, needed
+   only if agent code requires real filesystems/packages.
 2. **OIDC login** — additive to the existing session auth (see
    `ui/routes.py` docstring for the fastapi-users deviation rationale).
 3. **Data stores: Box** — via MCP with folder-ID scoping: downscoped tokens +
