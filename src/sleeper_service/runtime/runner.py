@@ -206,8 +206,15 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         if redactions:
             events.append(("pii_redacted", {"count": redactions}))
 
-    await _finalize(job_id, status, output=output, error=error, usage=usage,
-                    model_name=model_row.name, extra_events=events)
+    await _finalize(
+        job_id,
+        status,
+        output=output,
+        error=error,
+        usage=usage,
+        model_name=model_row.name,
+        extra_events=events,
+    )
 
 
 async def _finalize(

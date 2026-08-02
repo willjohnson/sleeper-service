@@ -67,9 +67,7 @@ async def build_mcp_toolsets(
                 StdioTransport(command=command, args=args), id=f"mcp-{server.name}"
             )
         else:  # streamable_http | sse — FastMCP infers from the URL
-            toolset = MCPToolset(
-                server.endpoint, id=f"mcp-{server.name}", headers=headers or None
-            )
+            toolset = MCPToolset(server.endpoint, id=f"mcp-{server.name}", headers=headers or None)
 
         allowed = grant.get("tools")
         if allowed:
@@ -132,9 +130,7 @@ async def build_store_toolset(
 
     def _grant(store_name: str) -> _StoreGrant:
         if store_name not in grants:
-            raise ValueError(
-                f"no grant for store {store_name!r}; granted: {sorted(grants)}"
-            )
+            raise ValueError(f"no grant for store {store_name!r}; granted: {sorted(grants)}")
         return grants[store_name]
 
     async def list_files(store_name: str, path: str = "") -> list[str]:
@@ -183,6 +179,4 @@ async def _lookup(db: AsyncSession, model: type, tenant_id: uuid.UUID, ref: str)
         return await db.get(model, uuid.UUID(str(ref)))
     except (ValueError, AttributeError):
         pass
-    return await db.scalar(
-        select(model).where(model.tenant_id == tenant_id, model.name == ref)
-    )
+    return await db.scalar(select(model).where(model.tenant_id == tenant_id, model.name == ref))

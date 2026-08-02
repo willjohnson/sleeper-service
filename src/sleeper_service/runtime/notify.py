@@ -35,15 +35,9 @@ async def notify(agent_id: uuid.UUID, event_type: str, title: str, body: str) ->
         if agent is None:
             return
         channels = list(
-            await db.scalars(
-                select(NotifChannel).where(NotifChannel.team_id == agent.team_id)
-            )
+            await db.scalars(select(NotifChannel).where(NotifChannel.team_id == agent.team_id))
         )
-    urls = [
-        decrypt(c.apprise_url_enc)
-        for c in channels
-        if event_type in (c.events or [])
-    ]
+    urls = [decrypt(c.apprise_url_enc) for c in channels if event_type in (c.events or [])]
     if not urls:
         return
 

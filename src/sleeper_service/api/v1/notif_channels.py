@@ -58,9 +58,7 @@ async def list_channels(
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> list[NotifChannel]:
     await _gate(team_id, db, principal)
-    return list(
-        await db.scalars(select(NotifChannel).where(NotifChannel.team_id == team_id))
-    )
+    return list(await db.scalars(select(NotifChannel).where(NotifChannel.team_id == team_id)))
 
 
 @router.delete("/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)

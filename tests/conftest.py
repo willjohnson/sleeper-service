@@ -161,6 +161,7 @@ async def seeded_models(bootstrap: Bootstrap) -> None:
 
     async with get_sessionmaker()() as db:
         db.add(Model(provider="test", name="default", model_string="test:default"))
+        db.add(Model(provider="test", name="flaky", model_string="test:flaky"))
         db.add(
             Model(
                 provider="anthropic",

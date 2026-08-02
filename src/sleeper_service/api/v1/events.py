@@ -94,9 +94,7 @@ async def create_event_source(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown target agent")
     require_role(principal, agent.team_id, Role.OWNER)
     dup = await db.scalar(
-        select(EventSource).where(
-            EventSource.tenant_id == tenant_id, EventSource.name == body.name
-        )
+        select(EventSource).where(EventSource.tenant_id == tenant_id, EventSource.name == body.name)
     )
     if dup:
         raise HTTPException(status.HTTP_409_CONFLICT, "Event source name already exists")
@@ -125,9 +123,7 @@ async def list_event_sources(
     db: AsyncSession = Depends(get_db),
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> list[EventSource]:
-    sources = list(
-        await db.scalars(select(EventSource).where(EventSource.tenant_id == tenant_id))
-    )
+    sources = list(await db.scalars(select(EventSource).where(EventSource.tenant_id == tenant_id)))
     visible = []
     for source in sources:
         agent = await db.get(Agent, source.target_agent_id)

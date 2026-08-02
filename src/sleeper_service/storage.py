@@ -35,9 +35,7 @@ async def ensure_bucket() -> None:
 
 async def put_object(key: str, data: bytes, content_type: str) -> None:
     def _put() -> None:
-        _fs().pipe_file(
-            f"{get_settings().minio_bucket}/{key}", data, ContentType=content_type
-        )
+        _fs().pipe_file(f"{get_settings().minio_bucket}/{key}", data, ContentType=content_type)
 
     await anyio.to_thread.run_sync(_put)
 

@@ -38,9 +38,7 @@ async def create_mcp_server(
 ) -> McpServer:
     await _gate(tenant_id, db, principal, admin=True)
     dup = await db.scalar(
-        select(McpServer).where(
-            McpServer.tenant_id == tenant_id, McpServer.name == body.name
-        )
+        select(McpServer).where(McpServer.tenant_id == tenant_id, McpServer.name == body.name)
     )
     if dup:
         raise HTTPException(status.HTTP_409_CONFLICT, "MCP server name already exists")

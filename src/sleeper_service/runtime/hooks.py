@@ -18,12 +18,27 @@ import jsonschema
 INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
     (name, re.compile(rx, re.IGNORECASE))
     for name, rx in [
-        ("override_instructions", r"\b(ignore|disregard|forget)\b.{0,40}\b(previous|prior|above|all)\b.{0,40}\b(instruction|prompt|rule)"),  # noqa: E501
-        ("reveal_prompt", r"\b(reveal|show|print|repeat|output)\b.{0,40}\b(system|hidden|initial)\b.{0,20}\b(prompt|instruction|message)"),  # noqa: E501
-        ("role_reassignment", r"\byou are (now|no longer)\b|\bnew (persona|role|identity)\b|\bact as (?:an? )?(?:unrestricted|unfiltered|jailbroken)"),  # noqa: E501
-        ("privilege_claim", r"\b(as|i am) (your|the) (developer|administrator|creator|owner)\b.{0,40}\b(override|command|instruct)"),  # noqa: E501
+        (
+            "override_instructions",
+            r"\b(ignore|disregard|forget)\b.{0,40}\b(previous|prior|above|all)\b.{0,40}\b(instruction|prompt|rule)",
+        ),  # noqa: E501
+        (
+            "reveal_prompt",
+            r"\b(reveal|show|print|repeat|output)\b.{0,40}\b(system|hidden|initial)\b.{0,20}\b(prompt|instruction|message)",
+        ),  # noqa: E501
+        (
+            "role_reassignment",
+            r"\byou are (now|no longer)\b|\bnew (persona|role|identity)\b|\bact as (?:an? )?(?:unrestricted|unfiltered|jailbroken)",
+        ),  # noqa: E501
+        (
+            "privilege_claim",
+            r"\b(as|i am) (your|the) (developer|administrator|creator|owner)\b.{0,40}\b(override|command|instruct)",
+        ),  # noqa: E501
         ("delimiter_escape", r"<\/?(system|assistant)>|\[\/?(SYSTEM|INST)\]|```system"),
-        ("tool_coercion", r"\b(always|never)\b.{0,30}\b(approve|deny|call|invoke)\b.{0,30}\btool\b"),  # noqa: E501
+        (
+            "tool_coercion",
+            r"\b(always|never)\b.{0,30}\b(approve|deny|call|invoke)\b.{0,30}\btool\b",
+        ),  # noqa: E501
     ]
 ]
 
