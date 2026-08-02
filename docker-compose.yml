@@ -57,6 +57,11 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       LANGFUSE_HOST: ${LANGFUSE_PUBLIC_KEY:+http://langfuse-web:3000}
     command: arq sleeper_service.worker.WorkerSettings
+    healthcheck:
+      test: ["CMD", "arq", "--check", "sleeper_service.worker.WorkerSettings"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       postgres:
         condition: service_healthy

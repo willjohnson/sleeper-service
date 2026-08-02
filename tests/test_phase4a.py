@@ -104,15 +104,11 @@ async def test_eval_run_version_pinning(client: AsyncClient, eval_cases: dict) -
         json={"prompt": "v2 prompt", "model": "test/default", "output_schema": RISK_SCHEMA},
     )
     v2 = r.json()
-    r = await client.post(
-        f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={"version_no": 2}
-    )
+    r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={"version_no": 2})
     assert r.status_code == 202
     assert r.json()["agent_version_id"] == v2["id"]
 
-    r = await client.post(
-        f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={"version_no": 99}
-    )
+    r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={"version_no": 99})
     assert r.status_code == 422
 
 
@@ -160,8 +156,11 @@ async def test_learning_toggles_require_owner(client: AsyncClient, risk_agent: d
     r = await client.post(
         "/v1/agents",
         headers=bob,
-        json={"team_id": risk_agent["team"]["id"], "name": "sneaky-learner",
-              "options": {"learning": True}},
+        json={
+            "team_id": risk_agent["team"]["id"],
+            "name": "sneaky-learner",
+            "options": {"learning": True},
+        },
     )
     assert r.status_code == 403
 
@@ -230,9 +229,7 @@ async def test_memory_approval_flow(
 
     # editor/viewer cannot approve; owner can
     for headers in (bob, carol):
-        r = await client.post(
-            f"/v1/agents/{agent_id}/memory/{version_no}/approve", headers=headers
-        )
+        r = await client.post(f"/v1/agents/{agent_id}/memory/{version_no}/approve", headers=headers)
         assert r.status_code == 403
     r = await client.post(f"/v1/agents/{agent_id}/memory/{version_no}/approve", headers=alice)
     assert r.status_code == 200
@@ -293,9 +290,7 @@ async def test_feedback_fold_lands_pending_under_approval(
     pending = (await client.get(f"/v1/agents/{agent_id}/memory/pending", headers=bob)).json()
     # (TestModel also calls update_memory during the job, so the fold's version
     # is not necessarily the only pending one)
-    assert any(
-        "List staffing risks first." in entry["version"]["content"] for entry in pending
-    )
+    assert any("List staffing risks first." in entry["version"]["content"] for entry in pending)
 
 
 # --- Eval gate ---
@@ -345,9 +340,7 @@ async def test_pending_memory_triggers_gating_eval_and_regression_alert(
             await db.commit()
             triggered.append(run.id)
 
-    monkeypatch.setattr(
-        "sleeper_service.runtime.evals.maybe_trigger_memory_eval", capture_trigger
-    )
+    monkeypatch.setattr("sleeper_service.runtime.evals.maybe_trigger_memory_eval", capture_trigger)
 
     await memory_mod.write_memory(
         uuid.UUID(agent_id),
@@ -389,8 +382,6 @@ async def test_pending_memory_triggers_gating_eval_and_regression_alert(
 
     # the pending queue shows the gating run's pass rate next to the version
     pending = (await client.get(f"/v1/agents/{agent_id}/memory/pending", headers=bob)).json()
-    gated = next(
-        entry for entry in pending if "Bad lesson" in entry["version"]["content"]
-    )
+    gated = next(entry for entry in pending if "Bad lesson" in entry["version"]["content"])
     assert gated["eval_run"] is not None
     assert float(gated["eval_run"]["pass_rate"]) == 0.0

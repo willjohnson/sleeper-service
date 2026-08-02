@@ -1,14 +1,33 @@
+import logging
+import uuid as uuid_mod
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from sqlalchemy import text
 
 from sleeper_service import __version__, storage
 from sleeper_service.api.v1.router import v1_router
+from sleeper_service.config import get_settings
 from sleeper_service.observability import setup_tracing
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+PLACEHOLDER_SECRETS = {"change-me", "changeme", "secret", ""}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    secret = get_settings().secret_key
+    if secret.lower() in PLACEHOLDER_SECRETS or len(secret) < 16:
+        logger.warning(
+            "SECRET_KEY looks like a placeholder (callbacks, feedback tokens, and "
+            "credential encryption are only as strong as this value) — set a real "
+            "one in .env"
+        )
     await storage.ensure_bucket()
     setup_tracing()
     yield
@@ -24,6 +43,33 @@ app = FastAPI(
 app.include_router(v1_router, prefix="/v1")
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next) -> Response:
+    request_id = request.headers.get("X-Request-ID") or uuid_mod.uuid4().hex[:16]
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 @app.get("/healthz", include_in_schema=False)
-async def healthz() -> dict[str, str]:
-    return {"status": "ok", "version": __version__}
+async def healthz(response: Response) -> dict:
+    """Readiness: verifies Postgres and Redis, not just process liveness."""
+    from sleeper_service.db.session import get_sessionmaker
+    from sleeper_service.redis_client import get_redis
+
+    checks = {}
+    try:
+        async with get_sessionmaker()() as db:
+            await db.execute(text("SELECT 1"))
+        checks["postgres"] = "ok"
+    except Exception as e:
+        checks["postgres"] = f"error: {type(e).__name__}"
+    try:
+        await get_redis().ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {type(e).__name__}"
+
+    healthy = all(v == "ok" for v in checks.values())
+    response.status_code = 200 if healthy else 503
+    return {"status": "ok" if healthy else "degraded", "version": __version__, **checks}

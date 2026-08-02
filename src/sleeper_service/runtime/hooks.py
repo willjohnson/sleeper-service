@@ -63,9 +63,7 @@ def _tenant_rules(tenant_settings: dict) -> tuple[list[tuple[str, re.Pattern]], 
     return extra, ignore
 
 
-def screen_injection(
-    untrusted_texts: list[str], tenant_settings: dict | None = None
-) -> str | None:
+def screen_injection(untrusted_texts: list[str], tenant_settings: dict | None = None) -> str | None:
     """Return the matched rule name if any untrusted text looks like an
     injection attempt, else None. Built-in heuristics plus the tenant's own
     patterns, minus the tenant's suppressed rules."""

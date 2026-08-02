@@ -56,7 +56,8 @@ async def upload_file(
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> File:
-    if await db.get(Tenant, tenant_id) is None:
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     await _check_tenant_access(db, principal, tenant_id)
 
@@ -71,12 +72,15 @@ async def upload_file(
     content_type = file.content_type or "application/octet-stream"
     await storage.put_object(object_key, data, content_type)
 
+    from sleeper_service.runtime.retention import file_expiry
+
     row = File(
         id=file_id,
         tenant_id=tenant_id,
         object_key=object_key,
         size=len(data),
         content_type=content_type,
+        expires_at=file_expiry(tenant.settings or {}),
     )
     db.add(row)
     await db.commit()

@@ -17,7 +17,7 @@ from sleeper_service.db.session import get_db
 
 router = APIRouter(prefix="/teams/{team_id}/notif-channels", tags=["notif-channels"])
 
-VALID_EVENTS = {"dead_letter", "budget", "error_rate", "eval_regression"}
+VALID_EVENTS = {"dead_letter", "budget", "error_rate", "eval_regression", "callback_failed"}
 
 
 async def _gate(team_id: uuid.UUID, db: AsyncSession, principal: UserPrincipal) -> None:

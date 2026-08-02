@@ -7,7 +7,7 @@ within their scope, user keys with editor+ on the agent's team (viewers read).
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -269,3 +269,53 @@ async def get_job_tree(
         return out
 
     return await build(root)
+
+
+@router.get("/agents/{agent_id}/jobs", response_model=list[JobOut])
+async def list_jobs(
+    agent_id: uuid.UUID,
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> list[Job]:
+    """Browse an agent's jobs, newest first (viewer+ or in-scope invoke key)."""
+    await _get_agent_for(db, principal, agent_id, submit=False)
+    stmt = (
+        select(Job)
+        .where(Job.agent_id == agent_id)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    if status_filter is not None:
+        stmt = stmt.where(Job.status == status_filter)
+    return list(await db.scalars(stmt))
+
+
+@router.post("/jobs/{job_id}/retry", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
+async def retry_job(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> Job:
+    """Re-queue a terminally failed job (dead_letter/failed/timeout) — e.g.
+    after a provider outage ends. Same job row: full history stays attached."""
+    job = await _get_job_for(db, principal, job_id)
+    await _get_agent_for(db, principal, job.agent_id, submit=True)
+    if job.status not in ("dead_letter", "failed", "timeout"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Only failed jobs can be retried (status: {job.status})"
+        )
+    job.status = "queued"
+    job.output = None
+    job.error = None
+    job.started_at = None
+    job.finished_at = None
+    db.add(JobEvent(job_id=job.id, type="retried", data={"by": "api"}))
+    await db.commit()
+    await db.refresh(job)
+    pool = await get_pool()
+    await pool.enqueue_job("run_job", str(job.id))
+    return job

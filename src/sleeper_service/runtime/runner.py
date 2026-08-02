@@ -308,7 +308,12 @@ async def _finalize(
                 data={"status": status, **({"error": error} if error else {})},
             )
         )
+        is_eval = job.is_eval
+        agent_id = job.agent_id
         await db.commit()
+
+    if not is_eval and status in ("failed", "dead_letter", "timeout", "iteration_limit"):
+        await notify.check_error_rate(agent_id)
 
 
 async def _record_event(job_id: uuid.UUID, event_type: str, data: dict) -> None:

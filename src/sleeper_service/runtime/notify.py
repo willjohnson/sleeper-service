@@ -51,3 +51,43 @@ async def notify(agent_id: uuid.UUID, event_type: str, title: str, body: str) ->
         await anyio.to_thread.run_sync(_send)
     except Exception:
         logger.exception("alert delivery failed for agent %s (%s)", agent_id, event_type)
+
+
+ERROR_RATE_WINDOW = 20
+ERROR_RATE_MIN_SAMPLE = 10
+ERROR_RATE_THRESHOLD = 0.5
+COUNTED_STATUSES = ("succeeded", "failed", "dead_letter", "timeout", "iteration_limit")
+
+
+async def check_error_rate(agent_id: uuid.UUID) -> None:
+    """Alert when >=50% of the agent's last 20 real runs failed (min 10).
+    Rejected/budget refusals are excluded — they are policy, not malfunction.
+    The per-agent dedup window keeps this from paging repeatedly."""
+    from sqlalchemy import select
+
+    from sleeper_service.db.models import Job
+
+    async with get_sessionmaker()() as db:
+        recent = list(
+            await db.scalars(
+                select(Job.status)
+                .where(
+                    Job.agent_id == agent_id,
+                    Job.is_eval.is_(False),
+                    Job.status.in_(COUNTED_STATUSES),
+                )
+                .order_by(Job.created_at.desc())
+                .limit(ERROR_RATE_WINDOW)
+            )
+        )
+    if len(recent) < ERROR_RATE_MIN_SAMPLE:
+        return
+    failures = sum(1 for s in recent if s != "succeeded")
+    rate = failures / len(recent)
+    if rate >= ERROR_RATE_THRESHOLD:
+        await notify(
+            agent_id,
+            "error_rate",
+            "Sleeper Service: elevated error rate",
+            f"{failures} of the last {len(recent)} jobs failed ({rate:.0%}).",
+        )

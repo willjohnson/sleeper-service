@@ -5,6 +5,7 @@ from typing import ClassVar
 
 from arq import Retry
 from arq.connections import RedisSettings
+from arq.cron import cron
 
 from sleeper_service.config import get_settings
 from sleeper_service.db.models import Job
@@ -16,6 +17,10 @@ from sleeper_service.runtime.runner import TransientJobError, execute_job, mark_
 
 async def run_job(ctx: dict, job_id: str) -> None:
     settings = get_settings()
+    if await _tenant_at_capacity(job_id):
+        # Defer without burning a retry: concurrency pressure is not an error
+        await ctx["redis"].enqueue_job("run_job", job_id, _defer_by=10)
+        return
     try:
         await execute_job(uuid.UUID(job_id))
     except TransientJobError as e:
@@ -55,6 +60,15 @@ async def deliver_callback(ctx: dict, job_id: str) -> None:
             await callbacks.record_callback_failure(
                 uuid.UUID(job_id), f"gave up after {ctx['job_try']} tries: {e}"
             )
+            async with get_sessionmaker()() as db:
+                job = await db.get(Job, uuid.UUID(job_id))
+            if job is not None:
+                await notify.notify(
+                    job.agent_id,
+                    "callback_failed",
+                    "Sleeper Service: callback delivery failed",
+                    f"Callback for job {job_id} gave up after {ctx['job_try']} tries: {e}",
+                )
         else:
             raise Retry(defer=15 * 2 ** (ctx["job_try"] - 1)) from e
 
@@ -71,12 +85,46 @@ async def run_eval(ctx: dict, eval_run_id: str) -> None:
     await run(uuid.UUID(eval_run_id))
 
 
+async def _tenant_at_capacity(job_id: str) -> bool:
+    from sqlalchemy import func, select
+
+    from sleeper_service.db.models import Agent, Tenant
+
+    async with get_sessionmaker()() as db:
+        job = await db.get(Job, uuid.UUID(job_id))
+        if job is None or job.is_eval:
+            return False
+        agent = await db.get(Agent, job.agent_id)
+        tenant = await db.get(Tenant, agent.tenant_id)
+        cap = (tenant.settings or {}).get("max_concurrent_jobs")
+        if not isinstance(cap, int) or cap <= 0:
+            return False
+        running = await db.scalar(
+            select(func.count())
+            .select_from(Job)
+            .join(Agent, Job.agent_id == Agent.id)
+            .where(
+                Agent.tenant_id == tenant.id,
+                Job.status == "running",
+                Job.is_eval.is_(False),
+            )
+        )
+        return running >= cap
+
+
+async def cleanup(ctx: dict) -> dict:
+    from sleeper_service.runtime.retention import cleanup_tick
+
+    return await cleanup_tick()
+
+
 async def startup(ctx: dict) -> None:
     setup_tracing()
 
 
 class WorkerSettings:
     functions: ClassVar = [run_job, deliver_callback, fold_feedback, run_eval]
+    cron_jobs: ClassVar = [cron(cleanup, minute=13)]  # hourly retention pass
     on_startup = startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     max_tries = max(get_settings().job_max_tries, get_settings().callback_max_tries)

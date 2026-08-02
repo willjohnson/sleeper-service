@@ -33,6 +33,15 @@ def init(
     ),
 ) -> None:
     """Bootstrap the first tenant, org team, owner user, and API key."""
+    secret = get_settings().secret_key
+    if secret.lower() in {"change-me", "changeme", "secret", ""} or len(secret) < 16:
+        typer.secho(
+            "Refusing to initialize with a placeholder SECRET_KEY — callbacks, "
+            "feedback tokens, and credential encryption all derive from it.\n"
+            "Generate one:  python -c 'import secrets; print(secrets.token_urlsafe(48))'",
+            fg="red",
+        )
+        raise typer.Exit(code=1)
     asyncio.run(_init(tenant_name, email, password))
 
 
