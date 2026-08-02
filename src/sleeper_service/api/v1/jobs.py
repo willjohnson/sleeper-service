@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sleeper_service.api.v1.schemas import JobEventOut, JobOut, JobSubmit
+from sleeper_service.api.v1.schemas import JobEventOut, JobOut, JobSubmit, JobTreeOut
 from sleeper_service.auth.principal import (
     InvokePrincipal,
     Principal,
@@ -223,8 +223,20 @@ async def get_job(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
-) -> Job:
-    return await _get_job_for(db, principal, job_id)
+) -> JobOut:
+    job = await _get_job_for(db, principal, job_id)
+    return await _with_feedback_url(db, job)
+
+
+async def _with_feedback_url(db: AsyncSession, job: Job) -> JobOut:
+    from sleeper_service.runtime.learning import feedback_url
+    from sleeper_service.runtime.memory import learning_enabled
+
+    out = JobOut.model_validate(job)
+    agent = await db.get(Agent, job.agent_id)
+    if agent is not None and learning_enabled(agent.options or {}):
+        out.feedback_url = feedback_url(job.id)
+    return out
 
 
 @router.get("/jobs/{job_id}/events", response_model=list[JobEventOut])
@@ -237,3 +249,23 @@ async def get_job_events(
     return list(
         await db.scalars(select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id))
     )
+
+
+@router.get("/jobs/{job_id}/tree", response_model=JobTreeOut)
+async def get_job_tree(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> JobTreeOut:
+    """The full delegation tree rooted at this job (parent_job_id links)."""
+    root = await _get_job_for(db, principal, job_id)
+
+    async def build(node: Job) -> JobTreeOut:
+        out = JobTreeOut.model_validate(node)
+        children = await db.scalars(
+            select(Job).where(Job.parent_job_id == node.id).order_by(Job.created_at)
+        )
+        out.children = [await build(child) for child in children]
+        return out
+
+    return await build(root)

@@ -28,8 +28,8 @@ def sign(body: bytes, timestamp: int) -> str:
     return f"t={timestamp},v1={mac.hexdigest()}"
 
 
-def build_payload(job: Job) -> dict:
-    return {
+def build_payload(job: Job, *, learning: bool = False) -> dict:
+    payload = {
         "job_id": str(job.id),
         "agent_id": str(job.agent_id),
         "agent_version_id": str(job.agent_version_id),
@@ -40,6 +40,11 @@ def build_payload(job: Job) -> dict:
         "tokens_out": job.tokens_out,
         "cost": str(job.cost),
     }
+    if learning:
+        from sleeper_service.runtime.learning import feedback_url
+
+        payload["feedback_url"] = feedback_url(job.id)
+    return payload
 
 
 class CallbackDeliveryError(Exception):
@@ -51,7 +56,12 @@ async def deliver(job_id: uuid.UUID) -> None:
         job = await db.get(Job, job_id)
         if job is None or not job.callback_url:
             return
-        body = json.dumps(build_payload(job)).encode()
+        from sleeper_service.db.models import Agent
+        from sleeper_service.runtime.memory import learning_enabled
+
+        agent = await db.get(Agent, job.agent_id)
+        learning = agent is not None and learning_enabled(agent.options or {})
+        body = json.dumps(build_payload(job, learning=learning)).encode()
         signature = sign(body, int(time.time()))
         try:
             async with httpx.AsyncClient(timeout=10) as client:

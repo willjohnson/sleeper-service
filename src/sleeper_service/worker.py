@@ -59,12 +59,18 @@ async def deliver_callback(ctx: dict, job_id: str) -> None:
             raise Retry(defer=15 * 2 ** (ctx["job_try"] - 1)) from e
 
 
+async def fold_feedback(ctx: dict, feedback_id: str) -> None:
+    from sleeper_service.runtime.learning import fold_feedback as fold
+
+    await fold(uuid.UUID(feedback_id))
+
+
 async def startup(ctx: dict) -> None:
     setup_tracing()
 
 
 class WorkerSettings:
-    functions: ClassVar = [run_job, deliver_callback]
+    functions: ClassVar = [run_job, deliver_callback, fold_feedback]
     on_startup = startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     max_tries = max(get_settings().job_max_tries, get_settings().callback_max_tries)

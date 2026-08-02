@@ -5,6 +5,7 @@ from sleeper_service.api.v1 import (
     api_keys,
     data_stores,
     events,
+    feedback,
     files,
     jobs,
     mcp_servers,
@@ -32,3 +33,4 @@ v1_router.include_router(mcp_servers.router)
 v1_router.include_router(data_stores.router)
 v1_router.include_router(notif_channels.router)
 v1_router.include_router(events.router)
+v1_router.include_router(feedback.router)

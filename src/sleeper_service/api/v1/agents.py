@@ -134,3 +134,33 @@ async def delete_agent(
     require_role(principal, agent.team_id, Role.OWNER)
     await db.delete(agent)
     await db.commit()
+
+
+@router.get("/{agent_id}/memory")
+async def get_agent_memory(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> dict:
+    """Current memory document and version history (viewer+)."""
+    from sleeper_service.api.v1.schemas import (
+        AgentMemoryOut,
+        MemoryVersionOut,
+        MemoryVersionWithContentOut,
+    )
+    from sleeper_service.db.models import MemoryVersion
+    from sleeper_service.runtime.memory import latest_memory
+
+    await _get_visible_agent(agent_id, db, principal)
+    current = await latest_memory(db, agent_id)
+    versions = list(
+        await db.scalars(
+            select(MemoryVersion)
+            .where(MemoryVersion.agent_id == agent_id)
+            .order_by(MemoryVersion.version_no.desc())
+        )
+    )
+    return AgentMemoryOut(
+        current=MemoryVersionWithContentOut.model_validate(current) if current else None,
+        versions=[MemoryVersionOut.model_validate(v) for v in versions],
+    ).model_dump()

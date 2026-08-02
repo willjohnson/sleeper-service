@@ -30,7 +30,8 @@ from sleeper_service.db.models import (
     Tenant,
 )
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import hooks, links, notify, spending
+from sleeper_service.runtime import hooks, links, memory, notify, spending
+from sleeper_service.runtime.delegation import build_delegation_toolset
 from sleeper_service.runtime.providers import build_model, resolve_api_key
 from sleeper_service.runtime.toolsets import (
     GrantError,
@@ -106,6 +107,15 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
             )
             return
 
+        # Memory: inject the latest version and pin it on the job record
+        memory_text: str | None = None
+        agent_options = agent.options or {}
+        if memory.memory_enabled(agent_options):
+            mem_version = await memory.latest_memory(db, agent.id)
+            if mem_version is not None:
+                job.memory_version_id = mem_version.id
+                memory_text = mem_version.content
+
         job.status = "running"
         job.started_at = _now()
         db.add(JobEvent(job_id=job.id, type="started", data={}))
@@ -124,6 +134,23 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         except GrantError as e:
             await _finalize(job_id, "failed", error=str(e))
             return
+
+    delegation_toolset = build_delegation_toolset(agent, job_id)
+    if delegation_toolset is not None:
+        toolsets.append(delegation_toolset)
+
+    memory_proposals: list[str] = []
+    if memory.memory_enabled(agent_options):
+
+        async def update_memory(new_content: str) -> str:
+            """Replace your memory document (your accumulated notes). The new
+            content is validated and saved after this job completes."""
+            memory_proposals.append(new_content)
+            return "memory update queued for validation after this job"
+
+        from pydantic_ai.toolsets import FunctionToolset
+
+        toolsets.append(FunctionToolset([update_memory], id="memory"))
 
     # Assemble user content; collect untrusted text for the injection screen
     prompt_text = job.payload["prompt"]
@@ -152,7 +179,13 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
 
     model = build_model(model_row.model_string, api_key)
     instructions = "\n\n".join(
-        p for p in (tenant.system_prompt.strip(), version.prompt.strip()) if p
+        p
+        for p in (
+            tenant.system_prompt.strip(),
+            version.prompt.strip(),
+            memory.render_memory_section(memory_text) if memory_text else "",
+        )
+        if p
     )
     output_type = StructuredDict(version.output_schema) if version.output_schema else str
     pai_agent = PaiAgent(
@@ -205,6 +238,9 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         output, redactions = hooks.redact_pii(output)
         if redactions:
             events.append(("pii_redacted", {"count": redactions}))
+    if status == "succeeded" and memory_proposals:
+        # Post-hook memory write: screened (poisoning defense) and size-capped
+        await memory.write_memory(agent.id, memory_proposals[-1], job_id)
 
     await _finalize(
         job_id,

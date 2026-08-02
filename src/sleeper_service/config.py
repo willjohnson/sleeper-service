@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     callback_max_tries: int = 5
     sync_job_timeout_s: int = 120  # cap for ?sync=true regardless of version timeout
 
+    # Delegation / memory / learning
+    max_delegation_depth: int = 3
+    memory_max_chars: int = 6000
+    public_base_url: str = "http://localhost:8000"  # used in feedback URLs
+
     # Langfuse tracing (optional; enabled when all three are set)
     langfuse_host: str | None = None  # e.g. http://langfuse-web:3000
     langfuse_public_key: str | None = None

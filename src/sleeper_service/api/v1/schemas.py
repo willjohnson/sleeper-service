@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from sleeper_service.constants import KeyScope, Role
 
@@ -258,6 +258,8 @@ class JobOut(OrmModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    # present when the agent has learning enabled; single-job-scoped signed URL
+    feedback_url: str | None = None
 
 
 class JobEventOut(OrmModel):
@@ -368,3 +370,47 @@ class SpendOut(BaseModel):
     month_start: datetime
     spend: Decimal
     spending_limit: Decimal | None
+
+
+# --- Phase 3: trees, feedback, memory ---
+
+
+class JobTreeOut(JobOut):
+    children: list["JobTreeOut"] = Field(default_factory=list)
+
+
+class FeedbackCreate(BaseModel):
+    vote: int = Field(description="+1 or -1")
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("vote")
+    @classmethod
+    def _vote_range(cls, v: int) -> int:
+        if v not in (1, -1):
+            raise ValueError("vote must be 1 or -1")
+        return v
+
+
+class FeedbackOut(OrmModel):
+    id: uuid.UUID
+    job_id: uuid.UUID
+    vote: int
+    comment: str | None
+    created_at: datetime
+
+
+class MemoryVersionOut(OrmModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    version_no: int
+    source_job_id: uuid.UUID | None
+    created_at: datetime
+
+
+class MemoryVersionWithContentOut(MemoryVersionOut):
+    content: str
+
+
+class AgentMemoryOut(BaseModel):
+    current: MemoryVersionWithContentOut | None
+    versions: list[MemoryVersionOut]
