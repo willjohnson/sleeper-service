@@ -48,8 +48,10 @@ BUILD_PLAN.md for design intent and the decision log embedded in each section.
 
 ## Dev environment notes (this machine)
 
-- Compose maps postgres→5433, redis→6380 on the host (native services occupy
-  the defaults). Tests expect those ports and create a `sleeper_test` DB.
+- Compose defaults to standard host ports (5432/6379); this machine overrides
+  to 5433/6380 via POSTGRES_HOST_PORT/REDIS_HOST_PORT in the gitignored .env
+  (native services occupy the defaults here). Tests honor the same overrides
+  and create a `sleeper_test` DB.
 - colima runs docker (4 CPU / 6 GiB — resized for Langfuse; no buildx, keep
   the Dockerfile legacy-builder-compatible).
 - `scripts/screenshots.py` recaptures the README screenshots against a

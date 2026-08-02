@@ -75,8 +75,8 @@ services:
       POSTGRES_PASSWORD: sleeper
       POSTGRES_DB: sleeper
     ports:
-      # Host port 5433 to avoid colliding with a local Postgres on 5432
-      - "5433:5432"
+      # Override POSTGRES_HOST_PORT in .env if 5432 is taken on your host
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -88,8 +88,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      # Host port 6380 to avoid colliding with a local Redis on 6379
-      - "6380:6379"
+      # Override REDIS_HOST_PORT in .env if 6379 is taken on your host
+      - "${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

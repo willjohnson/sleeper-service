@@ -7,10 +7,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     secret_key: str
-    # Local defaults match the docker-compose host port mappings (5433/6380,
-    # offset to dodge natively installed Postgres/Redis instances).
-    database_url: str = "postgresql+asyncpg://sleeper:sleeper@localhost:5433/sleeper"
-    redis_url: str = "redis://localhost:6380/0"
+    database_url: str = "postgresql+asyncpg://sleeper:sleeper@localhost:5432/sleeper"
+    redis_url: str = "redis://localhost:6379/0"
 
     minio_endpoint: str = "http://localhost:9000"
     minio_access_key: str = "sleeper"

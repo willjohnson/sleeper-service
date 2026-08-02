@@ -69,6 +69,8 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "typer.Option"]
 "migrations/versions/*" = ["E501", "I001", "UP007", "UP035"]
 # Injection-screen regexes read better unwrapped
 "src/sleeper_service/runtime/hooks.py" = ["E501"]
+# Test env must be pinned before any app import caches settings
+"tests/conftest.py" = ["E402"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

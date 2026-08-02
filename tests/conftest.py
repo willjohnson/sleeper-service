@@ -7,10 +7,29 @@ test values. All tests share one event loop (and therefore one engine).
 import os
 import uuid
 
-os.environ["DATABASE_URL"] = "postgresql+asyncpg://sleeper:sleeper@localhost:5433/sleeper_test"
+
+def _host_port(name: str, default: str) -> str:
+    """Compose host-port override, from the environment or the local .env
+    (machines whose standard ports are occupied set these there)."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        with open(".env") as fh:
+            for line in fh:
+                if line.startswith(f"{name}="):
+                    return line.split("=", 1)[1].strip()
+    except FileNotFoundError:
+        pass
+    return default
+
+
+_PG = _host_port("POSTGRES_HOST_PORT", "5432")
+_REDIS = _host_port("REDIS_HOST_PORT", "6379")
+
+os.environ["DATABASE_URL"] = f"postgresql+asyncpg://sleeper:sleeper@localhost:{_PG}/sleeper_test"
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
 # Redis db 1: isolates test enqueues/rate-limit counters from the compose worker (db 0)
-os.environ["REDIS_URL"] = "redis://localhost:6380/1"
+os.environ["REDIS_URL"] = f"redis://localhost:{_REDIS}/1"
 os.environ["MINIO_BUCKET"] = "sleeper-files-test"
 os.environ["LANGFUSE_HOST"] = ""  # never export test traces (overrides .env)
 
@@ -30,7 +49,7 @@ from sleeper_service.main import app
 
 @pytest.fixture(scope="session", autouse=True)
 async def _database() -> None:
-    admin = await asyncpg.connect("postgresql://sleeper:sleeper@localhost:5433/sleeper")
+    admin = await asyncpg.connect(f"postgresql://sleeper:sleeper@localhost:{_PG}/sleeper")
     exists = await admin.fetchval("SELECT 1 FROM pg_database WHERE datname = 'sleeper_test'")
     if not exists:
         await admin.execute("CREATE DATABASE sleeper_test")
