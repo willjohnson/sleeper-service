@@ -188,10 +188,10 @@ No fine-tuning anywhere — "learning" is curated context: cheap, reversible, au
 
 ## Phases
 
-**Phase 0 — Skeleton (1–2 weekends)**
+**Phase 0 — Skeleton (1–2 weekends)** ✅ *completed 2026-08-02*
 Repo scaffold, Docker Compose (api/worker/postgres/redis/minio), Alembic migrations for full schema, API-key auth middleware, `sleeper init` bootstrap (first tenant, org team, owner user, API key), tenant/team/user/agent CRUD with RBAC enforcement. ✅ *Done when: compose up → `sleeper init` → create tenant → team → agent via API, and a viewer key can't edit.*
 
-**Phase 1 — Core execution loop**
+**Phase 1 — Core execution loop** ✅ *completed 2026-08-02 (aliases deferred to Phase 4 UI work; `test` provider added for keyless demos/CI)*
 Agent versions + immutability, version pinning on job submission, models registry, PydanticAI runtime with structured output validation and runtime guardrails (max_iterations/timeout), job submission (sync + async), file uploads to MinIO, arq workers with retries/idempotency/DLQ, per-key rate limiting, HMAC callbacks, Langfuse tracing. ✅ *Done when: an agent with a JSON output schema runs a job end-to-end, result delivered to a callback, fully traced in Langfuse, a runaway loop dies at its iteration cap, and rerunning an old job shows the exact version it used.*
 
 **Phase 2 — Hooks, limits, tools, data stores, events, alerting**

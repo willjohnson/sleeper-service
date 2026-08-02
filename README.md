@@ -106,7 +106,7 @@ Other things people build with this pattern: accounts-receivable agents matching
 
 ## Roadmap
 
-- [ ] Core: tenants, teams, agents, versioning, jobs, callbacks *(Phases 0–1)*
+- [x] Core: tenants, teams, agents, versioning, jobs, callbacks *(Phases 0–1)*
 - [ ] Hooks, spending limits, MCP tool grants, event sources *(Phase 2)*
 - [ ] Delegation, memory, feedback-driven learning *(Phase 3)*
 - [ ] Eval harness, admin UI (agent org chart, usage stats), sandboxed code runners *(Phase 4)*
