@@ -466,6 +466,7 @@ async def agent_detail(
             team=team,
             versions=versions,
             spend=float(await spending.month_spend(db, agent.id)),
+            spending_limit=float(agent.spending_limit) if agent.spending_limit else None,
             current_memory=current_memory,
             pending_memory=pending_memory,
             eval_runs=eval_runs,

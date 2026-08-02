@@ -47,9 +47,20 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 
 **Evals** — Cases are saved inputs + checks (`equals`, `contains`, `in_range`, `matches_regex`, `is_valid`); grading is deterministic and free. Runs execute through the normal pipeline (hooks and tracing apply) against any version, excluded from production spend. Pending memory versions auto-trigger a gated run; regressions alert the team.
 
+**Admin UI** — Ships in the api container (server-rendered, no node toolchain): per-tenant dashboard with live-agent count, success rate, spend, and jobs/tokens charts; teams → agents with option badges and budget meters; version promotion and rollback; the memory approval queue with gating-eval pass rates against baseline; eval run history; job detail with payload, output, audit events, the delegation tree, and one-click dead-letter retry. Session login with the same users and RBAC as the API.
+
 **Observability** — Langfuse (self-hosted, opt-in compose profile) ingests every agent run via OTLP — prompts, responses, tokens, tool calls. The seam is plain OpenTelemetry, so any OTLP backend works.
 
-**Ops** — Everything ships as Docker Compose (api, worker, Postgres, Redis, MinIO; `--profile langfuse`, `--profile demo`). Alembic migrations. `sleeper` CLI: `init` (bootstrap tenant/team/superuser/key), `seed-models`, `demo-setup`. A `test` provider runs the entire pipeline without vendor keys (and `test/flaky` exercises retry/DLQ/alerting paths).
+**Ops** — Everything ships as Docker Compose (api, worker, Postgres, Redis, MinIO; `--profile langfuse`, `--profile demo`). Alembic migrations; CI via GitHub Actions. Hourly retention: per-tenant file TTLs and job payload retention (rows and spend stats survive). Per-tenant worker concurrency caps. Deep health checks for api and worker. `sleeper` CLI: `init` (bootstrap; refuses placeholder secrets), `seed-models`, `demo-setup`. A `test` provider runs the entire pipeline without vendor keys (and `test/flaky` exercises retry/DLQ/alerting paths).
+
+## The admin UI
+
+| | |
+|---|---|
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Agents](docs/screenshots/agents.png) |
+| *Per-tenant dashboard: live agents, success rate, spend, jobs & tokens* | *Teams → agents with option badges and budget meters* |
+| ![Agent detail](docs/screenshots/agent-detail.png) | ![Job with delegation tree](docs/screenshots/job-tree.png) |
+| *Versions with promote, memory approval queue with gating-eval scores* | *Job detail: typed output, audit events, delegation tree* |
 
 ## Architecture
 
@@ -143,8 +154,9 @@ Other things people build with this pattern: accounts-receivable agents matching
 - [x] Core: tenants, teams, agents, versioning, jobs, callbacks *(Phases 0–1)*
 - [x] Hooks, spending limits, MCP tool grants, data stores, event sources, alerting *(Phase 2)*
 - [x] Delegation, memory, feedback-driven learning *(Phase 3)*
-- [x] Eval harness + memory approval governance *(Phase 4, partial)*
-- [ ] Admin UI (org chart, stats, promotion), version aliases, sandboxed code runners *(Phase 4, remaining)*
+- [x] Eval harness + memory approval governance *(Phase 4)*
+- [x] Admin UI: dashboard, promotion, memory approvals, job trees *(Phase 4)*
+- [ ] OIDC login, version aliases, sandboxed code runners *(Phase 4, remaining)*
 
 See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for the full plan, data model, and decision log.
 
