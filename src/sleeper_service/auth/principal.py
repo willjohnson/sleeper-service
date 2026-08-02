@@ -10,6 +10,7 @@ Every authenticated request resolves to exactly one principal:
   and nothing else.
 """
 
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -21,6 +22,7 @@ from sleeper_service.auth.keys import hash_key
 from sleeper_service.constants import KeyKind, KeyScope, Role
 from sleeper_service.db.models import ApiKey, TeamMember, User
 from sleeper_service.db.session import get_db
+from sleeper_service.redis_client import get_redis
 
 
 @dataclass
@@ -60,6 +62,8 @@ async def get_principal(request: Request, db: AsyncSession = Depends(get_db)) ->
     if key is None or key.revoked_at is not None:
         raise _credentials_error
 
+    await _enforce_rate_limit(key)
+
     if key.kind == KeyKind.INVOKE:
         return InvokePrincipal(key=key, scope=KeyScope(key.scope), scope_id=key.scope_id)
 
@@ -69,6 +73,24 @@ async def get_principal(request: Request, db: AsyncSession = Depends(get_db)) ->
     memberships = await db.scalars(select(TeamMember).where(TeamMember.user_id == user.id))
     roles = {m.team_id: Role(m.role) for m in memberships}
     return UserPrincipal(user=user, roles=roles)
+
+
+async def _enforce_rate_limit(key: ApiKey) -> None:
+    """Fixed-window (1 min) request limit for keys with rate_limit set."""
+    if key.rate_limit is None:
+        return
+    window = int(time.time()) // 60
+    redis_key = f"ratelimit:{key.id}:{window}"
+    r = get_redis()
+    count = await r.incr(redis_key)
+    if count == 1:
+        await r.expire(redis_key, 60)
+    if count > key.rate_limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded for this API key",
+            headers={"Retry-After": "60"},
+        )
 
 
 async def get_user_principal(

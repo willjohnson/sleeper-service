@@ -61,5 +61,35 @@ async def _init(tenant_name: str, email: str, password: str) -> None:
     typer.secho(f"  {plaintext}\n", bold=True)
 
 
+SEED_MODELS = [
+    ("anthropic", "claude-sonnet-5", "anthropic:claude-sonnet-5"),
+    ("anthropic", "claude-opus-5", "anthropic:claude-opus-5"),
+    ("anthropic", "claude-haiku-4-5", "anthropic:claude-haiku-4-5-20251001"),
+    ("test", "default", "test:default"),
+]
+
+
+@app.command()
+def seed_models() -> None:
+    """Register a starter set of models (idempotent). Add more via the API."""
+    asyncio.run(_seed_models())
+
+
+async def _seed_models() -> None:
+    from sleeper_service.db.models import Model
+
+    async with get_sessionmaker()() as db:
+        added = 0
+        for provider, name, model_string in SEED_MODELS:
+            exists = await db.scalar(
+                select(Model).where(Model.provider == provider, Model.name == name)
+            )
+            if exists is None:
+                db.add(Model(provider=provider, name=name, model_string=model_string))
+                added += 1
+        await db.commit()
+    typer.secho(f"Models seeded ({added} added, {len(SEED_MODELS) - added} existing).", fg="green")
+
+
 if __name__ == "__main__":
     app()

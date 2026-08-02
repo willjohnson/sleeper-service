@@ -139,3 +139,130 @@ class ApiKeyOut(OrmModel):
 
 class ApiKeyWithSecretOut(ApiKeyOut):
     api_key: str  # plaintext, shown once
+
+
+# --- Models registry ---
+
+
+class ModelCreate(BaseModel):
+    provider: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    # pydantic-ai model string, e.g. anthropic:claude-sonnet-5
+    model_string: str = Field(min_length=1)
+
+
+class ModelOut(OrmModel):
+    id: uuid.UUID
+    provider: str
+    name: str
+    model_string: str
+
+
+# --- Provider credentials ---
+
+
+class ProviderCredSet(BaseModel):
+    api_key: str = Field(min_length=1)
+
+
+class ProviderCredOut(OrmModel):
+    id: uuid.UUID
+    scope: KeyScope
+    scope_id: uuid.UUID
+    provider: str
+    created_at: datetime
+    # credentials are never returned
+
+
+# --- Agent versions ---
+
+
+class VersionCreate(BaseModel):
+    prompt: str = Field(min_length=1)
+    model: str  # models.model_string or "provider/name"
+    params: dict = Field(default_factory=dict)
+    max_iterations: int = Field(default=10, ge=1, le=100)
+    timeout_s: int = Field(default=300, ge=1, le=3600)
+    tool_grants: list = Field(default_factory=list)
+    data_store_grants: list = Field(default_factory=list)
+    input_schema: dict | None = None
+    output_schema: dict | None = None
+
+
+class VersionOut(OrmModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    version_no: int
+    prompt: str
+    model_id: uuid.UUID | None
+    params: dict
+    max_iterations: int
+    timeout_s: int
+    tool_grants: list
+    data_store_grants: list
+    input_schema: dict | None
+    output_schema: dict | None
+    created_by: uuid.UUID | None
+    created_at: datetime
+
+
+class PromoteRequest(BaseModel):
+    version_no: int = Field(ge=1)
+
+
+# --- Files ---
+
+
+class FileOut(OrmModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    object_key: str
+    size: int
+    content_type: str
+    expires_at: datetime | None
+    created_at: datetime
+
+
+# --- Jobs ---
+
+
+class JobContext(BaseModel):
+    prompt: str = Field(min_length=1)
+    files: list[uuid.UUID] = Field(default_factory=list)
+    links: list[str] = Field(default_factory=list)  # fetched in Phase 2 (allowlist)
+
+
+class JobSubmit(BaseModel):
+    context: JobContext
+    callback_url: str | None = None
+    agent_version_id: uuid.UUID | None = None  # pin an exact version
+    version_no: int | None = None              # or pin by number
+    idempotency_key: str | None = Field(default=None, max_length=200)
+    user_ctx: dict | None = None
+
+
+class JobOut(OrmModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    agent_version_id: uuid.UUID
+    parent_job_id: uuid.UUID | None
+    status: str
+    payload: dict
+    output: dict | None
+    error: str | None
+    tokens_in: int
+    tokens_out: int
+    cost: Decimal
+    callback_url: str | None
+    user_ctx: dict | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class JobEventOut(OrmModel):
+    id: int
+    job_id: uuid.UUID
+    ts: datetime
+    type: str
+    data: dict

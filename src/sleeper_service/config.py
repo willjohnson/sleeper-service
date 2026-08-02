@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     minio_secret_key: str = "sleeper-minio-secret"
     minio_bucket: str = "sleeper-files"
 
+    # Job execution
+    job_max_tries: int = 4  # arq attempts before dead-letter
+    callback_max_tries: int = 5
+    sync_job_timeout_s: int = 120  # cap for ?sync=true regardless of version timeout
+
+    # Langfuse tracing (optional; enabled when all three are set)
+    langfuse_host: str | None = None  # e.g. http://langfuse-web:3000
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:
