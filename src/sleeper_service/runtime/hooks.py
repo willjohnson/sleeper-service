@@ -43,11 +43,37 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def screen_injection(untrusted_texts: list[str]) -> str | None:
+def _tenant_rules(tenant_settings: dict) -> tuple[list[tuple[str, re.Pattern]], set[str]]:
+    """Tenant-defined screening config (settings.hooks):
+    - injection_patterns: [{"name": ..., "regex": ...}] — extra rules merged
+      with the built-ins
+    - injection_ignore_rules: ["tool_coercion", ...] — rule names suppressed
+      for this tenant (e.g. a built-in that false-positives on their domain)
+    Malformed entries are skipped here; the tenants API validates on write.
+    """
+    cfg = tenant_settings.get("hooks", {})
+    extra: list[tuple[str, re.Pattern]] = []
+    for item in cfg.get("injection_patterns", []):
+        try:
+            extra.append((str(item["name"]), re.compile(item["regex"], re.IGNORECASE)))
+        except (KeyError, TypeError, re.error):
+            continue
+    ignore_rules = cfg.get("injection_ignore_rules", [])
+    ignore = set(ignore_rules) if isinstance(ignore_rules, list) else set()
+    return extra, ignore
+
+
+def screen_injection(
+    untrusted_texts: list[str], tenant_settings: dict | None = None
+) -> str | None:
     """Return the matched rule name if any untrusted text looks like an
-    injection attempt, else None."""
+    injection attempt, else None. Built-in heuristics plus the tenant's own
+    patterns, minus the tenant's suppressed rules."""
+    extra, ignore = _tenant_rules(tenant_settings or {})
     for text in untrusted_texts:
-        for name, pattern in INJECTION_PATTERNS:
+        for name, pattern in [*INJECTION_PATTERNS, *extra]:
+            if name in ignore:
+                continue
             if pattern.search(text):
                 return name
     return None
@@ -58,6 +84,36 @@ def injection_screen_enabled(tenant_settings: dict, agent_options: dict) -> bool
         agent_options.get("hooks", {}).get("injection_screen") is False
         or tenant_settings.get("hooks", {}).get("injection_screen") is False
     )
+
+
+def validate_hooks_settings(settings: dict) -> str | None:
+    """Validate settings.hooks on tenant writes (friendly 422s; the runtime
+    also skips malformed entries defensively)."""
+    cfg = settings.get("hooks")
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        return "settings.hooks must be an object"
+    patterns = cfg.get("injection_patterns", [])
+    if not isinstance(patterns, list):
+        return "hooks.injection_patterns must be a list of {name, regex}"
+    for item in patterns:
+        if not isinstance(item, dict) or not item.get("name") or "regex" not in item:
+            return f"invalid injection pattern {item!r}: needs name and regex"
+        try:
+            re.compile(item["regex"])
+        except (re.error, TypeError) as e:
+            return f"invalid regex in pattern {item.get('name')!r}: {e}"
+    ignore = cfg.get("injection_ignore_rules", [])
+    if not isinstance(ignore, list) or not all(isinstance(r, str) for r in ignore):
+        return "hooks.injection_ignore_rules must be a list of rule names"
+    known = {name for name, _ in INJECTION_PATTERNS} | {
+        p["name"] for p in patterns if isinstance(p, dict) and p.get("name")
+    }
+    unknown = set(ignore) - known
+    if unknown:
+        return f"unknown rule names in injection_ignore_rules: {sorted(unknown)}"
+    return None
 
 
 def validate_output_schema(output: dict, schema: dict) -> str | None:

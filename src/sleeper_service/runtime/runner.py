@@ -170,7 +170,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
 
     # Pre-hook: injection screen (default on)
     if hooks.injection_screen_enabled(tenant.settings or {}, agent.options or {}):
-        matched = hooks.screen_injection(untrusted)
+        matched = hooks.screen_injection(untrusted, tenant.settings or {})
         if matched is not None:
             async with sessionmaker() as db:
                 db.add(

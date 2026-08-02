@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sleeper_service.config import get_settings
-from sleeper_service.db.models import Agent, Feedback, Job
+from sleeper_service.db.models import Agent, Feedback, Job, Tenant
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.runtime import hooks, memory
 
@@ -49,10 +49,11 @@ async def fold_feedback(feedback_id: uuid.UUID) -> None:
         if not memory.learning_enabled(agent.options or {}):
             return
         current = await memory.latest_memory(db, agent.id)
+        tenant = await db.get(Tenant, agent.tenant_id)
 
     # Poisoning defense: a hostile comment must not become a memory rule.
     comment = (fb.comment or "").strip()
-    if comment and hooks.screen_injection([comment]) is not None:
+    if comment and hooks.screen_injection([comment], tenant.settings or {}) is not None:
         comment = ""
 
     date = datetime.now(UTC).date().isoformat()

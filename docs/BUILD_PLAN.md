@@ -154,7 +154,7 @@ Runtime: exposed to the agent as file tools (list/read/write, gated by the grant
 
 - API keys hashed at rest; scoped tenant/team/agent so provider spend maps to the vendor bill at the right level (inherit tenant → team → agent).
 - Callbacks HMAC-signed (`X-Sleeper-Signature`) so receivers can verify origin.
-- Prompt-injection pre-hook default-on: cheap-model classifier + heuristics; trusted-prompt separation (system/agent prompt privileged, payload content untrusted and delimited). Revisit the trusted-prompts paradigm from the note as it matures.
+- Prompt-injection pre-hook default-on: cheap-model classifier + heuristics; trusted-prompt separation (system/agent prompt privileged, payload content untrusted and delimited). Revisit the trusted-prompts paradigm from the note as it matures. *Shipped 2026-08-02: built-in heuristics plus tenant-defined rules — `settings.hooks.injection_patterns` (extra regexes) and `settings.hooks.injection_ignore_rules` (suppress a built-in that false-positives on domain language), validated on write; the same merged ruleset guards memory writes and feedback folds. Cheap-model classifier tier still planned behind the same `screen_injection()` seam.*
 - PII/confidential post-hooks are pluggable and off by default (tenant enables).
 - Log retention policy per tenant: raw prompt/response logs get a TTL; redaction applies before long-term storage.
 

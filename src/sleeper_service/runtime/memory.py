@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.config import get_settings
-from sleeper_service.db.models import JobEvent, MemoryVersion
+from sleeper_service.db.models import Agent, JobEvent, MemoryVersion, Tenant
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.runtime import hooks
 
@@ -82,7 +82,12 @@ async def write_memory(
     pinned to the pending version is triggered automatically (the eval gate).
     """
     if screen:
-        matched = hooks.screen_injection([content])
+        async with get_sessionmaker()() as db:
+            agent = await db.get(Agent, agent_id)
+            tenant = await db.get(Tenant, agent.tenant_id) if agent else None
+        matched = hooks.screen_injection(
+            [content], (tenant.settings or {}) if tenant else {}
+        )
         if matched is not None:
             if source_job_id is not None:
                 async with get_sessionmaker()() as db:

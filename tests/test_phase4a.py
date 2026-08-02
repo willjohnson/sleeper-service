@@ -23,7 +23,9 @@ def test_check_ops() -> None:
     assert run_check({"op": "in_range", "path": "score", "value": [5, 10]}, output, None)[0]
     assert not run_check({"op": "in_range", "path": "score", "value": [8, 10]}, output, None)[0]
     assert run_check({"op": "matches_regex", "path": "risk_level", "value": "^hi"}, output, None)[0]
-    ok, detail = run_check({"op": "is_valid"}, {"risk_level": "high", "factors": [], "summary": "x"}, RISK_SCHEMA)
+    ok, detail = run_check(
+        {"op": "is_valid"}, {"risk_level": "high", "factors": [], "summary": "x"}, RISK_SCHEMA
+    )
     assert ok, detail
     ok, _ = run_check({"op": "is_valid"}, {"risk_level": "extreme"}, RISK_SCHEMA)
     assert not ok
