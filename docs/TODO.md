@@ -25,8 +25,9 @@ and the decision log embedded in each section.
 
 ## Housekeeping
 
-- **No git remote.** Push to GitHub; `.github/workflows/ci.yml` activates on
-  first push. 24 commits of history on `main`.
+- **Repo is on GitHub (private):** https://github.com/willjohnson/sleeper-service —
+  flip visibility with `gh repo edit --visibility public` when ready; CI runs
+  on push.
 - **Demo poller is running** (`docker compose --profile demo`) and posts a
   real OpenRouter job every 30s (~$0.30/day). Stop with
   `docker compose --profile demo down` when not demoing.
