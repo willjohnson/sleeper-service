@@ -20,9 +20,7 @@ class Base(DeclarativeBase):
 
 
 class UUIDPKMixin:
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
 
 class CreatedAtMixin:
@@ -30,6 +28,4 @@ class CreatedAtMixin:
 
 
 class TimestampMixin(CreatedAtMixin):
-    updated_at: Mapped[datetime] = mapped_column(
-        server_default=func.now(), onupdate=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())

@@ -61,9 +61,7 @@ class Team(UUIDPKMixin, CreatedAtMixin, Base):
 
 class TeamMember(Base):
     __tablename__ = "team_members"
-    __table_args__ = (
-        CheckConstraint("role IN ('owner', 'editor', 'viewer')", name="role_valid"),
-    )
+    __table_args__ = (CheckConstraint("role IN ('owner', 'editor', 'viewer')", name="role_valid"),)
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
@@ -136,9 +134,7 @@ class DataStore(UUIDPKMixin, CreatedAtMixin, Base):
     __tablename__ = "data_stores"
     __table_args__ = (
         UniqueConstraint("tenant_id", "name"),
-        CheckConstraint(
-            "type IN ('s3', 'azure_blob', 'gcs', 'box', 'local')", name="type_valid"
-        ),
+        CheckConstraint("type IN ('s3', 'azure_blob', 'gcs', 'box', 'local')", name="type_valid"),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
@@ -228,9 +224,7 @@ class JobEvent(Base):
     __tablename__ = "job_events"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
-    )
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     ts: Mapped[datetime] = mapped_column(server_default=func.now())
     type: Mapped[str]
     data: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -272,8 +266,6 @@ class Feedback(UUIDPKMixin, CreatedAtMixin, Base):
     __tablename__ = "feedback"
     __table_args__ = (CheckConstraint("vote IN (-1, 1)", name="vote_valid"),)
 
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
-    )
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     vote: Mapped[int] = mapped_column(SmallInteger)
     comment: Mapped[str | None] = mapped_column(Text)
