@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from sleeper_service.constants import KeyScope, Role
 
@@ -210,6 +210,23 @@ class PromoteRequest(BaseModel):
     version_no: int = Field(ge=1)
 
 
+# --- Version aliases ---
+
+ALIAS_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,39}$"
+
+
+class AliasSet(BaseModel):
+    version_no: int = Field(ge=1)
+
+
+class AliasOut(BaseModel):
+    agent_id: uuid.UUID
+    alias: str
+    agent_version_id: uuid.UUID
+    version_no: int
+    created_at: datetime
+
+
 # --- Files ---
 
 
@@ -237,8 +254,16 @@ class JobSubmit(BaseModel):
     callback_url: str | None = None
     agent_version_id: uuid.UUID | None = None  # pin an exact version
     version_no: int | None = None  # or pin by number
+    alias: str | None = Field(default=None, pattern=ALIAS_PATTERN)  # or by alias
     idempotency_key: str | None = Field(default=None, max_length=200)
     user_ctx: dict | None = None
+
+    @model_validator(mode="after")
+    def _at_most_one_pin(self) -> "JobSubmit":
+        pins = (self.agent_version_id, self.version_no, self.alias)
+        if sum(p is not None for p in pins) > 1:
+            raise ValueError("pin at most one of agent_version_id, version_no, alias")
+        return self
 
 
 class JobOut(OrmModel):

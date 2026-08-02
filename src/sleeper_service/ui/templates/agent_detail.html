@@ -23,15 +23,23 @@
     <tr><th>Version</th><th>Model</th><th>Prompt</th><th>Guardrails</th><th>Created</th><th></th></tr>
     {% for v in versions %}
     <tr>
-      <td>v{{ v.version_no }} {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}</td>
+      <td>v{{ v.version_no }} {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
+        {% for a in v.aliases %}<span class="badge opt">{{ a }}{% if can_promote %}<form method="post" action="/ui/agents/{{ agent.id }}/aliases/{{ a }}/delete" style="display:inline"><button class="subtle" title="Remove alias" style="padding:0 2px">&times;</button></form>{% endif %}</span>{% endfor %}</td>
       <td class="mono">{{ v.model_string }}</td>
       <td class="muted">{{ v.prompt|truncate(80) }}</td>
       <td class="mono">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
       <td class="muted">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
       <td>
         {% if v.id != agent.current_version_id and can_promote %}
-        <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}">
+        <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}" style="display:inline">
           <button class="subtle">Promote</button>
+        </form>
+        {% endif %}
+        {% if can_promote %}
+        <form method="post" action="/ui/agents/{{ agent.id }}/aliases" style="display:inline">
+          <input type="hidden" name="version_no" value="{{ v.version_no }}">
+          <input name="alias" placeholder="alias" size="7" pattern="[a-z0-9][a-z0-9_-]{0,39}">
+          <button class="subtle">Set alias</button>
         </form>
         {% endif %}
       </td>

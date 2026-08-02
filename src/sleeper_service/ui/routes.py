@@ -10,6 +10,7 @@ promotes versions and approves memory; editor retries jobs.
 """
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +38,7 @@ from sleeper_service.db.models import (
     TeamMember,
     Tenant,
     User,
+    VersionAlias,
 )
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
@@ -378,6 +380,17 @@ async def agent_detail(
             .order_by(AgentVersion.version_no.desc())
         )
     ).all()
+    alias_rows = list(
+        await db.scalars(
+            select(VersionAlias)
+            .where(VersionAlias.agent_id == agent.id)
+            .order_by(VersionAlias.alias)
+        )
+    )
+    aliases_by_version: dict[uuid.UUID, list[str]] = {}
+    for a in alias_rows:
+        aliases_by_version.setdefault(a.agent_version_id, []).append(a.alias)
+
     versions = [
         {
             "id": v.id,
@@ -387,6 +400,7 @@ async def agent_detail(
             "max_iterations": v.max_iterations,
             "timeout_s": v.timeout_s,
             "created_at": v.created_at,
+            "aliases": aliases_by_version.get(v.id, []),
         }
         for v, model_string in versions_rows
     ]
@@ -562,6 +576,54 @@ async def ui_promote(
         )
         if version is not None:
             agent.current_version_id = version.id
+            await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/aliases")
+async def ui_set_alias(
+    agent_id: uuid.UUID,
+    alias: str = Form(),
+    version_no: int = Form(),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    from sleeper_service.api.v1.schemas import ALIAS_PATTERN
+
+    agent = await db.get(Agent, agent_id)
+    alias = alias.strip().lower()
+    if (
+        agent
+        and re.fullmatch(ALIAS_PATTERN, alias)
+        and await _team_role(db, p, agent.team_id) == Role.OWNER
+    ):
+        version = await db.scalar(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == agent_id, AgentVersion.version_no == version_no
+            )
+        )
+        if version is not None:
+            row = await db.get(VersionAlias, (agent_id, alias))
+            if row is None:
+                db.add(VersionAlias(agent_id=agent_id, alias=alias, agent_version_id=version.id))
+            else:
+                row.agent_version_id = version.id
+            await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/aliases/{alias}/delete")
+async def ui_delete_alias(
+    agent_id: uuid.UUID,
+    alias: str,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent = await db.get(Agent, agent_id)
+    if agent and await _team_role(db, p, agent.team_id) == Role.OWNER:
+        row = await db.get(VersionAlias, (agent_id, alias))
+        if row is not None:
+            await db.delete(row)
             await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 

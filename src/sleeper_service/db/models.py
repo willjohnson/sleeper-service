@@ -110,6 +110,22 @@ class AgentVersion(UUIDPKMixin, Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class VersionAlias(CreatedAtMixin, Base):
+    """Named pointer to a version (`dev`/`staging`/`prod` → version).
+
+    Promotion of an alias = repointing agent_version_id, same as
+    current_version_id on the agent. Job submissions may pin by alias.
+    """
+
+    __tablename__ = "version_aliases"
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True
+    )
+    alias: Mapped[str] = mapped_column(primary_key=True)
+    agent_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_versions.id"))
+
+
 class Model(UUIDPKMixin, Base):
     __tablename__ = "models"
     __table_args__ = (UniqueConstraint("provider", "name"),)

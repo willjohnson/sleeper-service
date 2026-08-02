@@ -21,7 +21,15 @@ from sleeper_service.auth.principal import (
 )
 from sleeper_service.auth.rbac import has_role
 from sleeper_service.constants import KeyScope, Role
-from sleeper_service.db.models import Agent, AgentVersion, File, Job, JobEvent, Tenant
+from sleeper_service.db.models import (
+    Agent,
+    AgentVersion,
+    File,
+    Job,
+    JobEvent,
+    Tenant,
+    VersionAlias,
+)
 from sleeper_service.db.session import get_db
 from sleeper_service.queue import get_pool
 from sleeper_service.runtime import links, spending
@@ -73,6 +81,11 @@ async def _resolve_version(db: AsyncSession, agent: Agent, body: JobSubmit) -> A
         if version is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown version")
         return version
+    if body.alias is not None:
+        row = await db.get(VersionAlias, (agent.id, body.alias))
+        if row is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown alias")
+        return await db.get(AgentVersion, row.agent_version_id)
     return await _resolve_version_current(db, agent)
 
 

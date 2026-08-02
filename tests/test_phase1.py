@@ -196,6 +196,65 @@ async def test_version_pinning(client: AsyncClient, risk_agent: dict) -> None:
     assert r.status_code == 422
 
 
+async def test_version_aliases(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    carol = auth(risk_agent["users"]["carol"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=bob,
+        json={"prompt": "v2", "model": "test/default", "output_schema": RISK_SCHEMA},
+    )
+    v2 = r.json()
+
+    # editor cannot manage aliases; owner can
+    r = await client.put(f"/v1/agents/{agent_id}/aliases/prod", headers=bob, json={"version_no": 1})
+    assert r.status_code == 403
+    r = await client.put(
+        f"/v1/agents/{agent_id}/aliases/prod", headers=alice, json={"version_no": 1}
+    )
+    assert r.status_code == 200
+    assert r.json()["version_no"] == 1
+
+    # malformed alias names and unknown versions are rejected
+    r = await client.put(
+        f"/v1/agents/{agent_id}/aliases/Not%20Valid", headers=alice, json={"version_no": 1}
+    )
+    assert r.status_code == 422
+    r = await client.put(
+        f"/v1/agents/{agent_id}/aliases/staging", headers=alice, json={"version_no": 99}
+    )
+    assert r.status_code == 404
+
+    # viewer can list
+    r = await client.get(f"/v1/agents/{agent_id}/aliases", headers=carol)
+    assert [(a["alias"], a["version_no"]) for a in r.json()] == [("prod", 1)]
+
+    # submission pins by alias; promotion = repointing, picked up immediately
+    r = await _submit(client, bob, agent_id, alias="prod")
+    assert r.json()["agent_version_id"] == risk_agent["version"]["id"]
+    r = await client.put(
+        f"/v1/agents/{agent_id}/aliases/prod", headers=alice, json={"version_no": 2}
+    )
+    assert r.status_code == 200
+    r = await _submit(client, bob, agent_id, alias="prod")
+    assert r.json()["agent_version_id"] == v2["id"]
+
+    # unknown alias and double pins are rejected
+    assert (await _submit(client, bob, agent_id, alias="nope")).status_code == 422
+    assert (await _submit(client, bob, agent_id, alias="prod", version_no=1)).status_code == 422
+
+    # delete: owner only, then the alias no longer resolves
+    assert (
+        await client.delete(f"/v1/agents/{agent_id}/aliases/prod", headers=bob)
+    ).status_code == 403
+    assert (
+        await client.delete(f"/v1/agents/{agent_id}/aliases/prod", headers=alice)
+    ).status_code == 204
+    assert (await _submit(client, bob, agent_id, alias="prod")).status_code == 422
+
+
 async def test_agent_without_version_conflicts(client: AsyncClient, risk_agent: dict) -> None:
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     r = await client.post(
