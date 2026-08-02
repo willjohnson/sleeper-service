@@ -216,6 +216,15 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         usage = result.usage
     except TimeoutError:
         status, error = "timeout", f"Job exceeded wall-clock timeout of {timeout_s}s"
+    except asyncio.CancelledError:
+        # Cancelled from outside (a delegating parent timed out, or the worker
+        # is shutting down). CancelledError is BaseException, so without this
+        # clause the job would be stranded in `running` forever. Finalize,
+        # then re-raise so the canceller's own control flow proceeds.
+        await _finalize(
+            job_id, "failed", error="cancelled: parent job timed out or worker shut down"
+        )
+        raise
     except UsageLimitExceeded as e:
         status, error = "iteration_limit", str(e)
     except ModelHTTPError as e:

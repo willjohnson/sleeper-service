@@ -108,7 +108,7 @@ Other things people build with this pattern: accounts-receivable agents matching
 
 - [x] Core: tenants, teams, agents, versioning, jobs, callbacks *(Phases 0–1)*
 - [x] Hooks, spending limits, MCP tool grants, event sources *(Phase 2)*
-- [ ] Delegation, memory, feedback-driven learning *(Phase 3)*
+- [x] Delegation, memory, feedback-driven learning *(Phase 3)*
 - [ ] Eval harness, admin UI (agent org chart, usage stats), sandboxed code runners *(Phase 4)*
 
 See [BUILD_PLAN.md](BUILD_PLAN.md) for the full plan, data model, and open questions.

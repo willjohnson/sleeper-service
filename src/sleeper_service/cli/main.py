@@ -3,7 +3,7 @@ import json
 import uuid as uuid_mod
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from sleeper_service.auth.keys import generate_key
 from sleeper_service.auth.passwords import hash_password
@@ -114,7 +114,25 @@ RISK_PROMPT = """You are a business risk analyst for a retail company.
 Before assessing any event, read the file 'risk_playbook.md' from the
 'reference' data store (use the read_file tool with store_name='reference')
 — it defines the company's locations and risk thresholds. Ground your
-assessment in that playbook: cite which thresholds or locations apply."""
+assessment in that playbook: cite which thresholds or locations apply.
+
+If (and only if) you conclude risk_level is "high": use list_agents to find
+the notification agent and call_agent to have it alert the operations team
+with a one-line description of the risk. Do this before returning your
+assessment."""
+
+NOTIFIER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "channel": {"type": "string", "enum": ["ops"]},
+        "message": {"type": "string"},
+    },
+    "required": ["channel", "message"],
+}
+
+NOTIFIER_PROMPT = """You are the operations notifier. Turn the request in the
+payload into one short, urgent, actionable alert message for the operations
+team. channel is always "ops"."""
 
 PLAYBOOK = """# Risk playbook
 
@@ -233,34 +251,54 @@ async def _demo_setup() -> None:
             schema: dict | None,
             grants: list,
             limit: Decimal | None,
+            options: dict | None = None,
         ) -> Agent:
+            """Upsert: options/description always refresh; a changed prompt or
+            model becomes a new promoted version (versions stay immutable)."""
             agent = await db.scalar(
                 select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == name)
             )
-            if agent is not None:
-                return agent
-            agent = Agent(
-                tenant_id=tenant.id,
-                team_id=team.id,
-                name=name,
-                description=description,
-                spending_limit=limit,
-            )
-            db.add(agent)
+            if agent is None:
+                agent = Agent(tenant_id=tenant.id, team_id=team.id, name=name)
+                db.add(agent)
+            agent.description = description
+            agent.spending_limit = limit
+            agent.options = options or {}
             await db.flush()
-            version = AgentVersion(
-                agent_id=agent.id,
-                version_no=1,
-                prompt=prompt,
-                model_id=model_row.id,
-                max_iterations=6,
-                timeout_s=120,
-                output_schema=schema,
-                data_store_grants=grants,
+
+            current = (
+                await db.get(AgentVersion, agent.current_version_id)
+                if agent.current_version_id
+                else None
             )
-            db.add(version)
-            await db.flush()
-            agent.current_version_id = version.id
+            if (
+                current is None
+                or current.prompt != prompt
+                or current.model_id != model_row.id
+                or current.max_iterations != 12
+            ):
+                next_no = (
+                    await db.scalar(
+                        select(func.coalesce(func.max(AgentVersion.version_no), 0)).where(
+                            AgentVersion.agent_id == agent.id
+                        )
+                    )
+                    + 1
+                )
+                version = AgentVersion(
+                    agent_id=agent.id,
+                    version_no=next_no,
+                    prompt=prompt,
+                    model_id=model_row.id,
+                    # enough for: playbook read + rolodex + delegation + retries
+                    max_iterations=12,
+                    timeout_s=120,
+                    output_schema=schema,
+                    data_store_grants=grants,
+                )
+                db.add(version)
+                await db.flush()
+                agent.current_version_id = version.id
             return agent
 
         risk = await ensure_agent(
@@ -271,6 +309,16 @@ async def _demo_setup() -> None:
             RISK_SCHEMA,
             [{"store": "reference", "prefix": "", "mode": "ro"}] if use_real else [],
             Decimal("1.00"),
+            options={"delegation": "team", "memory": True, "learning": True},
+        )
+        await ensure_agent(
+            "notifier",
+            "Sends an urgent alert to the operations team about a business risk",
+            model,
+            NOTIFIER_PROMPT,
+            NOTIFIER_SCHEMA,
+            [],
+            Decimal("0.50"),
         )
         flaky = await ensure_agent(
             "flaky-agent",
@@ -328,7 +376,7 @@ async def _demo_setup() -> None:
 
     typer.secho("Demo ready.", fg="green", bold=True)
     typer.echo(f"  Model: {'openrouter (real)' if use_real else 'test provider (no key set)'}")
-    typer.echo("  Agents: risk-analyzer ($1.00/month budget), flaky-agent")
+    typer.echo("  Agents: risk-analyzer (delegation+memory+learning), notifier, flaky-agent")
     typer.echo("  Reference store: s3://demo-reference/risk_playbook.md (read-only grant)")
     typer.echo("  Alerts: json://demo-sink:8080/alerts (dead_letter, budget)")
     typer.echo("\nStart the feed: docker compose --profile demo up -d")

@@ -197,7 +197,7 @@ Agent versions + immutability, version pinning on job submission, models registr
 **Phase 2 — Hooks, limits, tools, data stores, events, alerting** ✅ *completed 2026-08-02 (Blob/GCS/Box stores and error_rate alerts deferred; mid-loop budget check is pre-flight + per-run for now)*
 Pre/post-hook framework (injection screen, schema check, PII redaction stub), spending limit enforcement, MCP server registry + tool grants per agent version, external-link fetch allowlist, data stores (register + grant + fsspec-backed file tools; S3 and local first, Blob/GCS next, Box via MCP), event sources (webhook ingress with dedup), Apprise notification channels (dead-letter, budget, error-rate). Demo poller ships as an external script (compose `demo` profile). ✅ *Done when: the risk-analysis demo runs off the demo poller hitting the webhook within budget, reads reference data from a granted S3 bucket, a duplicate event is dropped, a prompt-injection payload is caught and logged, and a dead-lettered job pings the demo Slack/email channel.*
 
-**Phase 3 — Delegation, memory, learning**
+**Phase 3 — Delegation, memory, learning** ✅ *completed 2026-08-02 (feedback fold is deterministic — corrective rules from comments, no LLM judge; memory compaction = oldest-lessons-first at the size cap)*
 `call_agent` + `list_agents` (rolodex) tools with permission gates, job trees, depth/budget guardrails; memory injection + post-hook writes; feedback endpoint + memory-folding job. ✅ *Done when: risk-analyzer discovers and delegates to notifier via the catalog, the job tree is auditable, and a −1 vote with comment visibly changes MEMORY.*
 
 **Phase 4 — Evals, UI, runners**
