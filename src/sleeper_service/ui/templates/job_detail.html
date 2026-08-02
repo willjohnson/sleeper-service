@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id|string|truncate(8, true, '') }} — Sleeper Service{% endblock %}
+{% block heading %}Job <span class="mono">{{ job.id }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Result <span class="badge {{ job.status }}">{{ job.status }}</span>
+    {% if job.status in ('dead_letter', 'failed', 'timeout') and can_submit %}
+    <form method="post" action="/ui/jobs/{{ job.id }}/retry" style="display:inline"><button class="subtle">Retry</button></form>
+    {% endif %}
+  </h2>
+  <table>
+    <tr><th style="width:140px">Agent</th><td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a> · v{{ version_no }}{% if job.memory_version_id %} · memory pinned{% endif %}{% if job.is_eval %} · <span class="badge opt">eval</span>{% endif %}</td></tr>
+    <tr><th>Tokens / cost</th><td>{{ job.tokens_in }} in · {{ job.tokens_out }} out · ${{ '%.6f'|format(job.cost) }}</td></tr>
+    <tr><th>Timing</th><td class="muted">created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if job.finished_at %} · finished {{ job.finished_at.strftime('%H:%M:%S') }}{% endif %}</td></tr>
+    {% if job.error %}<tr><th>Error</th><td><code>{{ job.error }}</code></td></tr>{% endif %}
+  </table>
+  <h2 style="margin-top:14px">Payload</h2>
+  <pre>{{ payload_json }}</pre>
+  {% if job.output %}
+  <h2>Output</h2>
+  <pre>{{ output_json }}</pre>
+  {% endif %}
+</div>
+
+{% if tree_children %}
+<div class="panel">
+  <h2>Delegation tree</h2>
+  <ul class="tree">
+    <li><span class="badge {{ job.status }}">{{ job.status }}</span> <strong>{{ agent.name }}</strong> <span class="mono muted">{{ job.id|string|truncate(8, true, '') }}</span>
+      {{ tree_html | safe }}
+    </li>
+  </ul>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Events</h2>
+  <table>
+    <tr><th>When</th><th>Type</th><th>Data</th></tr>
+    {% for e in events %}
+    <tr>
+      <td class="muted">{{ e.ts.strftime('%H:%M:%S') }}</td>
+      <td><code>{{ e.type }}</code></td>
+      <td class="mono muted">{{ e.data }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

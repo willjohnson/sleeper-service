@@ -1,9 +1,13 @@
 import logging
 import uuid as uuid_mod
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+from starlette.middleware.sessions import SessionMiddleware
 
 from sleeper_service import __version__, storage
 from sleeper_service.api.v1.router import v1_router
@@ -41,6 +45,22 @@ app = FastAPI(
 )
 
 app.include_router(v1_router, prefix="/v1")
+
+from sleeper_service.ui.routes import NotAuthenticated  # noqa: E402
+from sleeper_service.ui.routes import router as ui_router  # noqa: E402
+
+app.add_middleware(SessionMiddleware, secret_key=get_settings().secret_key, same_site="lax")
+app.include_router(ui_router)
+app.mount(
+    "/ui/static",
+    StaticFiles(directory=str(Path(__file__).parent / "ui" / "static")),
+    name="ui-static",
+)
+
+
+@app.exception_handler(NotAuthenticated)
+async def _redirect_to_login(request: Request, exc: NotAuthenticated) -> RedirectResponse:
+    return RedirectResponse("/ui/login", status_code=303)
 
 
 @app.middleware("http")

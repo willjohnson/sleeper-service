@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}{{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}{{ agent.name }} <span class="muted" style="font-size:14px">· {{ team.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Overview</h2>
+  <p class="muted" style="margin-top:0">{{ agent.description or "No description." }}</p>
+  <div class="pill-row">
+    {% if agent.options.get('delegation') in ('team', 'tenant') %}<span class="badge opt">delegates: {{ agent.options['delegation'] }}</span>{% endif %}
+    {% if agent.options.get('memory') %}<span class="badge opt">memory</span>{% endif %}
+    {% if agent.options.get('learning') %}<span class="badge opt">learning</span>{% endif %}
+    {% if agent.options.get('memory_approval') %}<span class="badge opt">memory approval</span>{% endif %}
+  </div>
+  {% if agent.spending_limit %}
+  <p class="mono" style="margin-bottom:4px">month spend ${{ '%.4f'|format(spend) }} of ${{ '%.2f'|format(agent.spending_limit) }}</p>
+  <div class="meter" style="max-width:320px"><div style="width: {{ [spend / agent.spending_limit * 100, 100] | min }}%"></div></div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Versions</h2>
+  <table>
+    <tr><th>Version</th><th>Model</th><th>Prompt</th><th>Guardrails</th><th>Created</th><th></th></tr>
+    {% for v in versions %}
+    <tr>
+      <td>v{{ v.version_no }} {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}</td>
+      <td class="mono">{{ v.model_string }}</td>
+      <td class="muted">{{ v.prompt|truncate(80) }}</td>
+      <td class="mono">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
+      <td class="muted">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
+      <td>
+        {% if v.id != agent.current_version_id and can_promote %}
+        <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}">
+          <button class="subtle">Promote</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% if agent.options.get('memory') %}
+<div class="panel">
+  <h2>Memory</h2>
+  {% if pending_memory %}
+  <table>
+    <tr><th>Pending version</th><th>Content</th><th>Gating eval</th><th></th></tr>
+    {% for p in pending_memory %}
+    <tr>
+      <td>v{{ p.version.version_no }} <span class="badge pending">pending</span></td>
+      <td><pre style="max-width:420px; white-space:pre-wrap">{{ p.version.content|truncate(400) }}</pre></td>
+      <td>
+        {% if p.eval_run and p.eval_run.pass_rate is not none %}
+          {% set ok = p.baseline is none or p.eval_run.pass_rate >= p.baseline %}
+          <span class="badge {{ 'succeeded' if ok else 'failed' }}">
+            {{ '%.0f%%'|format(p.eval_run.pass_rate * 100) }}</span>
+          {% if p.baseline is not none %}<span class="muted">(baseline {{ '%.0f%%'|format(p.baseline * 100) }})</span>{% endif %}
+        {% elif p.eval_run %}<span class="badge running">{{ p.eval_run.status }}</span>
+        {% else %}<span class="muted">no suite</span>{% endif %}
+      </td>
+      <td>
+        {% if can_promote %}
+        <div class="actions">
+          <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/approve"><button class="subtle">Approve</button></form>
+          <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/reject"><button class="subtle danger" style="color:#fff">Reject</button></form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% if current_memory %}
+    <h2 style="margin-top:14px">Active memory · v{{ current_memory.version_no }}
+      {% if can_promote %}<form method="post" action="/ui/agents/{{ agent.id }}/memory/rollback" style="display:inline"><button class="subtle">Roll back</button></form>{% endif %}
+    </h2>
+    <pre style="white-space:pre-wrap">{{ current_memory.content }}</pre>
+  {% elif not pending_memory %}
+    <div class="muted">No memory yet.</div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Eval runs</h2>
+    {% if eval_runs %}
+    <table>
+      <tr><th>Run</th><th>Version</th><th>Status</th><th>Pass rate</th><th>When</th></tr>
+      {% for r in eval_runs %}
+      <tr>
+        <td class="mono">{{ r.id|string|truncate(8, true, '') }}{% if r.memory_version_id %} <span class="badge pending">memory gate</span>{% endif %}</td>
+        <td>v{{ r.version_no }}</td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{% if r.pass_rate is not none %}<strong>{{ '%.0f%%'|format(r.pass_rate * 100) }}</strong>{% else %}—{% endif %}</td>
+        <td class="muted">{{ r.created_at.strftime('%m-%d %H:%M') }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}<div class="muted">No eval runs. {{ eval_case_count }} case(s) defined.</div>{% endif %}
+  </div>
+
+  <div class="panel">
+    <h2>Recent jobs</h2>
+    <table>
+      <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
+      {% for j in recent_jobs %}
+      <tr>
+        <td><a class="mono" href="/ui/jobs/{{ j.id }}">{{ j.id|string|truncate(8, true, '') }}</a>{% if j.is_eval %} <span class="badge opt">eval</span>{% endif %}</td>
+        <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
+        <td>{{ j.tokens_in + j.tokens_out }}</td>
+        <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}

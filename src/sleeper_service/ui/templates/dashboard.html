@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}Dashboard · {{ tenant.name }}{% endblock %}
+{% block content %}
+<div class="cards">
+  <div class="card"><div class="num">{{ stats.live_agents }}</div><div class="label">Live agents</div></div>
+  <div class="card"><div class="num">{{ stats.total_agents }}</div><div class="label">Total agents</div></div>
+  <div class="card"><div class="num">{{ stats.jobs_7d }}</div><div class="label">Jobs · 7 days</div></div>
+  <div class="card"><div class="num">{{ '%.1f%%'|format(stats.success_rate * 100) }}</div><div class="label">Success rate · 7 days</div></div>
+  <div class="card"><div class="num">${{ '%.4f'|format(stats.cost_30d) }}</div><div class="label">Spend · 30 days</div></div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Jobs per day by status</h2>
+    <canvas id="jobsChart" height="210"></canvas>
+  </div>
+  <div class="panel">
+    <h2>Tokens per day</h2>
+    <canvas id="tokensChart" height="210"></canvas>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Recent jobs</h2>
+  <table>
+    <tr><th>Job</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Created</th></tr>
+    {% for j in recent_jobs %}
+    <tr>
+      <td><a class="mono" href="/ui/jobs/{{ j.id }}">{{ j.id|string|truncate(8, true, '') }}</a></td>
+      <td><a href="/ui/agents/{{ j.agent_id }}">{{ j.agent_name }}</a></td>
+      <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
+      <td>{{ j.tokens_in + j.tokens_out }}</td>
+      <td>${{ '%.5f'|format(j.cost) }}</td>
+      <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<script src="/ui/static/vendor/chart.umd.min.js"></script>
+<script>
+const jobsData = {{ jobs_chart | safe }};
+const tokensData = {{ tokens_chart | safe }};
+const statusColors = {succeeded: "#16a34a", failed: "#dc2626", dead_letter: "#991b1b",
+  rejected: "#d97706", timeout: "#f59e0b", iteration_limit: "#f59e0b",
+  budget_exceeded: "#9333ea", running: "#2563eb", queued: "#6b7280"};
+new Chart(document.getElementById("jobsChart"), {
+  type: "bar",
+  data: {labels: jobsData.labels, datasets: jobsData.statuses.map(s => ({
+    label: s.name, data: s.counts, backgroundColor: statusColors[s.name] || "#6b7280"}))},
+  options: {scales: {x: {stacked: true}, y: {stacked: true, ticks: {precision: 0}}},
+            plugins: {legend: {position: "bottom"}}, responsive: true}
+});
+new Chart(document.getElementById("tokensChart"), {
+  type: "line",
+  data: {labels: tokensData.labels, datasets: [
+    {label: "tokens in", data: tokensData.tokens_in, borderColor: "#4f46e5", tension: .25},
+    {label: "tokens out", data: tokensData.tokens_out, borderColor: "#16a34a", tension: .25}]},
+  options: {plugins: {legend: {position: "bottom"}}, responsive: true,
+            scales: {y: {ticks: {precision: 0}}}}
+});
+</script>
+{% endblock %}

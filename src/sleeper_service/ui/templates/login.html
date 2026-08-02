@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in — Sleeper Service</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-box">
+    <h1>Sleeper Service</h1>
+    <div class="sub">One agent. One task. A thousand of them.</div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="post" action="/ui/login">
+      <label>Email</label>
+      <input type="email" name="email" required autofocus>
+      <label>Password</label>
+      <input type="password" name="password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
+</body>
+</html>

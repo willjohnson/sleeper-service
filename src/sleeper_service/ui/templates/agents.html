@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Agents · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}Agents · {{ tenant.name }}{% endblock %}
+{% block content %}
+{% for team in teams %}
+<div class="panel">
+  <h2>{{ team.name }}{% if team.is_org_team %} <span class="muted">(org-wide)</span>{% endif %}
+      <span class="muted" style="font-weight:400"> · your role: {{ team.role or '—' }}</span></h2>
+  {% if team.agents %}
+  <table>
+    <tr><th>Agent</th><th>Description</th><th>Options</th><th>Version</th><th>Jobs · 7d</th><th>Spend / limit</th></tr>
+    {% for a in team.agents %}
+    <tr>
+      <td><a href="/ui/agents/{{ a.id }}"><strong>{{ a.name }}</strong></a></td>
+      <td class="muted">{{ a.description|truncate(70) }}</td>
+      <td>
+        <div class="pill-row">
+          {% if a.options.get('delegation') in ('team', 'tenant') %}<span class="badge opt">delegates:{{ a.options['delegation'] }}</span>{% endif %}
+          {% if a.options.get('memory') %}<span class="badge opt">memory</span>{% endif %}
+          {% if a.options.get('learning') %}<span class="badge opt">learning</span>{% endif %}
+          {% if a.options.get('memory_approval') %}<span class="badge opt">approval</span>{% endif %}
+        </div>
+      </td>
+      <td>{% if a.version_no %}<span class="badge current">v{{ a.version_no }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{{ a.jobs_7d }}</td>
+      <td>
+        {% if a.spending_limit %}
+          <div class="mono">${{ '%.4f'|format(a.spend) }} / ${{ '%.2f'|format(a.spending_limit) }}</div>
+          <div class="meter"><div style="width: {{ [a.spend / a.spending_limit * 100, 100] | min }}%"></div></div>
+        {% else %}<span class="muted">${{ '%.4f'|format(a.spend) }} · no limit</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<div class="muted">No agents yet.</div>{% endif %}
+</div>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Sleeper Service{% endblock %}</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Sleeper Service<small>agent as a service</small></div>
+    {% if tenant %}
+    <a class="nav {% if section == 'dashboard' %}active{% endif %}" href="/ui/t/{{ tenant.id }}">Dashboard</a>
+    <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
+    {% endif %}
+    <div class="spacer"></div>
+    <div class="whoami">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</div>
+    <form method="post" action="/ui/logout"><button class="ghost" style="width:100%">Sign out</button></form>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <h1>{% block heading %}{% endblock %}</h1>
+      {% if tenants and tenants|length > 1 %}
+      <form method="get" action="/ui/switch">
+        <select name="tenant_id" onchange="this.form.submit()">
+          {% for t in tenants %}
+          <option value="{{ t.id }}" {% if tenant and t.id == tenant.id %}selected{% endif %}>{{ t.name }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      {% endif %}
+    </div>
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>
