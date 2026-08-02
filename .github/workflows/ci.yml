@@ -24,15 +24,14 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s
           --health-timeout 3s --health-retries 10
-      minio:
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: sleeper
-          MINIO_ROOT_PASSWORD: sleeper-minio-secret
-        ports: ["9000:9000"]
-
     steps:
       - uses: actions/checkout@v4
+      # a service container can't pass a command, so MinIO starts as a step
+      - name: Start MinIO
+        run: >
+          docker run -d -p 9000:9000
+          -e MINIO_ROOT_USER=sleeper -e MINIO_ROOT_PASSWORD=sleeper-minio-secret
+          minio/minio server /data
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
