@@ -122,6 +122,41 @@ async def test_budget_exceeded_preflight(client: AsyncClient, risk_agent: dict) 
     assert float(spend["spending_limit"]) == 0
 
 
+async def test_budget_exceeded_mid_run(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single job that accrues cost past the limit dies between model calls."""
+    from decimal import Decimal
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    r = await client.patch(f"/v1/agents/{agent_id}", headers=bob, json={"spending_limit": "0.05"})
+    assert r.status_code == 200
+
+    # A model that never produces the structured output keeps the loop going;
+    # each request "costs" 3 cents, so the second one crosses the 5-cent limit
+    # well before the iteration cap.
+    def chatty_model(*_args) -> FunctionModel:
+        async def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart("still thinking...")])
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", chatty_model)
+    monkeypatch.setattr(
+        runner, "_calc_cost", lambda usage, model_name: Decimal("0.03") * usage.requests
+    )
+
+    r = await _submit(client, bob, agent_id)
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "budget_exceeded"
+    assert "mid-run" in job["error"]
+    assert float(job["cost"]) == pytest.approx(0.06)  # accrued cost still recorded
+
+
 # --- Link allowlist ---
 
 

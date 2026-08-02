@@ -47,6 +47,10 @@ class TransientJobError(Exception):
     """Provider hiccup (429/5xx/network): worth retrying."""
 
 
+class _BudgetExceededMidRun(Exception):
+    """Accrued cost crossed the remaining monthly budget between model calls."""
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -92,22 +96,27 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         model_row = await db.get(Model, version.model_id)
 
         # Budget pre-flight (re-checked here so queued backlogs can't overrun);
-        # eval jobs are exempt — they neither consume nor get refused by limits
-        spend = None if job.is_eval else await spending.budget_exhausted(db, agent)
-        if spend is not None:
-            await _finalize(
-                job_id,
-                "budget_exceeded",
-                error=f"monthly spend {spend} reached limit {agent.spending_limit}",
-            )
-            await notify.notify(
-                agent.id,
-                "budget",
-                f"Sleeper Service: budget exceeded — {agent.name}",
-                f"Agent {agent.name} hit its monthly spending limit "
-                f"({spend} / {agent.spending_limit}). Jobs are being refused.",
-            )
-            return
+        # eval jobs are exempt — they neither consume nor get refused by limits.
+        # What's left of the month's budget also bounds this single run: the
+        # loop below re-checks accrued cost between model calls.
+        remaining_budget: Decimal | None = None
+        if not job.is_eval and agent.spending_limit is not None:
+            spend = await spending.month_spend(db, agent.id)
+            if spend >= agent.spending_limit:
+                await _finalize(
+                    job_id,
+                    "budget_exceeded",
+                    error=f"monthly spend {spend} reached limit {agent.spending_limit}",
+                )
+                await notify.notify(
+                    agent.id,
+                    "budget",
+                    f"Sleeper Service: budget exceeded — {agent.name}",
+                    f"Agent {agent.name} hit its monthly spending limit "
+                    f"({spend} / {agent.spending_limit}). Jobs are being refused.",
+                )
+                return
+            remaining_budget = agent.spending_limit - spend
 
         # Memory: inject the latest active version and pin it on the job.
         # A pre-pinned memory_version_id (eval-gate runs) wins — that's how a
@@ -219,10 +228,26 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     events: list[tuple[str, dict]] = []
     try:
         async with asyncio.timeout(timeout_s):
-            result = await pai_agent.run(user_content, usage_limits=limits)
+            # iter() instead of run(): between model calls, check the cost
+            # accrued so far against what's left of the monthly budget, so a
+            # runaway job is bounded by $ and not only by iterations/timeout.
+            async with pai_agent.iter(user_content, usage_limits=limits) as agent_run:
+                async for _node in agent_run:
+                    if remaining_budget is None:
+                        continue
+                    run_cost = _calc_cost(agent_run.usage, model_row.name)
+                    if run_cost >= remaining_budget:
+                        usage = agent_run.usage
+                        raise _BudgetExceededMidRun(
+                            f"mid-run cost {run_cost} reached the remaining monthly "
+                            f"budget {remaining_budget}"
+                        )
+                result = agent_run.result
         raw = result.output
         output = raw if isinstance(raw, dict) else {"text": raw}
         usage = result.usage
+    except _BudgetExceededMidRun as e:
+        status, error = "budget_exceeded", str(e)
     except TimeoutError:
         status, error = "timeout", f"Job exceeded wall-clock timeout of {timeout_s}s"
     except asyncio.CancelledError:
@@ -275,6 +300,14 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         model_name=model_row.name,
         extra_events=events,
     )
+    if status == "budget_exceeded":
+        await notify.notify(
+            agent.id,
+            "budget",
+            f"Sleeper Service: budget exceeded — {agent.name}",
+            f"Agent {agent.name} crossed its monthly spending limit mid-run "
+            f"({agent.spending_limit}); the job was stopped.",
+        )
 
 
 async def _finalize(
