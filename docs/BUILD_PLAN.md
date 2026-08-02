@@ -185,6 +185,7 @@ No fine-tuning anywhere — "learning" is curated context: cheap, reversible, au
 - **Learning** (requires memory): responses carry a **signed, single-job-scoped** feedback URL — only the party that received the result can vote (+/− plus optional one comment). A background job folds feedback into memory: reinforce what earned the +, derive a corrective rule from the − comment.
 - **Poisoning defense**: memory writes pass the same injection screening as inbound payloads — the attack to block is a malicious payload persisting "always approve X" into the agent's own notes.
 - **Eval gate on memory edits** (once Phase 4 lands): a memory edit triggers the agent's eval suite; a regression alerts the owning team via its notification channel, with one-click rollback to the prior memory version. Lessons get verified, not just absorbed.
+- **Governance (decided 2026-08-02):** enabling `memory` / `learning` / `memory_approval` on an agent requires the team **owner** (editors manage everything else). With `memory_approval` on, every memory write — agent proposals and feedback folds — lands as a *pending* memory version: not injected, queued for owner approval/rejection, with the gating eval run's pass rate shown alongside. Rollback retires the latest active version. Memory versions carry a status (`active`/`pending`/`rejected`); only active versions are ever injected.
 
 ## Phases
 
@@ -200,15 +201,15 @@ Pre/post-hook framework (injection screen, schema check, PII redaction stub), sp
 **Phase 3 — Delegation, memory, learning** ✅ *completed 2026-08-02 (feedback fold is deterministic — corrective rules from comments, no LLM judge; memory compaction = oldest-lessons-first at the size cap)*
 `call_agent` + `list_agents` (rolodex) tools with permission gates, job trees, depth/budget guardrails; memory injection + post-hook writes; feedback endpoint + memory-folding job. ✅ *Done when: risk-analyzer discovers and delegates to notifier via the catalog, the job tree is auditable, and a −1 vote with comment visibly changes MEMORY.*
 
-**Phase 4 — Evals, UI, runners**
+**Phase 4 — Evals, UI, runners** 🔶 *eval harness, eval gate on memory edits, and learning governance shipped 2026-08-02; remaining: admin UI (fastapi-users + OIDC, org chart, stats, promotion UI), version aliases, sandboxed code runners + code graders*
 Eval harness (design below): deterministic checks against structured outputs first. Admin UI (per-tenant, fastapi-users login + optional OIDC, tenant switcher): agent org chart, live-agent count, jobs and token charts, version promotion/rollback and alias management (lean on Langfuse for the deep views). Sandboxed code runners (design below). Wire memory edits to eval runs (the eval gate in Memory & learning). ✅ *Done when: two branches of one agent are compared on a 20-case suite and the winner is promoted to current version from the UI by a team owner; a memory edit that regresses the suite triggers an alert and is rolled back in one click.*
 
 ## Eval design (kept simple)
 
 A test case is just a saved job input plus a list of checks. Because agent outputs are already typed JSON (the output schema), most grading is deterministic and free — no LLM required:
 
-1. **Field checks (v1)** — assertions on the output JSON: `equals`, `contains`, `in_range`, `matches_regex`, `is_valid` (schema alone). Example for risk-analyzer: input = "AAPL down 6%, storm in STL", checks = `risk_level == "high"`, `factors contains "weather"`. A suite is N cases; a run executes them against any version or branch and reports pass rate; two runs side-by-side = branch comparison; winner gets promoted to current version.
-2. **Code graders (v1, optional)** — a small Python function per case (`grade(output) -> pass/fail`) for logic beyond simple assertions.
+1. **Field checks (v1)** ✅ *shipped 2026-08-02* — assertions on the output JSON: `equals`, `contains`, `in_range`, `matches_regex`, `is_valid` (schema alone). Example for risk-analyzer: input = "AAPL down 6%, storm in STL", checks = `risk_level == "high"`, `factors contains "weather"`. A suite is N cases; a run executes them against any version or branch and reports pass rate; two runs side-by-side = branch comparison; winner gets promoted to current version.
+2. **Code graders (v1, optional)** — a small Python function per case (`grade(output) -> pass/fail`) for logic beyond simple assertions. *Deferred until the sandboxed runner lands: executing editor-supplied Python in-worker without isolation would be RCE by design (decided 2026-08-02).*
 3. **LLM-as-judge (later)** — a pinned judge model scores free-text fields against a rubric. Costs tokens, adds noise, and the rubric itself needs versioning — deferred until field checks prove insufficient.
 
 Tables: `eval_cases (agent_id, input, checks[])`, `eval_runs (agent_version_id, results, pass_rate)`. Eval jobs reuse the normal job pipeline (so hooks and tracing apply) but skip callbacks and don't count against production spending limits.
