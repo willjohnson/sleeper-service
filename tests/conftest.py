@@ -9,11 +9,15 @@ import uuid
 
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://sleeper:sleeper@localhost:5433/sleeper_test"
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
+# Redis db 1: isolates test enqueues/rate-limit counters from the compose worker (db 0)
+os.environ["REDIS_URL"] = "redis://localhost:6380/1"
+os.environ["MINIO_BUCKET"] = "sleeper-files-test"
+os.environ["LANGFUSE_HOST"] = ""  # never export test traces (overrides .env)
 
 import asyncpg
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
+from sqlalchemy import text
 
 from sleeper_service.auth.keys import generate_key
 from sleeper_service.auth.passwords import hash_password
@@ -37,12 +41,19 @@ async def _database() -> None:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
+    # ASGITransport skips lifespan, so create the test bucket here
+    from sleeper_service import storage
+
+    await storage.ensure_bucket()
+
 
 @pytest.fixture(autouse=True)
 async def _clean_tables(_database: None) -> None:
+    # TRUNCATE ... CASCADE in one statement: handles the agents ↔ agent_versions
+    # FK cycle that row-by-row deletes cannot.
+    names = ", ".join(t.name for t in Base.metadata.sorted_tables)
     async with get_sessionmaker()() as session:
-        for table in reversed(Base.metadata.sorted_tables):
-            await session.execute(delete(table))
+        await session.execute(text(f"TRUNCATE {names} CASCADE"))
         await session.commit()
 
 
@@ -91,3 +102,98 @@ async def bootstrap() -> Bootstrap:
 
 def auth(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
+
+
+@pytest.fixture
+async def org(client: AsyncClient, bootstrap: Bootstrap) -> dict:
+    """A tenant with a 'risk' team and users alice (owner), bob (editor),
+    carol (viewer), dave (no membership)."""
+    root = auth(bootstrap.superuser_key)
+
+    r = await client.post("/v1/tenants", headers=root, json={"name": "acme"})
+    assert r.status_code == 201
+    tenant = r.json()
+
+    users = {}
+    for name in ("alice", "bob", "carol", "dave"):
+        r = await client.post(
+            "/v1/users",
+            headers=root,
+            json={"email": f"{name}@example.com", "password": "password-123"},
+        )
+        assert r.status_code == 201
+        users[name] = r.json()
+
+    r = await client.post(
+        f"/v1/tenants/{tenant['id']}/teams",
+        headers=root,
+        json={"name": "risk", "owner_user_id": users["alice"]["id"]},
+    )
+    assert r.status_code == 201
+    team = r.json()
+
+    alice = auth(users["alice"]["api_key"])
+    for name, role in (("bob", "editor"), ("carol", "viewer")):
+        r = await client.put(
+            f"/v1/teams/{team['id']}/members/{users[name]['id']}",
+            headers=alice,
+            json={"role": role},
+        )
+        assert r.status_code == 200
+
+    return {"tenant": tenant, "team": team, "users": users}
+
+
+RISK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+        "factors": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+    },
+    "required": ["risk_level", "factors", "summary"],
+}
+
+
+@pytest.fixture
+async def seeded_models(bootstrap: Bootstrap) -> None:
+    from sleeper_service.db.models import Model
+
+    async with get_sessionmaker()() as db:
+        db.add(Model(provider="test", name="default", model_string="test:default"))
+        db.add(
+            Model(
+                provider="anthropic",
+                name="claude-sonnet-5",
+                model_string="anthropic:claude-sonnet-5",
+            )
+        )
+        await db.commit()
+
+
+@pytest.fixture
+async def risk_agent(client: AsyncClient, org: dict, seeded_models: None) -> dict:
+    """An agent with one promoted version on the test model, typed output."""
+    bob = auth(org["users"]["bob"]["api_key"])
+    r = await client.post(
+        "/v1/agents",
+        headers=bob,
+        json={
+            "team_id": org["team"]["id"],
+            "name": "risk-analyzer",
+            "description": "Assess business risk",
+        },
+    )
+    assert r.status_code == 201
+    agent = r.json()
+    r = await client.post(
+        f"/v1/agents/{agent['id']}/versions",
+        headers=bob,
+        json={
+            "prompt": "Assess business risk for the event in the payload.",
+            "model": "test/default",
+            "output_schema": RISK_SCHEMA,
+        },
+    )
+    assert r.status_code == 201
+    return {"agent": agent, "version": r.json(), **org}

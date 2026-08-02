@@ -52,15 +52,11 @@ async def _get_agent_for(
         and isinstance(principal, UserPrincipal)
         and not has_role(principal, agent.team_id, Role.EDITOR)
     ):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Submitting jobs requires editor role"
-        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Submitting jobs requires editor role")
     return agent
 
 
-async def _resolve_version(
-    db: AsyncSession, agent: Agent, body: JobSubmit
-) -> AgentVersion:
+async def _resolve_version(db: AsyncSession, agent: Agent, body: JobSubmit) -> AgentVersion:
     if body.agent_version_id is not None:
         version = await db.get(AgentVersion, body.agent_version_id)
         if version is None or version.agent_id != agent.id:
@@ -83,9 +79,7 @@ async def _resolve_version(
     return await db.get(AgentVersion, agent.current_version_id)
 
 
-@router.post(
-    "/agents/{agent_id}/jobs", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED
-)
+@router.post("/agents/{agent_id}/jobs", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
 async def submit_job(
     agent_id: uuid.UUID,
     body: JobSubmit,
@@ -99,15 +93,11 @@ async def submit_job(
     for file_id in body.context.files:
         file = await db.get(File, file_id)
         if file is None or file.tenant_id != agent.tenant_id:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}"
-            )
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
 
     if body.idempotency_key is not None:
         existing = await db.scalar(
-            select(Job).where(
-                Job.agent_id == agent.id, Job.idempotency_key == body.idempotency_key
-            )
+            select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == body.idempotency_key)
         )
         if existing is not None:
             return existing
@@ -127,9 +117,7 @@ async def submit_job(
         # Concurrent submit with the same idempotency key: return the winner.
         await db.rollback()
         existing = await db.scalar(
-            select(Job).where(
-                Job.agent_id == agent.id, Job.idempotency_key == body.idempotency_key
-            )
+            select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == body.idempotency_key)
         )
         if existing is not None:
             return existing
@@ -157,9 +145,7 @@ async def submit_job(
     return job
 
 
-async def _get_job_for(
-    db: AsyncSession, principal: Principal, job_id: uuid.UUID
-) -> Job:
+async def _get_job_for(db: AsyncSession, principal: Principal, job_id: uuid.UUID) -> Job:
     job = await db.get(Job, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
@@ -184,7 +170,5 @@ async def get_job_events(
 ) -> list[JobEvent]:
     await _get_job_for(db, principal, job_id)
     return list(
-        await db.scalars(
-            select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
-        )
+        await db.scalars(select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id))
     )

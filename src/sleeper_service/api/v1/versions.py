@@ -27,9 +27,7 @@ async def resolve_model(db: AsyncSession, model_ref: str) -> Model:
     model = await db.scalar(select(Model).where(Model.model_string == model_ref))
     if model is None and "/" in model_ref:
         provider, _, name = model_ref.partition("/")
-        model = await db.scalar(
-            select(Model).where(Model.provider == provider, Model.name == name)
-        )
+        model = await db.scalar(select(Model).where(Model.provider == provider, Model.name == name))
     if model is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -236,7 +236,7 @@ class JobSubmit(BaseModel):
     context: JobContext
     callback_url: str | None = None
     agent_version_id: uuid.UUID | None = None  # pin an exact version
-    version_no: int | None = None              # or pin by number
+    version_no: int | None = None  # or pin by number
     idempotency_key: str | None = Field(default=None, max_length=200)
     user_ctx: dict | None = None
 

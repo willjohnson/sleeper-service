@@ -16,9 +16,7 @@ from sleeper_service.crypto import decrypt
 from sleeper_service.db.models import ProviderCred
 
 
-async def resolve_api_key(
-    db: AsyncSession, tenant_id: uuid.UUID, provider: str
-) -> str | None:
+async def resolve_api_key(db: AsyncSession, tenant_id: uuid.UUID, provider: str) -> str | None:
     cred = await db.scalar(
         select(ProviderCred).where(
             ProviderCred.scope == KeyScope.TENANT,

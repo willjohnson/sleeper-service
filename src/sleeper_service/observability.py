@@ -27,16 +27,12 @@ def setup_tracing() -> bool:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from pydantic_ai import Agent
 
-    auth = base64.b64encode(
-        f"{s.langfuse_public_key}:{s.langfuse_secret_key}".encode()
-    ).decode()
+    auth = base64.b64encode(f"{s.langfuse_public_key}:{s.langfuse_secret_key}".encode()).decode()
     exporter = OTLPSpanExporter(
         endpoint=f"{s.langfuse_host.rstrip('/')}/api/public/otel/v1/traces",
         headers={"Authorization": f"Basic {auth}"},
     )
-    provider = TracerProvider(
-        resource=Resource.create({"service.name": "sleeper-service"})
-    )
+    provider = TracerProvider(resource=Resource.create({"service.name": "sleeper-service"}))
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     Agent.instrument_all(True)

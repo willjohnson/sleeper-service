@@ -89,14 +89,15 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     instructions = "\n\n".join(
         p for p in (tenant.system_prompt.strip(), version.prompt.strip()) if p
     )
-    output_type = (
-        StructuredDict(version.output_schema) if version.output_schema else str
-    )
+    output_type = StructuredDict(version.output_schema) if version.output_schema else str
     pai_agent = PaiAgent(
         model,
         instructions=instructions,
         output_type=output_type,
         model_settings=version.params or None,
+        # Retries stay above the request cap so max_iterations is the binding
+        # guardrail (UsageLimitExceeded → iteration_limit, a first-class status).
+        retries=version.max_iterations,
     )
     limits = UsageLimits(request_limit=version.max_iterations)
     timeout_s = version.timeout_s
@@ -114,7 +115,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
             result = await pai_agent.run(user_content, usage_limits=limits)
         raw = result.output
         output = raw if isinstance(raw, dict) else {"text": raw}
-        usage = result.usage()
+        usage = result.usage
     except TimeoutError:
         status, error = "timeout", f"Job exceeded wall-clock timeout of {timeout_s}s"
     except UsageLimitExceeded as e:

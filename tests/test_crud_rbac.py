@@ -2,49 +2,9 @@
 
 import uuid
 
-import pytest
 from httpx import AsyncClient
 
 from tests.conftest import Bootstrap, auth
-
-
-@pytest.fixture
-async def org(client: AsyncClient, bootstrap: Bootstrap) -> dict:
-    """A tenant with a 'risk' team and three users: owner, editor, viewer."""
-    root = auth(bootstrap.superuser_key)
-
-    r = await client.post("/v1/tenants", headers=root, json={"name": "acme"})
-    assert r.status_code == 201
-    tenant = r.json()
-
-    users = {}
-    for name in ("alice", "bob", "carol", "dave"):
-        r = await client.post(
-            "/v1/users",
-            headers=root,
-            json={"email": f"{name}@example.com", "password": "password-123"},
-        )
-        assert r.status_code == 201
-        users[name] = r.json()
-
-    r = await client.post(
-        f"/v1/tenants/{tenant['id']}/teams",
-        headers=root,
-        json={"name": "risk", "owner_user_id": users["alice"]["id"]},
-    )
-    assert r.status_code == 201
-    team = r.json()
-
-    alice = auth(users["alice"]["api_key"])
-    for name, role in (("bob", "editor"), ("carol", "viewer")):
-        r = await client.put(
-            f"/v1/teams/{team['id']}/members/{users[name]['id']}",
-            headers=alice,
-            json={"role": role},
-        )
-        assert r.status_code == 200
-
-    return {"tenant": tenant, "team": team, "users": users}
 
 
 async def test_tenant_creation_requires_superuser(client: AsyncClient, org: dict) -> None:

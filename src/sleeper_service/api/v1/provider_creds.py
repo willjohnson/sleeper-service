@@ -22,9 +22,7 @@ from sleeper_service.db.session import get_db
 router = APIRouter(prefix="/tenants/{tenant_id}/provider-creds", tags=["provider-creds"])
 
 
-async def _admin_gate(
-    tenant_id: uuid.UUID, db: AsyncSession, principal: UserPrincipal
-) -> None:
+async def _admin_gate(tenant_id: uuid.UUID, db: AsyncSession, principal: UserPrincipal) -> None:
     if await db.get(Tenant, tenant_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     await require_tenant_admin(db, principal, tenant_id)
