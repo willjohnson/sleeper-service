@@ -30,6 +30,8 @@ dependencies = [
     "jsonschema>=4.26.0",
     "jinja2>=3.1.6",
     "itsdangerous>=2.2.0",
+    "adlfs>=2024.12",
+    "gcsfs>=2025.1",
 ]
 
 [project.scripts]

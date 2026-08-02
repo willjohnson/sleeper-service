@@ -360,6 +360,44 @@ async def test_store_tools_scoping(client: AsyncClient, risk_agent: dict, bootst
     assert await rw_fns["read_file"]("refdata", "out.txt") == "written"
 
 
+async def test_azure_blob_and_gcs_store_mapping() -> None:
+    """Blob/GCS grants map to the right fsspec filesystem and root (no live
+    cloud account in CI — filesystem construction is offline)."""
+    from sleeper_service.crypto import encrypt
+    from sleeper_service.db.models import DataStore
+    from sleeper_service.runtime.toolsets import _StoreGrant
+
+    blob = DataStore(
+        tenant_id=uuid.uuid4(),
+        name="blob",
+        type="azure_blob",
+        config={"container": "refdata"},
+        credentials_enc=encrypt(
+            json.dumps(
+                {
+                    "connection_string": "DefaultEndpointsProtocol=https;AccountName=acct;"
+                    "AccountKey=eA==;EndpointSuffix=core.windows.net"
+                }
+            )
+        ),
+    )
+    fs, root = _StoreGrant(blob, "ref", "ro").fs_and_root()
+    assert type(fs).__name__ == "AzureBlobFileSystem"
+    assert "AccountName=acct" in fs.connection_string
+    assert root == "refdata"
+
+    gcs = DataStore(
+        tenant_id=uuid.uuid4(),
+        name="gcs",
+        type="gcs",
+        config={"bucket": "sleeper-ref"},
+        credentials_enc=encrypt(json.dumps({"token": "anon"})),
+    )
+    fs, root = _StoreGrant(gcs, "", "ro").fs_and_root()
+    assert "gcs" in fs.protocol
+    assert root == "sleeper-ref"
+
+
 # --- Flaky model → DLQ → notification ---
 
 

@@ -324,9 +324,12 @@ class McpServerOut(OrmModel):
 class DataStoreCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: str = Field(pattern="^(s3|azure_blob|gcs|box|local)$")
-    # s3: {"bucket": ..., "endpoint_url": optional}; local: {"base_path": ...}
+    # s3: {"bucket": ..., "endpoint_url": optional}; azure_blob: {"container": ...,
+    # "account_name": optional}; gcs: {"bucket": ...}; local: {"base_path": ...}
     config: dict = Field(default_factory=dict)
-    # s3: {"access_key": ..., "secret_key": ...} — encrypted at rest
+    # encrypted at rest. s3: {"access_key", "secret_key"}; azure_blob: any of
+    # {"connection_string"} | {"account_name", "account_key"} | {"sas_token"};
+    # gcs: {"token": service-account info dict or key-file path} (omit for ADC)
     credentials: dict | None = None
 
 

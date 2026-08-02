@@ -98,18 +98,30 @@ class _StoreGrant:
 
     def fs_and_root(self) -> tuple[fsspec.AbstractFileSystem, str]:
         cfg = self.store.config or {}
+        creds = (
+            json.loads(decrypt(self.store.credentials_enc)) if self.store.credentials_enc else {}
+        )
         if self.store.type == "s3":
-            creds = (
-                json.loads(decrypt(self.store.credentials_enc))
-                if self.store.credentials_enc
-                else {}
-            )
             fs = fsspec.filesystem(
                 "s3",
                 key=creds.get("access_key"),
                 secret=creds.get("secret_key"),
                 endpoint_url=cfg.get("endpoint_url"),
             )
+            return fs, cfg["bucket"]
+        if self.store.type == "azure_blob":
+            fs = fsspec.filesystem(
+                "abfs",
+                account_name=creds.get("account_name") or cfg.get("account_name"),
+                account_key=creds.get("account_key"),
+                connection_string=creds.get("connection_string"),
+                sas_token=creds.get("sas_token"),
+            )
+            return fs, cfg["container"]
+        if self.store.type == "gcs":
+            # token: service-account info dict, a key-file path, or omitted to
+            # fall back to application default credentials
+            fs = fsspec.filesystem("gcs", token=creds.get("token"))
             return fs, cfg["bucket"]
         if self.store.type == "local":
             return fsspec.filesystem("file"), cfg["base_path"].rstrip("/")
