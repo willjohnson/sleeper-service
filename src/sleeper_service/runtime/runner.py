@@ -139,7 +139,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         db.add(JobEvent(job_id=job.id, type="started", data={}))
         await db.commit()
 
-        api_key = await resolve_api_key(db, agent.tenant_id, model_row.provider)
+        api_key = await resolve_api_key(db, agent, model_row.provider)
         try:
             toolsets = await build_mcp_toolsets(
                 db, agent.tenant_id, version.tool_grants or [], job.user_ctx

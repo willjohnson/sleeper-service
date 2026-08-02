@@ -1,11 +1,10 @@
-"""Provider model construction with per-tenant credential resolution.
+"""Provider model construction with scoped credential resolution.
 
-Order: tenant provider credential (encrypted row) → process environment
-(pydantic-ai's own env-var lookup). The `test` provider maps to pydantic-ai's
-TestModel so demos, tests, and CI run without vendor keys.
+Order: agent → team → tenant provider credential (encrypted rows; narrowest
+wins, so spend maps to the vendor bill at the right level) → process
+environment (pydantic-ai's own env-var lookup). The `test` provider maps to
+pydantic-ai's TestModel so demos, tests, and CI run without vendor keys.
 """
-
-import uuid
 
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models import Model as PaiModel
@@ -14,18 +13,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.constants import KeyScope
 from sleeper_service.crypto import decrypt
-from sleeper_service.db.models import ProviderCred
+from sleeper_service.db.models import Agent, ProviderCred
 
 
-async def resolve_api_key(db: AsyncSession, tenant_id: uuid.UUID, provider: str) -> str | None:
-    cred = await db.scalar(
-        select(ProviderCred).where(
-            ProviderCred.scope == KeyScope.TENANT,
-            ProviderCred.scope_id == tenant_id,
-            ProviderCred.provider == provider,
+async def resolve_api_key(db: AsyncSession, agent: Agent, provider: str) -> str | None:
+    for scope, scope_id in (
+        (KeyScope.AGENT, agent.id),
+        (KeyScope.TEAM, agent.team_id),
+        (KeyScope.TENANT, agent.tenant_id),
+    ):
+        cred = await db.scalar(
+            select(ProviderCred).where(
+                ProviderCred.scope == scope,
+                ProviderCred.scope_id == scope_id,
+                ProviderCred.provider == provider,
+            )
         )
-    )
-    return decrypt(cred.credentials_enc) if cred else None
+        if cred is not None:
+            return decrypt(cred.credentials_enc)
+    return None
 
 
 def build_model(model_string: str, api_key: str | None) -> PaiModel | str:

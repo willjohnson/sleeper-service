@@ -167,3 +167,52 @@ async def test_nonexistent_resources_404(client: AsyncClient, org: dict) -> None
     assert (await client.get(f"/v1/agents/{missing}", headers=alice)).status_code == 404
     assert (await client.get(f"/v1/teams/{missing}", headers=alice)).status_code == 404
     assert (await client.get(f"/v1/tenants/{missing}", headers=alice)).status_code == 404
+
+
+async def test_provider_cred_scopes(client: AsyncClient, risk_agent: dict) -> None:
+    """Team/agent creds: owner-managed, and resolution walks agent → team → tenant."""
+    from sleeper_service.db.session import get_sessionmaker
+    from sleeper_service.runtime.providers import resolve_api_key
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    tenant_id = risk_agent["tenant"]["id"]
+    team_id = risk_agent["team"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+
+    # editors cannot manage creds at any scope
+    for path in (
+        f"/v1/teams/{team_id}/provider-creds/openai",
+        f"/v1/agents/{agent_id}/provider-creds/openai",
+    ):
+        r = await client.put(path, headers=bob, json={"api_key": "sk-nope"})
+        assert r.status_code == 403
+    # alice owns the risk team but is not a tenant admin
+    r = await client.put(
+        f"/v1/tenants/{tenant_id}/provider-creds/openai", headers=alice, json={"api_key": "sk-t"}
+    )
+    assert r.status_code == 403
+
+    # team owner sets team- and agent-scoped creds
+    r = await client.put(
+        f"/v1/teams/{team_id}/provider-creds/openai", headers=alice, json={"api_key": "sk-team"}
+    )
+    assert r.status_code == 200 and r.json()["scope"] == "team"
+    r = await client.put(
+        f"/v1/agents/{agent_id}/provider-creds/openai", headers=alice, json={"api_key": "sk-agent"}
+    )
+    assert r.status_code == 200 and r.json()["scope"] == "agent"
+    assert len((await client.get(f"/v1/teams/{team_id}/provider-creds", headers=alice)).json()) == 1
+
+    # narrowest scope wins; deleting it falls back outward
+    async with get_sessionmaker()() as db:
+        from sleeper_service.db.models import Agent
+
+        agent = await db.get(Agent, uuid.UUID(agent_id))
+        assert await resolve_api_key(db, agent, "openai") == "sk-agent"
+        assert await resolve_api_key(db, agent, "anthropic") is None
+    r = await client.delete(f"/v1/agents/{agent_id}/provider-creds/openai", headers=alice)
+    assert r.status_code == 204
+    async with get_sessionmaker()() as db:
+        agent = await db.get(Agent, uuid.UUID(agent_id))
+        assert await resolve_api_key(db, agent, "openai") == "sk-team"
