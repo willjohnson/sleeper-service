@@ -3,9 +3,13 @@ from fastapi import APIRouter
 from sleeper_service.api.v1 import (
     agents,
     api_keys,
+    data_stores,
+    events,
     files,
     jobs,
+    mcp_servers,
     models,
+    notif_channels,
     provider_creds,
     teams,
     tenants,
@@ -24,3 +28,7 @@ v1_router.include_router(models.router)
 v1_router.include_router(provider_creds.router)
 v1_router.include_router(files.router)
 v1_router.include_router(jobs.router)
+v1_router.include_router(mcp_servers.router)
+v1_router.include_router(data_stores.router)
+v1_router.include_router(notif_channels.router)
+v1_router.include_router(events.router)

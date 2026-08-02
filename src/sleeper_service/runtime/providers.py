@@ -7,6 +7,7 @@ TestModel so demos, tests, and CI run without vendor keys.
 
 import uuid
 
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models import Model as PaiModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,17 @@ def build_model(model_string: str, api_key: str | None) -> PaiModel | str:
     provider_name, _, model_name = model_string.partition(":")
 
     if provider_name == "test":
+        if model_name == "flaky":
+            # Always raises a retryable 503 — exercises the DLQ/alerting path
+            # in demos and tests without a real provider outage.
+            from pydantic_ai.messages import ModelResponse
+            from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+            def _raise_503(messages: list, info: AgentInfo) -> ModelResponse:
+                raise ModelHTTPError(status_code=503, model_name="test:flaky")
+
+            return FunctionModel(_raise_503)
+
         from pydantic_ai.models.test import TestModel
 
         return TestModel()

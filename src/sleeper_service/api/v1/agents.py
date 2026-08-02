@@ -105,6 +105,25 @@ async def update_agent(
     return agent
 
 
+@router.get("/{agent_id}/spend")
+async def get_agent_spend(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> dict:
+    from sleeper_service.api.v1.schemas import SpendOut
+    from sleeper_service.runtime import spending
+
+    agent = await _get_visible_agent(agent_id, db, principal)
+    spend = await spending.month_spend(db, agent_id)
+    return SpendOut(
+        agent_id=agent_id,
+        month_start=spending.month_start(),
+        spend=spend,
+        spending_limit=agent.spending_limit,
+    ).model_dump()
+
+
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_agent(
     agent_id: uuid.UUID,

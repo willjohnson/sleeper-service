@@ -66,6 +66,7 @@ SEED_MODELS = [
     ("anthropic", "claude-opus-5", "anthropic:claude-opus-5"),
     ("anthropic", "claude-haiku-4-5", "anthropic:claude-haiku-4-5-20251001"),
     ("test", "default", "test:default"),
+    ("test", "flaky", "test:flaky"),  # always-503 model for DLQ/alerting demos
 ]
 
 

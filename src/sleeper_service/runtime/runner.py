@@ -1,9 +1,10 @@
-"""Job execution: the PydanticAI loop with runtime guardrails.
+"""Job execution: pre-hooks → PydanticAI loop → post-hooks, with guardrails.
 
-Statuses written here are terminal (succeeded / failed / iteration_limit /
-timeout) except for transient provider failures, which raise
-TransientJobError so the caller decides: the arq worker retries with backoff
-(dead_letter after max tries), the sync API path fails the job immediately.
+Statuses written here are terminal (succeeded / failed / rejected /
+budget_exceeded / iteration_limit / timeout) except for transient provider
+failures, which raise TransientJobError so the caller decides: the arq worker
+retries with backoff (dead_letter after max tries), the sync API path fails
+the job immediately.
 """
 
 import asyncio
@@ -29,7 +30,13 @@ from sleeper_service.db.models import (
     Tenant,
 )
 from sleeper_service.db.session import get_sessionmaker
+from sleeper_service.runtime import hooks, links, notify, spending
 from sleeper_service.runtime.providers import build_model, resolve_api_key
+from sleeper_service.runtime.toolsets import (
+    GrantError,
+    build_mcp_toolsets,
+    build_store_toolset,
+)
 
 TEXT_TYPES = ("text/", "application/json", "application/xml", "application/csv")
 
@@ -51,8 +58,10 @@ def _calc_cost(usage: RunUsage, model_name: str) -> Decimal:
         return Decimal(0)
 
 
-async def _build_user_content(payload: dict) -> list:
-    content: list = [payload["prompt"]]
+async def _load_file_content(payload: dict) -> tuple[list, list[str]]:
+    """Returns (model content parts, untrusted text for injection screening)."""
+    parts: list = []
+    texts: list[str] = []
     for file_id in payload.get("files", []):
         async with get_sessionmaker()() as db:
             file = await db.get(File, uuid.UUID(file_id))
@@ -61,10 +70,12 @@ async def _build_user_content(payload: dict) -> list:
         data = await storage.get_object(file.object_key)
         if file.content_type.startswith(TEXT_TYPES):
             name = file.object_key.rsplit("/", 1)[-1]
-            content.append(f"\n--- file: {name} ---\n{data.decode(errors='replace')}")
+            block = f"\n--- file: {name} ---\n{data.decode(errors='replace')}"
+            parts.append(block)
+            texts.append(block)
         else:
-            content.append(BinaryContent(data=data, media_type=file.content_type))
-    return content
+            parts.append(BinaryContent(data=data, media_type=file.content_type))
+    return parts, texts
 
 
 async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
@@ -78,12 +89,66 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         tenant = await db.get(Tenant, agent.tenant_id)
         model_row = await db.get(Model, version.model_id)
 
+        # Budget pre-flight (re-checked here so queued backlogs can't overrun)
+        spend = await spending.budget_exhausted(db, agent)
+        if spend is not None:
+            await _finalize(
+                job_id,
+                "budget_exceeded",
+                error=f"monthly spend {spend} reached limit {agent.spending_limit}",
+            )
+            await notify.notify(
+                agent.id,
+                "budget",
+                f"Sleeper Service: budget exceeded — {agent.name}",
+                f"Agent {agent.name} hit its monthly spending limit "
+                f"({spend} / {agent.spending_limit}). Jobs are being refused.",
+            )
+            return
+
         job.status = "running"
         job.started_at = _now()
         db.add(JobEvent(job_id=job.id, type="started", data={}))
         await db.commit()
 
         api_key = await resolve_api_key(db, agent.tenant_id, model_row.provider)
+        try:
+            toolsets = await build_mcp_toolsets(
+                db, agent.tenant_id, version.tool_grants or [], job.user_ctx
+            )
+            store_toolset = await build_store_toolset(
+                db, agent.tenant_id, version.data_store_grants or []
+            )
+            if store_toolset is not None:
+                toolsets.append(store_toolset)
+        except GrantError as e:
+            await _finalize(job_id, "failed", error=str(e))
+            return
+
+    # Assemble user content; collect untrusted text for the injection screen
+    prompt_text = job.payload["prompt"]
+    file_parts, file_texts = await _load_file_content(job.payload)
+    link_blocks = await links.fetch_links(job.payload.get("links", []))
+    user_content: list = [prompt_text, *file_parts, *link_blocks]
+    untrusted = [prompt_text, *file_texts, *link_blocks]
+
+    # Pre-hook: injection screen (default on)
+    if hooks.injection_screen_enabled(tenant.settings or {}, agent.options or {}):
+        matched = hooks.screen_injection(untrusted)
+        if matched is not None:
+            async with sessionmaker() as db:
+                db.add(
+                    JobEvent(
+                        job_id=job_id,
+                        type="injection_detected",
+                        data={"rule": matched},
+                    )
+                )
+                await db.commit()
+            await _finalize(
+                job_id, "rejected", error=f"prompt-injection screen matched rule: {matched}"
+            )
+            return
 
     model = build_model(model_row.model_string, api_key)
     instructions = "\n\n".join(
@@ -95,6 +160,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         instructions=instructions,
         output_type=output_type,
         model_settings=version.params or None,
+        toolsets=toolsets or None,
         # Retries stay above the request cap so max_iterations is the binding
         # guardrail (UsageLimitExceeded → iteration_limit, a first-class status).
         retries=version.max_iterations,
@@ -104,12 +170,11 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     if sync_cap:
         timeout_s = min(timeout_s, get_settings().sync_job_timeout_s)
 
-    user_content = await _build_user_content(job.payload)
-
     status = "succeeded"
     output: dict | None = None
     error: str | None = None
     usage: RunUsage | None = None
+    events: list[tuple[str, dict]] = []
     try:
         async with asyncio.timeout(timeout_s):
             result = await pai_agent.run(user_content, usage_limits=limits)
@@ -122,25 +187,53 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         status, error = "iteration_limit", str(e)
     except ModelHTTPError as e:
         if e.status_code == 429 or e.status_code >= 500:
-            await _record_transient(job_id, str(e))
+            await _record_event(job_id, "transient_error", {"error": str(e)})
             raise TransientJobError(str(e)) from e
         status, error = "failed", str(e)
     except httpx.TransportError as e:
-        await _record_transient(job_id, str(e))
+        await _record_event(job_id, "transient_error", {"error": str(e)})
         raise TransientJobError(str(e)) from e
     except Exception as e:
         status, error = "failed", f"{type(e).__name__}: {e}"
 
-    async with sessionmaker() as db:
+    # Post-hooks
+    if status == "succeeded" and version.output_schema:
+        schema_error = hooks.validate_output_schema(output, version.output_schema)
+        if schema_error is not None:
+            status, error, output = "failed", schema_error, None
+    if status == "succeeded" and hooks.pii_redaction_enabled(agent.options or {}):
+        output, redactions = hooks.redact_pii(output)
+        if redactions:
+            events.append(("pii_redacted", {"count": redactions}))
+
+    await _finalize(job_id, status, output=output, error=error, usage=usage,
+                    model_name=model_row.name, extra_events=events)
+
+
+async def _finalize(
+    job_id: uuid.UUID,
+    status: str,
+    *,
+    output: dict | None = None,
+    error: str | None = None,
+    usage: RunUsage | None = None,
+    model_name: str | None = None,
+    extra_events: list[tuple[str, dict]] | None = None,
+) -> None:
+    async with get_sessionmaker()() as db:
         job = await db.get(Job, job_id)
+        if job is None:
+            return
         job.status = status
         job.output = output
         job.error = error
         job.finished_at = _now()
-        if usage is not None:
+        if usage is not None and model_name is not None:
             job.tokens_in = usage.input_tokens or 0
             job.tokens_out = usage.output_tokens or 0
-            job.cost = _calc_cost(usage, model_row.name)
+            job.cost = _calc_cost(usage, model_name)
+        for event_type, data in extra_events or []:
+            db.add(JobEvent(job_id=job.id, type=event_type, data=data))
         db.add(
             JobEvent(
                 job_id=job.id,
@@ -151,20 +244,12 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         await db.commit()
 
 
-async def _record_transient(job_id: uuid.UUID, message: str) -> None:
+async def _record_event(job_id: uuid.UUID, event_type: str, data: dict) -> None:
     async with get_sessionmaker()() as db:
-        db.add(JobEvent(job_id=job_id, type="transient_error", data={"error": message}))
+        db.add(JobEvent(job_id=job_id, type=event_type, data=data))
         await db.commit()
 
 
 async def mark_job(job_id: uuid.UUID, status: str, error: str | None = None) -> None:
     """Terminal bookkeeping from outside the runner (retry exhaustion, etc.)."""
-    async with get_sessionmaker()() as db:
-        job = await db.get(Job, job_id)
-        if job is None:
-            return
-        job.status = status
-        job.error = error
-        job.finished_at = _now()
-        db.add(JobEvent(job_id=job.id, type="finished", data={"status": status}))
-        await db.commit()
+    await _finalize(job_id, status, error=error)

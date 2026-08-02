@@ -21,10 +21,13 @@ dependencies = [
     "email-validator>=2.0",
     "pydantic-ai>=2.22.0",
     "httpx>=0.28.1",
-    "boto3>=1.43.62",
     "opentelemetry-sdk>=1.44.0",
     "opentelemetry-exporter-otlp-proto-http>=1.44.0",
     "python-multipart>=0.0.32",
+    "apprise>=1.12.0",
+    "fsspec>=2026.7.0",
+    "s3fs>=2025.1",
+    "jsonschema>=4.26.0",
 ]
 
 [project.scripts]

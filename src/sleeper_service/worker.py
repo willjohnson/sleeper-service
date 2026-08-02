@@ -10,7 +10,7 @@ from sleeper_service.config import get_settings
 from sleeper_service.db.models import Job
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.observability import setup_tracing
-from sleeper_service.runtime import callbacks
+from sleeper_service.runtime import callbacks, notify
 from sleeper_service.runtime.runner import TransientJobError, execute_job, mark_job
 
 
@@ -25,6 +25,16 @@ async def run_job(ctx: dict, job_id: str) -> None:
                 "dead_letter",
                 f"retries exhausted after {ctx['job_try']} tries: {e}",
             )
+            async with get_sessionmaker()() as db:
+                job = await db.get(Job, uuid.UUID(job_id))
+            if job is not None:
+                await notify.notify(
+                    job.agent_id,
+                    "dead_letter",
+                    "Sleeper Service: job dead-lettered",
+                    f"Job {job_id} exhausted {ctx['job_try']} tries and was "
+                    f"dead-lettered. Last error: {e}",
+                )
         else:
             # 10s, 20s, 40s, ...
             raise Retry(defer=10 * 2 ** (ctx["job_try"] - 1)) from e

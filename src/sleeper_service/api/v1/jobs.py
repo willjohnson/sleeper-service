@@ -21,9 +21,10 @@ from sleeper_service.auth.principal import (
 )
 from sleeper_service.auth.rbac import has_role
 from sleeper_service.constants import KeyScope, Role
-from sleeper_service.db.models import Agent, AgentVersion, File, Job, JobEvent
+from sleeper_service.db.models import Agent, AgentVersion, File, Job, JobEvent, Tenant
 from sleeper_service.db.session import get_db
 from sleeper_service.queue import get_pool
+from sleeper_service.runtime import links, spending
 
 router = APIRouter(tags=["jobs"])
 
@@ -72,11 +73,90 @@ async def _resolve_version(db: AsyncSession, agent: Agent, body: JobSubmit) -> A
         if version is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown version")
         return version
+    return await _resolve_version_current(db, agent)
+
+
+async def _resolve_version_current(db: AsyncSession, agent: Agent) -> AgentVersion:
     if agent.current_version_id is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Agent has no versions yet — create one first"
         )
     return await db.get(AgentVersion, agent.current_version_id)
+
+
+async def create_job(
+    db: AsyncSession,
+    agent: Agent,
+    version: AgentVersion,
+    *,
+    context: dict,
+    callback_url: str | None = None,
+    user_ctx: dict | None = None,
+    idempotency_key: str | None = None,
+    sync: bool = False,
+) -> tuple[Job, bool]:
+    """Create (or dedupe) a job and enqueue it unless sync/refused.
+
+    Returns (job, existed): existed=True means the idempotency key matched a
+    prior submission and no new job was created. Shared by direct submission
+    and event-source ingress.
+    """
+    if idempotency_key is not None:
+        existing = await db.scalar(
+            select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            return existing, True
+
+    job = Job(
+        agent_id=agent.id,
+        agent_version_id=version.id,
+        payload=context,
+        callback_url=callback_url,
+        user_ctx=user_ctx,
+        idempotency_key=idempotency_key,
+    )
+    db.add(job)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Concurrent submit with the same idempotency key: return the winner.
+        await db.rollback()
+        existing = await db.scalar(
+            select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            return existing, True
+        raise
+    db.add(JobEvent(job_id=job.id, type="submitted", data={"sync": sync}))
+    await db.commit()
+    await db.refresh(job)
+
+    # Budget pre-flight: refuse (auditable row, no enqueue) if exhausted
+    spend = await spending.budget_exhausted(db, agent)
+    if spend is not None:
+        from sleeper_service.runtime import notify
+        from sleeper_service.runtime.runner import mark_job
+
+        await mark_job(
+            job.id,
+            "budget_exceeded",
+            f"monthly spend {spend} reached limit {agent.spending_limit}",
+        )
+        await notify.notify(
+            agent.id,
+            "budget",
+            f"Sleeper Service: budget exceeded — {agent.name}",
+            f"Agent {agent.name} hit its monthly spending limit "
+            f"({spend} / {agent.spending_limit}). Jobs are being refused.",
+        )
+        await db.refresh(job)
+        return job, False
+
+    if not sync:
+        pool = await get_pool()
+        await pool.enqueue_job("run_job", str(job.id))
+    return job, False
 
 
 @router.post("/agents/{agent_id}/jobs", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
@@ -90,41 +170,29 @@ async def submit_job(
     agent = await _get_agent_for(db, principal, agent_id, submit=True)
     version = await _resolve_version(db, agent, body)
 
+    if body.context.links:
+        tenant = await db.get(Tenant, agent.tenant_id)
+        link_error = links.check_links(body.context.links, tenant.settings or {})
+        if link_error is not None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, link_error)
+
     for file_id in body.context.files:
         file = await db.get(File, file_id)
         if file is None or file.tenant_id != agent.tenant_id:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
 
-    if body.idempotency_key is not None:
-        existing = await db.scalar(
-            select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == body.idempotency_key)
-        )
-        if existing is not None:
-            return existing
-
-    job = Job(
-        agent_id=agent.id,
-        agent_version_id=version.id,
-        payload=body.context.model_dump(mode="json"),
+    job, existed = await create_job(
+        db,
+        agent,
+        version,
+        context=body.context.model_dump(mode="json"),
         callback_url=body.callback_url,
         user_ctx=body.user_ctx,
         idempotency_key=body.idempotency_key,
+        sync=sync,
     )
-    db.add(job)
-    try:
-        await db.flush()
-    except IntegrityError:
-        # Concurrent submit with the same idempotency key: return the winner.
-        await db.rollback()
-        existing = await db.scalar(
-            select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == body.idempotency_key)
-        )
-        if existing is not None:
-            return existing
-        raise
-    db.add(JobEvent(job_id=job.id, type="submitted", data={"sync": sync}))
-    await db.commit()
-    await db.refresh(job)
+    if existed or job.status == "budget_exceeded":
+        return job
 
     if sync:
         from sleeper_service.runtime.runner import TransientJobError, execute_job, mark_job
@@ -138,11 +206,8 @@ async def submit_job(
         if job.callback_url:
             pool = await get_pool()
             await pool.enqueue_job("deliver_callback", str(job.id))
-        return job
 
-    pool = await get_pool()
-    await pool.enqueue_job("run_job", str(job.id))
-    return job
+    return job  # async path was already enqueued by create_job
 
 
 async def _get_job_for(db: AsyncSession, principal: Principal, job_id: uuid.UUID) -> Job:

@@ -266,3 +266,105 @@ class JobEventOut(OrmModel):
     ts: datetime
     type: str
     data: dict
+
+
+# --- MCP servers ---
+
+
+class McpServerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    # streamable_http/sse: endpoint is the URL. stdio: endpoint is the command line.
+    endpoint: str = Field(min_length=1)
+    transport: str = Field(pattern="^(streamable_http|sse|stdio)$")
+    # {"headers": {"Authorization": "Bearer ..."}} — encrypted at rest
+    credentials: dict | None = None
+
+
+class McpServerOut(OrmModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    endpoint: str
+    transport: str
+    created_at: datetime
+    # credentials are never returned
+
+
+# --- Data stores ---
+
+
+class DataStoreCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    type: str = Field(pattern="^(s3|azure_blob|gcs|box|local)$")
+    # s3: {"bucket": ..., "endpoint_url": optional}; local: {"base_path": ...}
+    config: dict = Field(default_factory=dict)
+    # s3: {"access_key": ..., "secret_key": ...} — encrypted at rest
+    credentials: dict | None = None
+
+
+class DataStoreOut(OrmModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    type: str
+    config: dict
+    created_at: datetime
+
+
+# --- Notification channels ---
+
+
+class NotifChannelCreate(BaseModel):
+    apprise_url: str = Field(min_length=1)  # e.g. slack://..., mailto://..., json://...
+    events: list[str] = Field(min_length=1)
+
+
+class NotifChannelOut(OrmModel):
+    id: uuid.UUID
+    team_id: uuid.UUID
+    events: list
+    created_at: datetime
+    # the apprise URL embeds credentials and is never returned
+
+
+# --- Event sources ---
+
+
+class EventSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    target_agent_id: uuid.UUID
+    # {{path.to.field}} substitution against the event body; {{body}} = whole
+    # body as JSON. Example: {"prompt": "Price event: {{body}}"}
+    payload_template: dict = Field(default_factory=lambda: {"prompt": "{{body}}"})
+    dedup_key_path: str | None = None
+    config: dict = Field(default_factory=dict)
+
+
+class EventSourceOut(OrmModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    target_agent_id: uuid.UUID
+    payload_template: dict
+    dedup_key_path: str | None
+    config: dict
+    created_at: datetime
+
+
+class EventSourceWithSecretOut(EventSourceOut):
+    secret: str  # shown once
+
+
+class EventAccepted(BaseModel):
+    job_id: uuid.UUID
+    deduped: bool = False
+
+
+# --- Spend ---
+
+
+class SpendOut(BaseModel):
+    agent_id: uuid.UUID
+    month_start: datetime
+    spend: Decimal
+    spending_limit: Decimal | None
