@@ -12,6 +12,11 @@ from sleeper_service.db.session import get_sessionmaker
 app = typer.Typer(help="Sleeper Service administration CLI.")
 
 
+@app.callback()
+def cli() -> None:
+    """Keep subcommand names (`sleeper init`) even while there is one command."""
+
+
 @app.command()
 def init(
     tenant_name: str = typer.Option("default", help="Name of the first tenant."),
