@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from pydantic_ai import ModelRetry
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -312,11 +313,11 @@ async def test_store_tools_scoping(client: AsyncClient, risk_agent: dict, bootst
     assert "ref/notes.txt" in listing
     assert await ro_fns["read_file"]("refdata", "notes.txt") == "threshold: 5%"
 
-    with pytest.raises(ValueError, match="escapes"):
+    with pytest.raises(ModelRetry, match="escapes"):
         await ro_fns["read_file"]("refdata", "../private/secret.txt")
-    with pytest.raises(ValueError, match="read-only"):
+    with pytest.raises(ModelRetry, match="read-only"):
         await ro_fns["write_file"]("refdata", "out.txt", "x")
-    with pytest.raises(ValueError, match="no grant"):
+    with pytest.raises(ModelRetry, match="no grant"):
         await ro_fns["read_file"]("otherstore", "notes.txt")
 
     result = await rw_fns["write_file"]("refdata", "out.txt", "written")

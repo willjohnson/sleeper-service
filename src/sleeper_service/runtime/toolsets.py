@@ -19,6 +19,7 @@ import uuid
 
 import anyio
 import fsspec
+from pydantic_ai import ModelRetry
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from sqlalchemy import select
@@ -92,7 +93,7 @@ class _StoreGrant:
         if candidate != self.prefix and not candidate.startswith(
             self.prefix + "/" if self.prefix else ""
         ):
-            raise ValueError(f"path escapes the granted prefix: {path!r}")
+            raise ModelRetry(f"path escapes the granted prefix: {path!r}")
         return candidate
 
     def fs_and_root(self) -> tuple[fsspec.AbstractFileSystem, str]:
@@ -130,7 +131,7 @@ async def build_store_toolset(
 
     def _grant(store_name: str) -> _StoreGrant:
         if store_name not in grants:
-            raise ValueError(f"no grant for store {store_name!r}; granted: {sorted(grants)}")
+            raise ModelRetry(f"no grant for store {store_name!r}; granted: {sorted(grants)}")
         return grants[store_name]
 
     async def list_files(store_name: str, path: str = "") -> list[str]:
@@ -161,7 +162,7 @@ async def build_store_toolset(
         """Write a text file to a granted data store (requires a read-write grant)."""
         g = _grant(store_name)
         if g.mode != "rw":
-            raise ValueError(f"store {store_name!r} is granted read-only")
+            raise ModelRetry(f"store {store_name!r} is granted read-only")
         full = g.resolve(path)
         fs, root = g.fs_and_root()
 

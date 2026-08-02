@@ -108,6 +108,24 @@ services:
       timeout: 3s
       retries: 10
 
+  # Demo (opt-in): docker compose --profile demo up -d
+  # The poller plays the external orchestrator: it polls a synthetic feed and
+  # posts events to the webhook — it holds no platform API key.
+  demo-poller:
+    build: .
+    profiles: [demo]
+    env_file: .env
+    environment:
+      SLEEPER_API: http://api:8000
+      POLL_INTERVAL: "30"
+    command: python demo/poller.py
+    depends_on:
+      - api
+
+  demo-sink:
+    image: mendhak/http-https-echo:latest
+    profiles: [demo]
+
   langfuse-web:
     image: langfuse/langfuse:3
     profiles: [langfuse]

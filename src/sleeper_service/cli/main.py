@@ -1,10 +1,13 @@
 import asyncio
+import json
+import uuid as uuid_mod
 
 import typer
 from sqlalchemy import select
 
 from sleeper_service.auth.keys import generate_key
 from sleeper_service.auth.passwords import hash_password
+from sleeper_service.config import get_settings
 from sleeper_service.constants import KeyKind, Role
 from sleeper_service.db.models import ApiKey, Team, TeamMember, Tenant, User
 from sleeper_service.db.session import get_sessionmaker
@@ -90,6 +93,234 @@ async def _seed_models() -> None:
                 added += 1
         await db.commit()
     typer.secho(f"Models seeded ({added} added, {len(SEED_MODELS) - added} existing).", fg="green")
+
+
+# --- Demo (BUILD_PLAN § Event sources: anchor use case) ---
+
+DEMO_NS = uuid_mod.uuid5(uuid_mod.NAMESPACE_URL, "sleeper-service-demo")
+
+RISK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
+        "factors": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+    },
+    "required": ["risk_level", "factors", "summary"],
+}
+
+RISK_PROMPT = """You are a business risk analyst for a retail company.
+
+Before assessing any event, read the file 'risk_playbook.md' from the
+'reference' data store (use the read_file tool with store_name='reference')
+— it defines the company's locations and risk thresholds. Ground your
+assessment in that playbook: cite which thresholds or locations apply."""
+
+PLAYBOOK = """# Risk playbook
+
+## Company footprint
+- Distribution centers: St. Louis MO, Denver CO
+- HQ: Chicago IL
+- Overnight logistics depend on the St. Louis hub.
+
+## Thresholds
+- Any single-day stock move beyond ±5% on watched tickers (AAPL, MSFT, our
+  own listing) => at least MEDIUM market risk.
+- Severe weather warnings within 50 miles of a distribution center => HIGH
+  operational risk during the warning window.
+- Staffing below 80% on any shift at a distribution center => escalate one
+  level.
+"""
+
+
+def demo_source_identity(name: str) -> tuple[str, str]:
+    """Deterministic (source_id, secret) derived from SECRET_KEY, so the demo
+    poller — an external script — can compute them from the shared .env
+    without holding any platform API key."""
+    import hashlib
+    import hmac as hmac_mod
+
+    secret_key = get_settings().secret_key.encode()
+    digest = hmac_mod.new(secret_key, f"demo-source:{name}".encode(), hashlib.sha256)
+    source_id = str(uuid_mod.uuid5(DEMO_NS, name))
+    return source_id, "ss_evt_demo_" + digest.hexdigest()[:32]
+
+
+@app.command()
+def demo_setup() -> None:
+    """Create the demo tenant: risk-analyzer on an event feed, reference data
+    store, budget, flaky agent (dead-letter demo), and alert channel."""
+    asyncio.run(_demo_setup())
+
+
+async def _demo_setup() -> None:
+    import os
+    from decimal import Decimal
+
+    from sleeper_service.auth.keys import hash_key
+    from sleeper_service.config import get_settings as gs
+    from sleeper_service.crypto import encrypt
+    from sleeper_service.db.models import (
+        Agent,
+        AgentVersion,
+        DataStore,
+        EventSource,
+        Model,
+        NotifChannel,
+    )
+
+    settings = gs()
+    await _seed_models()
+
+    async with get_sessionmaker()() as db:
+        tenant = await db.scalar(select(Tenant).where(Tenant.name == "demo"))
+        if tenant is None:
+            tenant = Tenant(name="demo", system_prompt="Be concise and factual.")
+            db.add(tenant)
+            await db.flush()
+            db.add(Team(tenant_id=tenant.id, name="org", is_org_team=True))
+            await db.flush()
+        team = await db.scalar(
+            select(Team).where(Team.tenant_id == tenant.id, Team.is_org_team.is_(True))
+        )
+
+        # Model: real (OpenRouter) when a key is configured, else the test model
+        use_real = bool(os.environ.get("OPENROUTER_API_KEY"))
+        if use_real:
+            model = await db.scalar(select(Model).where(Model.provider == "openrouter"))
+            if model is None:
+                model = Model(
+                    provider="openrouter",
+                    name="gemini-2.5-flash-lite",
+                    model_string="openrouter:google/gemini-2.5-flash-lite",
+                )
+                db.add(model)
+                await db.flush()
+        else:
+            model = await db.scalar(
+                select(Model).where(Model.provider == "test", Model.name == "default")
+            )
+        flaky_model = await db.scalar(
+            select(Model).where(Model.provider == "test", Model.name == "flaky")
+        )
+
+        # Reference data store (MinIO bucket, read-only grant)
+        store = await db.scalar(
+            select(DataStore).where(DataStore.tenant_id == tenant.id, DataStore.name == "reference")
+        )
+        if store is None:
+            store = DataStore(
+                tenant_id=tenant.id,
+                name="reference",
+                type="s3",
+                config={"bucket": "demo-reference", "endpoint_url": settings.minio_endpoint},
+                credentials_enc=encrypt(
+                    json.dumps(
+                        {
+                            "access_key": settings.minio_access_key,
+                            "secret_key": settings.minio_secret_key,
+                        }
+                    )
+                ),
+            )
+            db.add(store)
+
+        async def ensure_agent(
+            name: str, description: str, model_row: Model, prompt: str,
+            schema: dict | None, grants: list, limit: Decimal | None,
+        ) -> Agent:
+            agent = await db.scalar(
+                select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == name)
+            )
+            if agent is not None:
+                return agent
+            agent = Agent(
+                tenant_id=tenant.id, team_id=team.id, name=name,
+                description=description, spending_limit=limit,
+            )
+            db.add(agent)
+            await db.flush()
+            version = AgentVersion(
+                agent_id=agent.id, version_no=1, prompt=prompt, model_id=model_row.id,
+                max_iterations=6, timeout_s=120, output_schema=schema,
+                data_store_grants=grants,
+            )
+            db.add(version)
+            await db.flush()
+            agent.current_version_id = version.id
+            return agent
+
+        risk = await ensure_agent(
+            "risk-analyzer",
+            "Assesses business risk for events from the market/weather feed",
+            model,
+            RISK_PROMPT if use_real else "Assess business risk for the event.",
+            RISK_SCHEMA,
+            [{"store": "reference", "prefix": "", "mode": "ro"}] if use_real else [],
+            Decimal("1.00"),
+        )
+        flaky = await ensure_agent(
+            "flaky-agent",
+            "Always fails transiently — demonstrates retries, DLQ, and alerting",
+            flaky_model,
+            "This never runs.",
+            None,
+            [],
+            None,
+        )
+
+        # Event sources with deterministic ids/secrets (poller derives them)
+        for source_name, agent in (("market", risk), ("flaky", flaky)):
+            source_id, secret = demo_source_identity(source_name)
+            source = await db.get(EventSource, uuid_mod.UUID(source_id))
+            if source is None:
+                db.add(
+                    EventSource(
+                        id=uuid_mod.UUID(source_id),
+                        tenant_id=tenant.id,
+                        name=f"demo-{source_name}",
+                        target_agent_id=agent.id,
+                        payload_template={
+                            "prompt": "Assess business risk for this event: {{body}}"
+                        },
+                        dedup_key_path="event.id",
+                        secret_hash=hash_key(secret),
+                    )
+                )
+
+        # Alert channel → demo-sink echo container (dead_letter + budget)
+        channel = await db.scalar(
+            select(NotifChannel).where(NotifChannel.team_id == team.id)
+        )
+        if channel is None:
+            db.add(
+                NotifChannel(
+                    team_id=team.id,
+                    apprise_url_enc=encrypt("json://demo-sink:8080/alerts"),
+                    events=["dead_letter", "budget"],
+                )
+            )
+        await db.commit()
+
+    # Seed the reference bucket
+    import fsspec
+
+    fs = fsspec.filesystem(
+        "s3",
+        key=settings.minio_access_key,
+        secret=settings.minio_secret_key,
+        endpoint_url=settings.minio_endpoint,
+    )
+    if not fs.exists("demo-reference"):
+        fs.mkdir("demo-reference")
+    fs.pipe_file("demo-reference/risk_playbook.md", PLAYBOOK.encode())
+
+    typer.secho("Demo ready.", fg="green", bold=True)
+    typer.echo(f"  Model: {'openrouter (real)' if use_real else 'test provider (no key set)'}")
+    typer.echo("  Agents: risk-analyzer ($1.00/month budget), flaky-agent")
+    typer.echo("  Reference store: s3://demo-reference/risk_playbook.md (read-only grant)")
+    typer.echo("  Alerts: json://demo-sink:8080/alerts (dead_letter, budget)")
+    typer.echo("\nStart the feed: docker compose --profile demo up -d")
 
 
 if __name__ == "__main__":
