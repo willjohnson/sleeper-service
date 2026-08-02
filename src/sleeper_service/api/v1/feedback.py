@@ -36,9 +36,7 @@ async def submit_feedback(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     agent = await db.get(Agent, job.agent_id)
     if not learning_enabled(agent.options or {}):
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "This agent does not accept feedback"
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This agent does not accept feedback")
     existing = await db.scalar(select(Feedback).where(Feedback.job_id == job_id))
     if existing is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Feedback already recorded")

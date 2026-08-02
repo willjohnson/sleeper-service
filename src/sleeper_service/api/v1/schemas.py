@@ -245,6 +245,7 @@ class JobOut(OrmModel):
     id: uuid.UUID
     agent_id: uuid.UUID
     agent_version_id: uuid.UUID
+    memory_version_id: uuid.UUID | None = None
     parent_job_id: uuid.UUID | None
     status: str
     payload: dict

@@ -226,8 +226,13 @@ async def _demo_setup() -> None:
             db.add(store)
 
         async def ensure_agent(
-            name: str, description: str, model_row: Model, prompt: str,
-            schema: dict | None, grants: list, limit: Decimal | None,
+            name: str,
+            description: str,
+            model_row: Model,
+            prompt: str,
+            schema: dict | None,
+            grants: list,
+            limit: Decimal | None,
         ) -> Agent:
             agent = await db.scalar(
                 select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == name)
@@ -235,14 +240,22 @@ async def _demo_setup() -> None:
             if agent is not None:
                 return agent
             agent = Agent(
-                tenant_id=tenant.id, team_id=team.id, name=name,
-                description=description, spending_limit=limit,
+                tenant_id=tenant.id,
+                team_id=team.id,
+                name=name,
+                description=description,
+                spending_limit=limit,
             )
             db.add(agent)
             await db.flush()
             version = AgentVersion(
-                agent_id=agent.id, version_no=1, prompt=prompt, model_id=model_row.id,
-                max_iterations=6, timeout_s=120, output_schema=schema,
+                agent_id=agent.id,
+                version_no=1,
+                prompt=prompt,
+                model_id=model_row.id,
+                max_iterations=6,
+                timeout_s=120,
+                output_schema=schema,
                 data_store_grants=grants,
             )
             db.add(version)
@@ -289,9 +302,7 @@ async def _demo_setup() -> None:
                 )
 
         # Alert channel → demo-sink echo container (dead_letter + budget)
-        channel = await db.scalar(
-            select(NotifChannel).where(NotifChannel.team_id == team.id)
-        )
+        channel = await db.scalar(select(NotifChannel).where(NotifChannel.team_id == team.id))
         if channel is None:
             db.add(
                 NotifChannel(

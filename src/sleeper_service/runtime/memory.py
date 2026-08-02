@@ -55,9 +55,7 @@ def _enforce_size_cap(content: str) -> str:
         return content
     lines = content.splitlines()
     while len("\n".join(lines)) > cap:
-        lesson_indexes = [
-            i for i, line in enumerate(lines) if line.startswith(("- ✔", "- ✘"))
-        ]
+        lesson_indexes = [i for i, line in enumerate(lines) if line.startswith(("- ✔", "- ✘"))]
         if not lesson_indexes:
             return "\n".join(lines)[:cap]
         lines.pop(lesson_indexes[0])

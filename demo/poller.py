@@ -138,13 +138,18 @@ def main() -> None:
         if n == 2:
             r = post(MARKET_ID, MARKET_SECRET, INJECTION_EVENT)
             if r:
-                print(f"[{n}] injection payload submitted as job {r['job_id']} "
-                      "(watch it get rejected)", flush=True)
+                print(
+                    f"[{n}] injection payload submitted as job {r['job_id']} "
+                    "(watch it get rejected)",
+                    flush=True,
+                )
         if n == 3:
             r = post(FLAKY_ID, FLAKY_SECRET, FLAKY_EVENT)
             if r:
-                print(f"[{n}] flaky event as job {r['job_id']} "
-                      "(retries → dead_letter → alert)", flush=True)
+                print(
+                    f"[{n}] flaky event as job {r['job_id']} (retries → dead_letter → alert)",
+                    flush=True,
+                )
 
         time.sleep(INTERVAL)
 
