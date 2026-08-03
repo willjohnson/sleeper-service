@@ -173,7 +173,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     # Assemble user content; collect untrusted text for the injection screen
     prompt_text = job.payload["prompt"]
     file_parts, file_texts = await _load_file_content(job.payload)
-    link_blocks = await links.fetch_links(job.payload.get("links", []))
+    link_blocks = await links.fetch_links(job.payload.get("links", []), tenant.settings or {})
     user_content: list = [prompt_text, *file_parts, *link_blocks]
     untrusted = [prompt_text, *file_texts, *link_blocks]
 

@@ -91,10 +91,13 @@ class _StoreGrant:
 
     def resolve(self, path: str) -> str:
         """Join and normalize path under the granted prefix; refuse escapes."""
+        # Pure string checks only: relpath()/abspath() consult os.getcwd(),
+        # which must never influence a permission boundary.
         candidate = posixpath.normpath(posixpath.join(self.prefix, path.lstrip("/")))
-        if candidate != self.prefix and not candidate.startswith(
-            self.prefix + "/" if self.prefix else ""
-        ):
+        escaped = candidate == ".." or candidate.startswith(("../", "/"))
+        if self.prefix and candidate != self.prefix and not candidate.startswith(self.prefix + "/"):
+            escaped = True
+        if escaped:
             raise ModelRetry(f"path escapes the granted prefix: {path!r}")
         return candidate
 

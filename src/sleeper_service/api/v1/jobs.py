@@ -273,12 +273,20 @@ async def get_job_tree(
     """The full delegation tree rooted at this job (parent_job_id links)."""
     root = await _get_job_for(db, principal, job_id)
 
-    async def build(node: Job) -> JobTreeOut:
+    visited: set[uuid.UUID] = set()
+
+    async def build(node: Job, depth: int = 0) -> JobTreeOut:
+        visited.add(node.id)
         out = JobTreeOut.model_validate(node)
+        if depth >= 50:
+            out.children = []
+            return out
         children = await db.scalars(
             select(Job).where(Job.parent_job_id == node.id).order_by(Job.created_at)
         )
-        out.children = [await build(child) for child in children]
+        out.children = [
+            await build(child, depth + 1) for child in children if child.id not in visited
+        ]
         return out
 
     return await build(root)

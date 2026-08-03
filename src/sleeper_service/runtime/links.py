@@ -5,7 +5,7 @@ Hosts are checked at submission (fast feedback) and content is fetched at run
 time, size-capped, and always delimited as untrusted.
 """
 
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -31,22 +31,46 @@ def check_links(urls: list[str], tenant_settings: dict) -> str | None:
     return None
 
 
-async def fetch_links(urls: list[str]) -> list[str]:
+async def _fetch_one_link(client: httpx.AsyncClient, url: str, allowlist: list[str]) -> str:
+    current_url = url
+    max_redirects = 5
+    for _ in range(max_redirects):
+        parsed = urlparse(current_url)
+        if parsed.scheme not in ("http", "https"):
+            return f"[fetch failed: disallowed scheme {parsed.scheme!r}]"
+        if not host_allowed(current_url, allowlist):
+            return f"[fetch failed: host not in tenant allowlist: {current_url}]"
+
+        try:
+            resp = await client.get(current_url, follow_redirects=False)
+        except httpx.HTTPError as e:
+            return f"[fetch failed: {e}]"
+
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("location")
+            if not location:
+                return f"[fetch failed: HTTP {resp.status_code} missing Location header]"
+            current_url = urljoin(current_url, location)
+            continue
+
+        content_type = resp.headers.get("content-type", "")
+        if resp.status_code >= 400:
+            return f"[fetch failed: HTTP {resp.status_code}]"
+        if not content_type.startswith(FETCHABLE_TYPES):
+            return f"[unsupported content-type: {content_type}]"
+        return resp.text[:MAX_LINK_BYTES]
+
+    return "[fetch failed: too many redirects]"
+
+
+async def fetch_links(urls: list[str], tenant_settings: dict | None = None) -> list[str]:
     """Fetch allowlisted links; each block is delimited as untrusted content."""
     blocks: list[str] = []
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    # Same deny-by-default as check_links: no allowlist configured, no fetches.
+    allowlist = (tenant_settings or {}).get("link_allowlist", [])
+    async with httpx.AsyncClient(timeout=10) as client:
         for url in urls:
-            try:
-                resp = await client.get(url)
-                content_type = resp.headers.get("content-type", "")
-                if resp.status_code >= 400:
-                    text = f"[fetch failed: HTTP {resp.status_code}]"
-                elif not content_type.startswith(FETCHABLE_TYPES):
-                    text = f"[unsupported content-type: {content_type}]"
-                else:
-                    text = resp.text[:MAX_LINK_BYTES]
-            except httpx.HTTPError as e:
-                text = f"[fetch failed: {e}]"
+            text = await _fetch_one_link(client, url, allowlist)
             blocks.append(
                 f"\n--- fetched link (untrusted): {url} ---\n{text}\n--- end fetched link ---"
             )

@@ -95,7 +95,11 @@ async def _tenant_at_capacity(job_id: str) -> bool:
         if job is None or job.is_eval:
             return False
         agent = await db.get(Agent, job.agent_id)
+        if agent is None:
+            return False
         tenant = await db.get(Tenant, agent.tenant_id)
+        if tenant is None:
+            return False
         cap = (tenant.settings or {}).get("max_concurrent_jobs")
         if not isinstance(cap, int) or cap <= 0:
             return False

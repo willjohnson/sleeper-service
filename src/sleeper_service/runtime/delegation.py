@@ -44,11 +44,15 @@ async def _ancestry(db: AsyncSession, job: Job) -> tuple[int, set[uuid.UUID]]:
     """Depth of this job in the tree and the set of agent ids above it."""
     depth = 0
     agent_ids: set[uuid.UUID] = {job.agent_id}
+    visited_jobs: set[uuid.UUID] = {job.id}
     current = job
     while current.parent_job_id is not None:
+        if current.parent_job_id in visited_jobs:
+            break
         current = await db.get(Job, current.parent_job_id)
         if current is None:
             break
+        visited_jobs.add(current.id)
         depth += 1
         agent_ids.add(current.agent_id)
     return depth, agent_ids

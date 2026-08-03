@@ -67,8 +67,12 @@ async def upload_file(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             f"File exceeds {MAX_FILE_SIZE} bytes",
         )
+    from pathlib import Path
+
+    raw_name = Path(file.filename).name if file.filename else "upload"
+    safe_name = raw_name or "upload"
     file_id = uuid.uuid4()
-    object_key = f"{tenant_id}/payload/{file_id}/{file.filename or 'upload'}"
+    object_key = f"{tenant_id}/payload/{file_id}/{safe_name}"
     content_type = file.content_type or "application/octet-stream"
     await storage.put_object(object_key, data, content_type)
 

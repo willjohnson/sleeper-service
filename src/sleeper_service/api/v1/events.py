@@ -146,7 +146,11 @@ async def delete_event_source(
     if source is None or source.tenant_id != tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     agent = await db.get(Agent, source.target_agent_id)
-    require_role(principal, agent.team_id, Role.OWNER)
+    if agent is not None:
+        require_role(principal, agent.team_id, Role.OWNER)
+    else:
+        from sleeper_service.auth.rbac import require_tenant_admin
+        await require_tenant_admin(db, principal, tenant_id)
     await db.delete(source)
     await db.commit()
 
