@@ -1,16 +1,18 @@
 # Outstanding work
 
-State as of 2026-08-02 (late evening): Phases 0–3 complete; Phase 4 mostly
-complete (evals, governance, admin UI, ops hardening shipped). Quick-win batch
-landed 2026-08-02: version aliases, true mid-loop budget checks, team/agent-
+State as of 2026-08-03: Phases 0–3 complete; Phase 4 mostly complete (evals,
+governance, admin UI, ops hardening shipped). Quick-win batch landed
+2026-08-02: version aliases, true mid-loop budget checks, team/agent-
 scoped provider creds, Azure Blob/GCS data stores. Tier-1 sandboxed runner
 (Pydantic Monty, `runtime/sandbox.py`) + eval code graders (check op `code`),
 per-tenant OIDC login (Authlib; `oidc_configs` + `/ui/oidc/...` flow), Box
 data stores (native `box-sdk-gen` backend — MCP deviation logged in
 BUILD_PLAN § Data stores), and the cheap-model injection classifier
 (opt-in `hooks.injection_classifier_model`, fail-open tier 2 behind
-`screen_untrusted()`) landed later that evening. 104 tests green. See
-BUILD_PLAN.md for design intent and the decision log embedded in each section.
+`screen_untrusted()`) landed later that evening. LLM memory fold/compaction
+(opt-in `settings.learning.fold_model`, deterministic fallback — BUILD_PLAN
+§ Memory & learning) landed 2026-08-03. 113 tests green. See BUILD_PLAN.md
+for design intent and the decision log embedded in each section.
 
 ## Remaining from the build plan
 
@@ -18,8 +20,6 @@ BUILD_PLAN.md for design intent and the decision log embedded in each section.
    Monty sandbox) shipped and powers eval code graders. Disposable
    containers (evaluate Anthropic srt) and hosted sandboxes remain, needed
    only if agent code requires real filesystems/packages.
-2. **LLM-based memory folding/compaction** — v1 fold is deterministic;
-   compaction is oldest-lessons-dropped at the size cap.
 
 ## Housekeeping
 

@@ -86,10 +86,11 @@ async def update_tenant(
         tenant.system_prompt = body.system_prompt
     if body.settings is not None:
         from sleeper_service.runtime.hooks import validate_hooks_settings
+        from sleeper_service.runtime.learning import validate_learning_settings
 
-        hooks_error = validate_hooks_settings(body.settings)
-        if hooks_error is not None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, hooks_error)
+        error = validate_hooks_settings(body.settings) or validate_learning_settings(body.settings)
+        if error is not None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
         tenant.settings = body.settings
     await db.commit()
     await db.refresh(tenant)

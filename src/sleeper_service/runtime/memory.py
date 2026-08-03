@@ -81,17 +81,16 @@ async def write_memory(
     approval and is not injected; if the agent has an eval suite, an eval run
     pinned to the pending version is triggered automatically (the eval gate).
     """
-    if screen:
-        async with get_sessionmaker()() as db:
-            agent = await db.get(Agent, agent_id)
-            tenant = await db.get(Tenant, agent.tenant_id) if agent else None
+    async with get_sessionmaker()() as db:
+        agent = await db.get(Agent, agent_id)
+        tenant = await db.get(Tenant, agent.tenant_id) if agent else None
+        if screen:
             if agent is not None and tenant is not None:
                 matched = await hooks.screen_untrusted(db, [content], tenant, agent)
             else:
                 matched = hooks.screen_injection([content], {})
-        if matched is not None:
-            if source_job_id is not None:
-                async with get_sessionmaker()() as db:
+            if matched is not None:
+                if source_job_id is not None:
                     db.add(
                         JobEvent(
                             job_id=source_job_id,
@@ -100,7 +99,22 @@ async def write_memory(
                         )
                     )
                     await db.commit()
-            return None
+                return None
+
+        cap = get_settings().memory_max_chars
+        if len(content) > cap and agent is not None and tenant is not None:
+            from sleeper_service.runtime import learning
+
+            # Opt-in LLM compaction (settings.learning.fold_model): condense
+            # lessons instead of dropping the oldest. Its input was screened
+            # at every original write; a heuristics pass over the rewrite
+            # guards a manipulated model, and the deterministic cap below is
+            # always the backstop.
+            compacted = await learning.compact_memory(db, agent, tenant, content, cap)
+            if compacted is not None and (
+                hooks.screen_injection([compacted], tenant.settings or {}) is None
+            ):
+                content = compacted
 
     content = _enforce_size_cap(content)
     async with get_sessionmaker()() as db:
