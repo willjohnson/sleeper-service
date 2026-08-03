@@ -18,6 +18,12 @@
       <input type="password" name="password" required>
       <button type="submit">Sign in</button>
     </form>
+    {% if sso %}
+    <div class="sso-divider">or</div>
+    {% for tenant_id, tenant_name in sso %}
+    <a class="sso-btn" href="/ui/oidc/{{ tenant_id }}/login">Continue with {{ tenant_name }} SSO</a>
+    {% endfor %}
+    {% endif %}
   </div>
 </div>
 </body>

@@ -262,6 +262,22 @@ class EventSource(UUIDPKMixin, CreatedAtMixin, Base):
     dedup_key_path: Mapped[str | None]
 
 
+class OidcConfig(UUIDPKMixin, TimestampMixin, Base):
+    """Per-tenant OIDC client (BUILD_PLAN § Admin UI & human auth): additive
+    SSO for the UI — local session auth always works. Login matches the
+    IdP-asserted email to an existing user; no just-in-time provisioning."""
+
+    __tablename__ = "oidc_configs"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), unique=True
+    )
+    issuer: Mapped[str]
+    client_id: Mapped[str]
+    client_secret_enc: Mapped[bytes] = mapped_column(LargeBinary)
+    scopes: Mapped[str] = mapped_column(default="openid email profile")
+
+
 class NotifChannel(UUIDPKMixin, CreatedAtMixin, Base):
     __tablename__ = "notif_channels"
 

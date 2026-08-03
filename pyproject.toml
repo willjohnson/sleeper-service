@@ -33,6 +33,7 @@ dependencies = [
     "adlfs>=2024.12",
     "gcsfs>=2025.1",
     "pydantic-monty>=0.0.19",
+    "authlib>=1.7.2",
 ]
 
 [project.scripts]

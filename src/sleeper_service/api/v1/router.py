@@ -13,6 +13,7 @@ from sleeper_service.api.v1 import (
     memory_admin,
     models,
     notif_channels,
+    oidc,
     provider_creds,
     teams,
     tenants,
@@ -22,6 +23,7 @@ from sleeper_service.api.v1 import (
 
 v1_router = APIRouter()
 v1_router.include_router(tenants.router)
+v1_router.include_router(oidc.router)
 v1_router.include_router(users.router)
 v1_router.include_router(teams.router)
 v1_router.include_router(agents.router)

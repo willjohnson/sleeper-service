@@ -88,6 +88,9 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .login-box label { display: block; margin: 12px 0 4px; font-size: 12.5px; color: var(--muted); }
 .login-box input { width: 100%; }
 .login-box button { width: 100%; margin-top: 18px; }
+.sso-divider { text-align: center; color: var(--muted); font-size: 12px; margin: 16px 0 8px; }
+.sso-btn { display: block; text-align: center; margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--accent); text-decoration: none; font-size: 13.5px; }
+.sso-btn:hover { border-color: var(--accent); }
 .error { background: #fef2f2; border: 1px solid #fecaca; color: var(--bad); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-size: 13px; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

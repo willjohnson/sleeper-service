@@ -32,6 +32,25 @@ class TenantOut(OrmModel):
     created_at: datetime
 
 
+class OidcConfigSet(BaseModel):
+    issuer: str = Field(pattern=r"^https?://", max_length=500)
+    client_id: str = Field(min_length=1, max_length=500)
+    client_secret: str = Field(min_length=1, max_length=2000)
+    scopes: str = Field(default="openid email profile", max_length=500)
+
+
+class OidcConfigOut(OrmModel):
+    """The client secret is write-only; it never appears in responses."""
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    issuer: str
+    client_id: str
+    scopes: str
+    created_at: datetime
+    updated_at: datetime
+
+
 # --- Users ---
 
 

@@ -34,6 +34,7 @@ from sleeper_service.db.models import (
     JobEvent,
     MemoryVersion,
     Model,
+    OidcConfig,
     Team,
     TeamMember,
     Tenant,
@@ -101,9 +102,26 @@ async def _team_role(db: AsyncSession, p: UserPrincipal, team_id: uuid.UUID) -> 
 # --- Auth ---
 
 
+async def render_login(
+    request: Request, db: AsyncSession, error: str | None, status_code: int = 200
+):
+    """Login page with an SSO button per OIDC-configured tenant (additive —
+    local auth always works). Shared with the OIDC callback's error paths."""
+    sso = list(
+        await db.execute(
+            select(Tenant.id, Tenant.name)
+            .join(OidcConfig, OidcConfig.tenant_id == Tenant.id)
+            .order_by(Tenant.name)
+        )
+    )
+    return templates.TemplateResponse(
+        request, "login.html", {"error": error, "sso": sso}, status_code=status_code
+    )
+
+
 @router.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    return templates.TemplateResponse(request, "login.html", {"error": None})
+async def login_page(request: Request, db: AsyncSession = Depends(get_db)):
+    return await render_login(request, db, None)
 
 
 @router.post("/login")
@@ -115,9 +133,7 @@ async def login(
 ):
     user = await db.scalar(select(User).where(User.email == email))
     if user is None or not user.password_hash or not verify_password(password, user.password_hash):
-        return templates.TemplateResponse(
-            request, "login.html", {"error": "Invalid email or password"}, status_code=401
-        )
+        return await render_login(request, db, "Invalid email or password", status_code=401)
     request.session["user_id"] = str(user.id)
     return RedirectResponse("/ui", status_code=303)
 
