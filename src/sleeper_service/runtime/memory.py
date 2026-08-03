@@ -85,7 +85,10 @@ async def write_memory(
         async with get_sessionmaker()() as db:
             agent = await db.get(Agent, agent_id)
             tenant = await db.get(Tenant, agent.tenant_id) if agent else None
-        matched = hooks.screen_injection([content], (tenant.settings or {}) if tenant else {})
+            if agent is not None and tenant is not None:
+                matched = await hooks.screen_untrusted(db, [content], tenant, agent)
+            else:
+                matched = hooks.screen_injection([content], {})
         if matched is not None:
             if source_job_id is not None:
                 async with get_sessionmaker()() as db:

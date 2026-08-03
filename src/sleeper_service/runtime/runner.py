@@ -177,9 +177,11 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     user_content: list = [prompt_text, *file_parts, *link_blocks]
     untrusted = [prompt_text, *file_texts, *link_blocks]
 
-    # Pre-hook: injection screen (default on)
+    # Pre-hook: injection screen (default on; heuristics + optional
+    # cheap-model classifier tier)
     if hooks.injection_screen_enabled(tenant.settings or {}, agent.options or {}):
-        matched = hooks.screen_injection(untrusted, tenant.settings or {})
+        async with sessionmaker() as db:
+            matched = await hooks.screen_untrusted(db, untrusted, tenant, agent)
         if matched is not None:
             async with sessionmaker() as db:
                 db.add(

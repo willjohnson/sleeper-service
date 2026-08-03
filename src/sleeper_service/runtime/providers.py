@@ -15,6 +15,8 @@ from sleeper_service.constants import KeyScope
 from sleeper_service.crypto import decrypt
 from sleeper_service.db.models import Agent, ProviderCred
 
+SUPPORTED_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "test"}
+
 
 async def resolve_api_key(db: AsyncSession, agent: Agent, provider: str) -> str | None:
     for scope, scope_id in (

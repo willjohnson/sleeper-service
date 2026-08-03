@@ -51,10 +51,10 @@ async def fold_feedback(feedback_id: uuid.UUID) -> None:
         current = await memory.latest_memory(db, agent.id)
         tenant = await db.get(Tenant, agent.tenant_id)
 
-    # Poisoning defense: a hostile comment must not become a memory rule.
-    comment = (fb.comment or "").strip()
-    if comment and hooks.screen_injection([comment], tenant.settings or {}) is not None:
-        comment = ""
+        # Poisoning defense: a hostile comment must not become a memory rule.
+        comment = (fb.comment or "").strip()
+        if comment and await hooks.screen_untrusted(db, [comment], tenant, agent) is not None:
+            comment = ""
 
     date = datetime.now(UTC).date().isoformat()
     if fb.vote > 0:
