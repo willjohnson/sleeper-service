@@ -23,7 +23,7 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 | **Agent** | A named, single-purpose worker: prompt + model + tool and data store grants + output schema + options (delegation, memory, learning, spending limit). |
 | **Version** | Immutable snapshot of an agent's configuration. Jobs pin any version; promotion/rollback just repoints `current`. |
 | **Job** | One invocation of one agent version. Async by default with HMAC-signed webhook callbacks; `?sync=true` for fast calls. Full event audit trail per job. |
-| **Data store** | A registered storage backend (S3/MinIO and local today; Blob/GCS/Box planned) an agent is granted access to — path-prefix-scoped, read-only by default. |
+| **Data store** | A registered storage backend (S3/MinIO, Azure Blob, GCS, Box, local) an agent is granted access to — path-prefix-scoped, read-only by default. Box grants pin a folder ID: credentials are downscoped to that subtree and paths resolve by name from it, so nothing outside is addressable. |
 | **Event source** | Webhook ingress that turns external events into jobs, with per-source secrets and dedup. Scheduling and polling stay in your orchestrator — Sleeper Service just receives. |
 | **Hooks** | Pre-hooks (prompt-injection screening, default on) and post-hooks (output schema validation, opt-in PII redaction) around every job. |
 | **Memory / Learning** | Opt-in per-agent memory document, versioned like everything else, steerable by signed per-job feedback votes. Optionally gated: owners approve every memory change, informed by an automatic eval run. |

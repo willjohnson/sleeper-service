@@ -17,7 +17,13 @@ from sleeper_service.db.session import get_db
 
 router = APIRouter(prefix="/tenants/{tenant_id}/data-stores", tags=["data-stores"])
 
-REQUIRED_CONFIG = {"s3": "bucket", "local": "base_path"}
+REQUIRED_CONFIG = {
+    "s3": "bucket",
+    "azure_blob": "container",
+    "gcs": "bucket",
+    "box": "folder_id",
+    "local": "base_path",
+}
 
 
 @router.post("", response_model=DataStoreOut, status_code=status.HTTP_201_CREATED)
@@ -31,7 +37,7 @@ async def create_data_store(
     if body.type not in REQUIRED_CONFIG:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"data store type {body.type!r} not supported yet (s3, local)",
+            f"data store type {body.type!r} not supported; one of {sorted(REQUIRED_CONFIG)}",
         )
     required = REQUIRED_CONFIG[body.type]
     if required not in body.config:

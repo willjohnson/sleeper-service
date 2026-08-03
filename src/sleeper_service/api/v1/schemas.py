@@ -344,11 +344,14 @@ class DataStoreCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: str = Field(pattern="^(s3|azure_blob|gcs|box|local)$")
     # s3: {"bucket": ..., "endpoint_url": optional}; azure_blob: {"container": ...,
-    # "account_name": optional}; gcs: {"bucket": ...}; local: {"base_path": ...}
+    # "account_name": optional}; gcs: {"bucket": ...}; local: {"base_path": ...};
+    # box: {"folder_id": ..., "api_base_url": optional (tests/gateways)}
     config: dict = Field(default_factory=dict)
     # encrypted at rest. s3: {"access_key", "secret_key"}; azure_blob: any of
     # {"connection_string"} | {"account_name", "account_key"} | {"sas_token"};
-    # gcs: {"token": service-account info dict or key-file path} (omit for ADC)
+    # gcs: {"token": service-account info dict or key-file path} (omit for ADC);
+    # box: {"client_id", "client_secret", "enterprise_id"|"user_id"} (CCG,
+    # downscoped to the granted folder) or {"developer_token"} (dev only)
     credentials: dict | None = None
 
 

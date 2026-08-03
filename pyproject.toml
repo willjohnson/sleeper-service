@@ -34,6 +34,7 @@ dependencies = [
     "gcsfs>=2025.1",
     "pydantic-monty>=0.0.19",
     "authlib>=1.7.2",
+    "box-sdk-gen>=1.17.0",
 ]
 
 [project.scripts]

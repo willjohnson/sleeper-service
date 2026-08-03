@@ -9,13 +9,14 @@ passthrough identity only; row-level enforcement is the data layer's job.
 Data-store grants (BUILD_PLAN § Data stores): entries pin a store, a path
 prefix, and a mode:
     {"store": "<name or id>", "prefix": "reports/2026", "mode": "ro"|"rw"}
-exposed as list_files/read_file/write_file backed by fsspec, path-scoped to
-the granted prefix.
+exposed as list_files/read_file/write_file backed by fsspec (Box by its own
+backend — see runtime/box_store.py), path-scoped to the granted prefix.
 """
 
 import json
 import posixpath
 import uuid
+from typing import Any
 
 import anyio
 import fsspec
@@ -86,6 +87,7 @@ class _StoreGrant:
         self.store = store
         self.prefix = prefix.strip("/")
         self.mode = mode
+        self._box = None  # memoized: construction does auth round trips
 
     def resolve(self, path: str) -> str:
         """Join and normalize path under the granted prefix; refuse escapes."""
@@ -96,7 +98,10 @@ class _StoreGrant:
             raise ModelRetry(f"path escapes the granted prefix: {path!r}")
         return candidate
 
-    def fs_and_root(self) -> tuple[fsspec.AbstractFileSystem, str]:
+    def fs_and_root(self) -> tuple[Any, str]:
+        """Returns (filesystem, root): a real fsspec filesystem, or for Box a
+        backend duck-typing the three calls the file tools make. Runs inside
+        the tool's worker thread, so Box's auth round trips stay off the loop."""
         cfg = self.store.config or {}
         creds = (
             json.loads(decrypt(self.store.credentials_enc)) if self.store.credentials_enc else {}
@@ -125,6 +130,12 @@ class _StoreGrant:
             return fs, cfg["bucket"]
         if self.store.type == "local":
             return fsspec.filesystem("file"), cfg["base_path"].rstrip("/")
+        if self.store.type == "box":
+            from sleeper_service.runtime.box_store import BoxBackend
+
+            if self._box is None:
+                self._box = BoxBackend(cfg, creds, self.mode)
+            return self._box, BoxBackend.ROOT
         raise GrantError(f"data store type {self.store.type!r} not supported yet")
 
 
@@ -146,13 +157,17 @@ async def build_store_toolset(
             raise ModelRetry(f"no grant for store {store_name!r}; granted: {sorted(grants)}")
         return grants[store_name]
 
+    # fs_and_root() runs inside each thread: backend construction can do
+    # real I/O (Box auth round trips, gcs token fetch) and must stay off
+    # the event loop
+
     async def list_files(store_name: str, path: str = "") -> list[str]:
         """List files in a granted data store under the given path."""
         g = _grant(store_name)
         full = g.resolve(path)
-        fs, root = g.fs_and_root()
 
         def _ls() -> list[str]:
+            fs, root = g.fs_and_root()
             base = f"{root}/{full}" if full else root
             return [p.removeprefix(root + "/") for p in fs.ls(base, detail=False)]
 
@@ -162,9 +177,9 @@ async def build_store_toolset(
         """Read a text file from a granted data store."""
         g = _grant(store_name)
         full = g.resolve(path)
-        fs, root = g.fs_and_root()
 
         def _read() -> str:
+            fs, root = g.fs_and_root()
             data = fs.cat_file(f"{root}/{full}")
             return data[:MAX_READ_BYTES].decode(errors="replace")
 
@@ -176,9 +191,9 @@ async def build_store_toolset(
         if g.mode != "rw":
             raise ModelRetry(f"store {store_name!r} is granted read-only")
         full = g.resolve(path)
-        fs, root = g.fs_and_root()
 
         def _write() -> None:
+            fs, root = g.fs_and_root()
             fs.pipe_file(f"{root}/{full}", content.encode())
 
         await anyio.to_thread.run_sync(_write)

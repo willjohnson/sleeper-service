@@ -5,9 +5,10 @@ complete (evals, governance, admin UI, ops hardening shipped). Quick-win batch
 landed 2026-08-02: version aliases, true mid-loop budget checks, team/agent-
 scoped provider creds, Azure Blob/GCS data stores. Tier-1 sandboxed runner
 (Pydantic Monty, `runtime/sandbox.py`) + eval code graders (check op `code`),
-then per-tenant OIDC login (Authlib; `oidc_configs` + `/ui/oidc/...` flow),
-landed later that evening. 92 tests green. See BUILD_PLAN.md for design intent
-and the decision log embedded in each section.
+per-tenant OIDC login (Authlib; `oidc_configs` + `/ui/oidc/...` flow), and Box
+data stores (native `box-sdk-gen` backend — MCP deviation logged in
+BUILD_PLAN § Data stores) landed later that evening. 96 tests green. See
+BUILD_PLAN.md for design intent and the decision log embedded in each section.
 
 ## Remaining from the build plan
 
@@ -15,11 +16,9 @@ and the decision log embedded in each section.
    Monty sandbox) shipped and powers eval code graders. Disposable
    containers (evaluate Anthropic srt) and hosted sandboxes remain, needed
    only if agent code requires real filesystems/packages.
-2. **Data stores: Box** — via MCP with folder-ID scoping: downscoped tokens +
-   wrapper verification (design in BUILD_PLAN § Data stores).
-3. **Cheap-model injection classifier** — second screening tier behind the
+2. **Cheap-model injection classifier** — second screening tier behind the
    existing `hooks.screen_injection()` seam, for content heuristics miss.
-4. **LLM-based memory folding/compaction** — v1 fold is deterministic;
+3. **LLM-based memory folding/compaction** — v1 fold is deterministic;
    compaction is oldest-lessons-dropped at the size cap.
 
 ## Housekeeping

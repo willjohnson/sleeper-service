@@ -470,6 +470,19 @@ wheels = [
 ]
 
 [[package]]
+name = "box-sdk-gen"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "requests-toolbelt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/ab/e9bd6c2b418f6221a0be767eaaee36e071cfb5b299f2a0b8d639f98139a9/box_sdk_gen-1.17.0.tar.gz", hash = "sha256:5200ea45103f020d22473c5029ab102dacbb034c45ed79895a2e39b4c55f5e2e", size = 255248, upload-time = "2025-09-05T12:30:31.793Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/21/f73ee26f252b36850eef8e18bbd6c9b547fa03107a7588d2e7b86550fdd1/box_sdk_gen-1.17.0-py3-none-any.whl", hash = "sha256:ff4136ad1dccc63d04a9ffd5914cef32dcc9f5a0563577c0e725d4a104535142", size = 533119, upload-time = "2025-09-05T12:30:30.411Z" },
+]
+
+[[package]]
 name = "cachetools"
 version = "7.1.7"
 source = { registry = "https://pypi.org/simple" }
@@ -3099,6 +3112,18 @@ wheels = [
 ]
 
 [[package]]
+name = "requests-toolbelt"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f3/61/d7545dafb7ac2230c70d38d31cbfe4cc64f7144dc41f6e4e4b78ecd9f5bb/requests-toolbelt-1.0.0.tar.gz", hash = "sha256:7681a0a3d047012b5bdc0ee37d7f8f07ebe76ab08caeccfc3921ce23c88d5bc6", size = 206888, upload-time = "2023-05-01T04:11:33.229Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl", hash = "sha256:cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06", size = 54481, upload-time = "2023-05-01T04:11:28.427Z" },
+]
+
+[[package]]
 name = "rich"
 version = "15.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3301,6 +3326,7 @@ dependencies = [
     { name = "arq" },
     { name = "asyncpg" },
     { name = "authlib" },
+    { name = "box-sdk-gen" },
     { name = "cryptography" },
     { name = "email-validator" },
     { name = "fastapi" },
@@ -3343,6 +3369,7 @@ requires-dist = [
     { name = "arq", specifier = ">=0.26" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "authlib", specifier = ">=1.7.2" },
+    { name = "box-sdk-gen", specifier = ">=1.17.0" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "email-validator", specifier = ">=2.0" },
     { name = "fastapi", specifier = ">=0.115" },
