@@ -21,7 +21,7 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 | **Tenant** | Top-level org. Holds the base system prompt every agent inherits. Multi-tenant out of the box. |
 | **Team** | Owns agents. Users join teams as owner / editor / viewer; every team keeps at least one owner. |
 | **Agent** | A named, single-purpose worker: prompt + model + tool and data store grants + output schema + options (delegation, memory, learning, spending limit). |
-| **Version** | Immutable snapshot of an agent's configuration. Jobs pin any version; promotion/rollback just repoints `current`. |
+| **Version** | Immutable snapshot of an agent's configuration. Jobs pin any version or alias (`dev`/`staging`/`prod`); promotion/rollback just repoints `current` or the alias. |
 | **Job** | One invocation of one agent version. Async by default with HMAC-signed webhook callbacks; `?sync=true` for fast calls. Full event audit trail per job. |
 | **Data store** | A registered storage backend (S3/MinIO, Azure Blob, GCS, Box, local) an agent is granted access to — path-prefix-scoped, read-only by default. Box grants pin a folder ID: credentials are downscoped to that subtree and paths resolve by name from it, so nothing outside is addressable. |
 | **Event source** | Webhook ingress that turns external events into jobs, with per-source secrets and dedup. Scheduling and polling stay in your orchestrator — Sleeper Service just receives. |
@@ -43,9 +43,9 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 
 **Delegation** — Built-in `list_agents` (the rolodex: names, descriptions, I/O schemas) and `call_agent` tools, gated per agent (none/team/tenant). Child jobs carry `parent_job_id`; `GET /v1/jobs/{id}/tree` returns the audited tree. Depth caps and cycle detection.
 
-**Memory & learning** — Opt-in memory document injected after the agent prompt; the agent proposes edits via an `update_memory` tool, applied post-run (screened, size-capped). Learning adds signed single-job feedback URLs; votes fold deterministically into memory (a − comment becomes a corrective rule). Governance: enabling any of this requires the team owner, and `memory_approval` mode queues every memory change for owner approval — with the gating eval run's pass rate shown alongside — plus one-click rollback.
+**Memory & learning** — Opt-in memory document injected after the agent prompt; the agent proposes edits via an `update_memory` tool, applied post-run (screened, size-capped). Learning adds signed single-job feedback URLs; votes fold deterministically into memory (a − comment becomes a corrective rule) — or, opt-in per tenant, an LLM fold distills feedback into generalizable lessons and condenses over-cap memory instead of dropping oldest-first, always falling back to the deterministic path. Governance: enabling any of this requires the team owner, and `memory_approval` mode queues every memory change for owner approval — with the gating eval run's pass rate shown alongside — plus one-click rollback.
 
-**Evals** — Cases are saved inputs + checks (`equals`, `contains`, `in_range`, `matches_regex`, `is_valid`); grading is deterministic and free. For logic beyond assertions, a `code` check runs an editor-supplied `grade(output)` function in a hard-capped sandbox ([Pydantic Monty](https://github.com/pydantic/monty): subprocess workers, wall-clock/memory/recursion limits, no imports, filesystem, or network). Runs execute through the normal pipeline (hooks and tracing apply) against any version, excluded from production spend. Pending memory versions auto-trigger a gated run; regressions alert the team.
+**Evals** — Cases are saved inputs + checks (`equals`, `contains`, `in_range`, `matches_regex`, `is_valid`); grading is deterministic and free. For logic beyond assertions, a `code` check runs an editor-supplied `grade(output)` function in a hard-capped sandbox — in-process [Pydantic Monty](https://github.com/pydantic/monty) by default (wall-clock/memory/recursion limits, no imports, filesystem, or network), or a hardened throwaway Docker container per call (real CPython with packages, no network, capabilities dropped) where the operator has enabled the `docker` runner backend. Runs execute through the normal pipeline (hooks and tracing apply) against any version, excluded from production spend. Pending memory versions auto-trigger a gated run; regressions alert the team.
 
 **Admin UI** — Ships in the api container (server-rendered, no node toolchain): per-tenant dashboard with live-agent count, success rate, spend, and jobs/tokens charts; teams → agents with option badges and budget meters; version promotion and rollback; the memory approval queue with gating-eval pass rates against baseline; eval run history; job detail with payload, output, audit events, the delegation tree, and one-click dead-letter retry. Session login with the same users and RBAC as the API; optional per-tenant OIDC SSO (Keycloak/Authentik/any discovery-speaking IdP) sits alongside — configure it at `PUT /v1/tenants/{id}/oidc` and a "Continue with … SSO" button appears on the login page. Local auth always keeps working, and SSO users must already exist (no just-in-time provisioning).
 
@@ -64,39 +64,91 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 
 ## Architecture
 
+Everything ships as one Docker Compose stack. Your orchestrator and event feeds talk to the API; workers do the thinking; everything the platform learns or decides lands in Postgres, versioned.
+
 ```mermaid
 flowchart LR
-  subgraph callers [Your workflows]
-    O[Orchestrator / cron / app]
-    E[Event feeds]
+  subgraph yours ["Your side"]
+    O["Orchestrator<br/>n8n · Airflow · Temporal · cron · code"]
+    F["Event feeds"]
+    U["Browser"]
   end
-  subgraph sleeper [Sleeper Service]
-    API[FastAPI]
-    Q[(Redis queue)]
-    W[Workers<br/>pre-hooks → agent loop → post-hooks<br/>evals · memory folds · callbacks · alerts]
-    DB[(Postgres)]
-    LF[Langfuse traces]
+
+  subgraph stack ["Sleeper Service — one docker compose"]
+    API["<b>api</b> — FastAPI<br/>API keys · RBAC · rate limits<br/>admin UI · OIDC"]
+    R[("<b>redis</b><br/>arq job queue")]
+    W["<b>worker</b><br/>pre-hooks → PydanticAI loop → post-hooks<br/>injection screen · iteration/timeout/budget guards<br/>schema check · memory writes · evals"]
+    PG[("<b>postgres</b><br/>tenants · agents · versions<br/>jobs · memory · evals")]
+    MIO[("<b>minio</b><br/>payload files")]
+    SBX["code runners<br/>monty in-process · docker throwaway"]
+    LFU["<b>langfuse</b> (opt-in)<br/>traces · tokens · costs"]
   end
-  subgraph outside [Providers & tools]
-    P[Anthropic / OpenAI / Google / OpenRouter]
-    M[MCP servers · data stores]
+
+  subgraph ext ["External services"]
+    LLM["Model providers<br/>Anthropic · OpenAI · Google · OpenRouter"]
+    MCP["Your MCP servers"]
+    DST[("Data stores<br/>S3 · Azure Blob · GCS · Box · local")]
+    APP["Slack · email · SMS · 100+<br/>via Apprise"]
   end
-  O -->|POST /agents/:id/jobs| API
-  E -->|webhooks + secrets| API
-  API --> Q --> W
-  W <--> P
-  W <--> M
-  W --> DB
-  W --> LF
-  W -->|HMAC-signed callback| O
+
+  O -- "submit job (invoke key)" --> API
+  F -- "signed webhooks, deduped" --> API
+  U -- "/ui · /docs" --> API
+  API -- "enqueue" --> R
+  R -- "run_job" --> W
+  API <--> PG
+  API <--> MIO
+  W <--> PG
+  W -- "prompt sandwich ⇄ structured output" --> LLM
+  W -- "granted tools" --> MCP
+  W -- "granted file tools" --> DST
+  W -. "traces" .-> LFU
+  W -- "eval code graders" --> SBX
+  W -- "alerts: dead-letter · budget · regression" --> APP
+  W -- "HMAC-signed callback + feedback URL" --> O
 ```
 
-Python / FastAPI, PydanticAI agent runtime, Postgres, Redis + arq workers, MCP for tool access, fsspec for data stores, Langfuse for tracing.
+Data flows worth noting:
+
+- **Two planes, two key kinds.** Orchestrators hold *invoke keys* (submit/read/feedback only); humans and management tooling use *user keys* or sessions. Event feeds hold only per-source webhook secrets — never platform keys.
+- **Nothing untrusted touches a prompt unscreened.** Payloads, fetched links, feedback comments, and memory writes all pass the same injection screen before the model sees them or anything persists.
+- **Every write that changes behavior is a version.** Agent configs, memory documents, and promotions are immutable rows in Postgres; a job records exactly which of each it ran with.
+- **Results push, don't poll.** Workers deliver HMAC-signed callbacks with retries; exhausted retries dead-letter the job and page the owning team via Apprise.
+
+### A job's life
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant O as Orchestrator
+  participant A as api
+  participant R as redis/arq
+  participant W as worker
+  participant P as Model provider
+  participant T as MCP · data stores · agents
+
+  O->>A: POST /v1/agents/{id}/jobs
+  A->>A: auth · rate limit · idempotency · budget pre-flight
+  A->>R: enqueue
+  A-->>O: 202 (job id)
+  R->>W: run_job
+  W->>W: pre-hooks: injection screen
+  loop until done (≤ max_iterations, ≤ timeout_s, budget checked between calls)
+    W->>P: model call (tenant prompt + agent prompt + memory + payload)
+    P-->>W: tool calls / structured output
+    W->>T: MCP tools · file tools · call_agent delegation
+  end
+  W->>W: post-hooks: schema check · redaction · memory proposal (screened)
+  W-->>O: HMAC-signed callback (+ signed feedback URL)
+  O->>A: GET /v1/jobs/{id} · POST feedback vote
+```
+
+Python / FastAPI, PydanticAI agent runtime, Postgres, Redis + arq workers, MCP for tool access, fsspec for data stores, pluggable sandboxed code runners, Langfuse for tracing.
 
 ## Quickstart
 
 ```bash
-git clone <repo> && cd sleeper-service
+git clone https://github.com/willjohnson/sleeper-service.git && cd sleeper-service
 cp .env.example .env        # set SECRET_KEY and a provider API key
 docker compose up -d
 docker compose exec api sleeper init          # first tenant, team, superuser → prints your API key
@@ -156,7 +208,9 @@ Other things people build with this pattern: accounts-receivable agents matching
 - [x] Delegation, memory, feedback-driven learning *(Phase 3)*
 - [x] Eval harness + memory approval governance *(Phase 4)*
 - [x] Admin UI: dashboard, promotion, memory approvals, job trees *(Phase 4)*
-- [ ] OIDC login, version aliases, sandboxed code runners *(Phase 4, remaining)*
+- [x] OIDC login, version aliases, sandboxed code runners (in-process + docker) *(Phase 4)*
+- [x] Opt-in LLM tiers: injection classifier, memory fold & compaction
+- [ ] Hosted sandbox backends (E2B / Modal) — drop-in registry extension, if ever needed
 
 See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for the full plan, data model, and decision log.
 
