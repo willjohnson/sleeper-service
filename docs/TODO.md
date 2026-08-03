@@ -37,7 +37,9 @@ the decision log embedded in each section.
   queue as pending in the UI (`/ui`, login = the `sleeper init` credentials).
   Approve/reject or toggle the option off.
 - **Placeholder Langfuse keys** (`pk-lf-sleeper-dev`) and demo passwords in
-  `.env` — fine locally, regenerate for any shared deployment.
+  `.env` — fine locally, regenerate for any shared deployment. Now surfaced:
+  README quickstart note, `.env.example` LANGFUSE_INIT_* hints, and a
+  `sleeper init` warning when the well-known dev keys are configured.
 - Structured logging is minimal (request IDs + basicConfig); JSON logs and
   API↔worker correlation would help at scale.
 

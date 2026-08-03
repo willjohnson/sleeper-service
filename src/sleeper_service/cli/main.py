@@ -14,6 +14,10 @@ from sleeper_service.db.session import get_sessionmaker
 
 app = typer.Typer(help="Sleeper Service administration CLI.")
 
+# Dev-default Langfuse project keys (.env and the compose LANGFUSE_INIT_*
+# fallbacks). Public knowledge, and the secret key reads full traces.
+LANGFUSE_PLACEHOLDER_KEYS = {"pk-lf-dev", "sk-lf-dev", "pk-lf-sleeper-dev", "sk-lf-sleeper-dev"}
+
 
 @app.callback()
 def cli() -> None:
@@ -33,7 +37,8 @@ def init(
     ),
 ) -> None:
     """Bootstrap the first tenant, org team, owner user, and API key."""
-    secret = get_settings().secret_key
+    settings = get_settings()
+    secret = settings.secret_key
     if secret.lower() in {"change-me", "changeme", "secret", ""} or len(secret) < 16:
         typer.secho(
             "Refusing to initialize with a placeholder SECRET_KEY — callbacks, "
@@ -42,6 +47,15 @@ def init(
             fg="red",
         )
         raise typer.Exit(code=1)
+    if {settings.langfuse_public_key, settings.langfuse_secret_key} & LANGFUSE_PLACEHOLDER_KEYS:
+        typer.secho(
+            "Warning: Langfuse is configured with the well-known dev keys. Fine on "
+            "localhost, but traces hold full prompts/responses — before deploying "
+            "anywhere reachable, set random LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY "
+            "(plus LANGFUSE_INIT_USER_PASSWORD, LANGFUSE_SALT, LANGFUSE_ENCRYPTION_KEY) "
+            "and recreate the langfuse profile.",
+            fg="yellow",
+        )
     asyncio.run(_init(tenant_name, email, password))
 
 

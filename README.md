@@ -155,6 +155,13 @@ docker compose exec api sleeper init          # first tenant, team, superuser â†
 docker compose exec api sleeper seed-models   # register starter models (incl. keyless test provider)
 ```
 
+> **Deploying anywhere shared?** The optional Langfuse profile bootstraps itself
+> from `.env` and compose defaults: project keys (`LANGFUSE_PUBLIC_KEY` /
+> `LANGFUSE_SECRET_KEY`), an admin login (`LANGFUSE_INIT_USER_PASSWORD`), and
+> `LANGFUSE_SALT` / `LANGFUSE_ENCRYPTION_KEY`. The dev placeholders are public
+> knowledge, and Langfuse stores full prompt/response traces â€” set random values
+> **before the profile's first boot**. `sleeper init` warns if it sees the defaults.
+
 Create an agent, give it a version, run a job:
 
 ```bash

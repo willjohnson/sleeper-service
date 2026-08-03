@@ -277,3 +277,25 @@ def test_init_refuses_placeholder_secret(monkeypatch: pytest.MonkeyPatch) -> Non
     with pytest.raises(typer.Exit):
         init(tenant_name="x", email="a@b.c", password="password-123")
     monkeypatch.setattr(get_settings(), "secret_key", "test-secret-key-long-enough")
+
+
+def test_init_warns_on_placeholder_langfuse_keys(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from sleeper_service.cli.main import init
+
+    async def noop_init(*args: object) -> None:
+        pass
+
+    monkeypatch.setattr("sleeper_service.cli.main._init", noop_init)
+    monkeypatch.setattr(get_settings(), "secret_key", "test-secret-key-long-enough")
+
+    monkeypatch.setattr(get_settings(), "langfuse_public_key", "pk-lf-sleeper-dev")
+    monkeypatch.setattr(get_settings(), "langfuse_secret_key", "sk-lf-sleeper-dev")
+    init(tenant_name="x", email="a@b.c", password="password-123")
+    assert "well-known dev keys" in capsys.readouterr().out
+
+    monkeypatch.setattr(get_settings(), "langfuse_public_key", "pk-lf-real-key")
+    monkeypatch.setattr(get_settings(), "langfuse_secret_key", "sk-lf-real-key")
+    init(tenant_name="x", email="a@b.c", password="password-123")
+    assert "well-known dev keys" not in capsys.readouterr().out
