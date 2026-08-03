@@ -12,7 +12,9 @@ Check format ({"path": "risk_level", "op": ..., "value": ...}):
 - matches_regex re.search(value, str(output[path]))
 - is_valid      output validates against the version's output_schema (no path)
 - code          {"op": "code", "code": "def grade(output): ..."} — grade(output)
-                runs in the sandbox (runtime/sandbox.py); truthy return = pass
+                runs sandboxed (runtime/runners.py); truthy return = pass.
+                Optional "runner" picks an enabled backend ("monty" default,
+                "docker" for real CPython + packages); validated on write
 
 The eval gate: a pending memory version (memory_approval governance) with an
 eval suite triggers a run pinned to that memory; a pass rate below the last
@@ -31,14 +33,14 @@ from sqlalchemy import func, select
 
 from sleeper_service.db.models import Agent, AgentVersion, EvalCase, EvalRun, Job
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import notify, sandbox
+from sleeper_service.runtime import notify, runners
 
 VALID_OPS = {"equals", "contains", "in_range", "matches_regex", "is_valid", "code"}
 PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
 
 # Validation runs editor-supplied top-level statements at case-creation time,
 # in the API process — keep the cap tight so a hostile def can't stall a route
-GRADER_VALIDATE_LIMITS = {**sandbox.DEFAULT_LIMITS, "max_duration_secs": 1.0}
+GRADER_VALIDATE_LIMITS = {**runners.DEFAULT_LIMITS, "max_duration_secs": 1.0}
 
 
 def _dig(output: Any, path: str) -> Any:
@@ -67,8 +69,9 @@ def run_check(check: dict, output: dict | None, output_schema: dict | None) -> t
 
     if op == "code":
         try:
-            result = sandbox.run_function(check.get("code", ""), "grade", output)
-        except sandbox.SandboxError as e:
+            runner = runners.get_runner(check.get("runner"))
+            result = runner.run(check.get("code", ""), "grade", output)
+        except runners.SandboxError as e:
             return False, f"grader error: {e}"
         return bool(result), f"grade(output) -> {result!r}"
 
@@ -113,7 +116,17 @@ def validate_checks(checks: list) -> str | None:
             code = check.get("code")
             if not isinstance(code, str) or not code.strip():
                 return "code check requires a 'code' string defining grade(output)"
-            detail = sandbox.validate_function(code, "grade", limits=GRADER_VALIDATE_LIMITS)
+            runner_name = check.get("runner")
+            if runner_name is not None and runner_name not in runners.enabled_backends():
+                return (
+                    f"runner {runner_name!r} is not enabled on this deployment; "
+                    f"enabled: {runners.enabled_backends()}"
+                )
+            try:
+                runner = runners.get_runner(runner_name)
+            except runners.SandboxError as e:
+                return str(e)
+            detail = runner.validate(code, "grade", limits=GRADER_VALIDATE_LIMITS)
             if detail is not None:
                 return f"invalid grader: {detail}"
     return None

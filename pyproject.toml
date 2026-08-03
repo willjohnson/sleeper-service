@@ -31,6 +31,7 @@ dependencies = [
     "jinja2>=3.1.6",
     "itsdangerous>=2.2.0",
     "adlfs>=2024.12",
+    "docker>=7.1",
     "gcsfs>=2025.1",
     "pydantic-monty>=0.0.19",
     "authlib>=1.7.2",

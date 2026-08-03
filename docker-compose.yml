@@ -38,6 +38,10 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       LANGFUSE_HOST: ${LANGFUSE_PUBLIC_KEY:+http://langfuse-web:3000}
     command: sh -c "alembic upgrade head && uvicorn sleeper_service.main:app --host 0.0.0.0 --port 8000"
+    # For the tier-2 "docker" code runner (RUNNER_BACKENDS=monty,docker in
+    # .env), give api and worker the host Docker socket:
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8000:8000"
     depends_on:
@@ -57,6 +61,8 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       LANGFUSE_HOST: ${LANGFUSE_PUBLIC_KEY:+http://langfuse-web:3000}
     command: arq sleeper_service.worker.WorkerSettings
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock  # tier-2 docker runner
     healthcheck:
       test: ["CMD", "arq", "--check", "sleeper_service.worker.WorkerSettings"]
       interval: 30s

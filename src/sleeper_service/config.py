@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     memory_max_chars: int = 6000
     public_base_url: str = "http://localhost:8000"  # used in feedback URLs
 
+    # Sandboxed code runners (BUILD_PLAN § Runner design): comma-separated
+    # enabled backends, first is the default. "docker" needs the Docker
+    # socket mounted into api and worker.
+    runner_backends: str = "monty"
+    runner_docker_image: str = "python:3.12-slim"
+
     # Langfuse tracing (optional; enabled when all three are set)
     langfuse_host: str | None = None  # e.g. http://langfuse-web:3000
     langfuse_public_key: str | None = None

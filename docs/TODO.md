@@ -11,15 +11,19 @@ BUILD_PLAN § Data stores), and the cheap-model injection classifier
 (opt-in `hooks.injection_classifier_model`, fail-open tier 2 behind
 `screen_untrusted()`) landed later that evening. LLM memory fold/compaction
 (opt-in `settings.learning.fold_model`, deterministic fallback — BUILD_PLAN
-§ Memory & learning) landed 2026-08-03. 113 tests green. See BUILD_PLAN.md
-for design intent and the decision log embedded in each section.
+§ Memory & learning) landed 2026-08-03, as did runner tier 2 (`runtime/
+runners.py` protocol + registry; `docker` throwaway-container backend behind
+`RUNNER_BACKENDS`, per-check `"runner"` field on eval code graders; srt and
+E2B-as-abstraction evaluated and passed over — rationale in BUILD_PLAN
+§ Runner design). 126 tests green. See BUILD_PLAN.md for design intent and
+the decision log embedded in each section.
 
 ## Remaining from the build plan
 
-1. **Runner tiers 2/3** (BUILD_PLAN § Runner design) — tier 1 (in-process
-   Monty sandbox) shipped and powers eval code graders. Disposable
-   containers (evaluate Anthropic srt) and hosted sandboxes remain, needed
-   only if agent code requires real filesystems/packages.
+1. **Runner tier 3 — hosted sandboxes** (BUILD_PLAN § Runner design) —
+   extension point only: an E2B/Modal backend drops into the
+   `runtime/runners.py` REGISTRY if an operator ever wants VM-grade
+   isolation without local infra. No planned work.
 
 ## Housekeeping
 
