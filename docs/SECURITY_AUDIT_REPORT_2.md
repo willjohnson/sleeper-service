@@ -1,6 +1,8 @@
 # Sleeper Service Security Audit Report 2
 
 **Date:** 2026-08-03  
+**Audit run by:** GPT-5.6 Sol (high reasoning)  
+**Remediation reviewed and committed with:** Claude Fable 5 (commit `74b3af2`)  
 **Scope:** FastAPI management/data planes, admin UI, OIDC, background worker,
 callbacks, MCP integrations, data-store grants, delegation, and tenant/team
 authorization.  

@@ -25,6 +25,18 @@ the decision log embedded in each section.
    `runtime/runners.py` REGISTRY if an operator ever wants VM-grade
    isolation without local infra. No planned work.
 
+## Security follow-ups (low severity, from audit-2 review)
+
+Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)) and GPT-5.6 Sol ([SECURITY_AUDIT_REPORT_2.md](SECURITY_AUDIT_REPORT_2.md)); all findings are remediated with regression tests. Remaining low-severity items from the review of the audit-2 fixes:
+
+- [ ] Rotate the CSRF token on login instead of carrying the pre-auth token into
+  the authenticated session (`ui/routes.py` login, `ui/oidc.py` callback)
+- [ ] Key the login rate limit on the real client IP behind a reverse proxy —
+  `request.client.host` is the proxy, making the limit per-email and enabling
+  cheap account-lockout DoS
+- [ ] Treat a delivery-time `OutboundUrlError` as permanent instead of retrying
+  the callback `callback_max_tries` times (`runtime/callbacks.py`)
+
 ## Housekeeping
 
 - **Repo is on GitHub (private):** https://github.com/willjohnson/sleeper-service —
