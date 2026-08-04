@@ -30,3 +30,10 @@
 ### Documentation And Verification
 - [x] Add regression tests and run the complete verification suite
 - [x] Write SECURITY_AUDIT_REPORT_2.md with findings, fixes, and residual risks
+
+## 2026-08-03 21:31 #security #followup
+
+### Review Follow-Ups (low severity, from audit-2 review)
+- [ ] Rotate the CSRF token on login instead of carrying the pre-auth token into the authenticated session (ui/routes.py login, ui/oidc.py callback)
+- [ ] Key the login rate limit on the real client IP behind a reverse proxy — request.client.host is the proxy, making the limit per-email and enabling cheap account-lockout DoS
+- [ ] Treat a delivery-time OutboundUrlError as permanent instead of retrying the callback callback_max_tries times (runtime/callbacks.py)
