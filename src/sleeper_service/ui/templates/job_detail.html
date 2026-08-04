@@ -5,7 +5,7 @@
 <div class="panel">
   <h2>Result <span class="badge {{ job.status }}">{{ job.status }}</span>
     {% if job.status in ('dead_letter', 'failed', 'timeout') and can_submit %}
-    <form method="post" action="/ui/jobs/{{ job.id }}/retry" style="display:inline"><button class="subtle">Retry</button></form>
+    <form method="post" action="/ui/jobs/{{ job.id }}/retry" style="display:inline"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Retry</button></form>
     {% endif %}
   </h2>
   <table>

@@ -3,8 +3,9 @@
 MCP grants (BUILD_PLAN § Stack): `tool_grants` entries name a registered MCP
 server and optionally allowlist tool names:
     {"server": "<name or id>", "tools": ["lookup", ...]}   # tools omitted = all
-`user_ctx` rides along as an X-Sleeper-User-Ctx header on HTTP transports —
-passthrough identity only; row-level enforcement is the data layer's job.
+When `user_ctx` is present, HTTP transports receive a canonical envelope of
+server-derived principal identity plus untrusted application context. A
+per-server secret signs the envelope so downstream authorization can verify it.
 
 Data-store grants (BUILD_PLAN § Data stores): entries pin a store, a path
 prefix, and a mode:
@@ -13,8 +14,11 @@ exposed as list_files/read_file/write_file backed by fsspec (Box by its own
 backend — see runtime/box_store.py), path-scoped to the granted prefix.
 """
 
+import hashlib
+import hmac
 import json
 import posixpath
+import time
 import uuid
 from typing import Any
 
@@ -44,6 +48,7 @@ async def build_mcp_toolsets(
     tenant_id: uuid.UUID,
     tool_grants: list,
     user_ctx: dict | None,
+    auth_ctx: dict | None = None,
 ) -> list[AbstractToolset]:
     toolsets: list[AbstractToolset] = []
     for grant in tool_grants:
@@ -53,11 +58,33 @@ async def build_mcp_toolsets(
             raise GrantError(f"unknown MCP server in tool_grants: {ref!r}")
 
         headers: dict[str, str] = {}
+        creds: dict = {}
         if server.credentials_enc:
             creds = json.loads(decrypt(server.credentials_enc))
             headers.update(creds.get("headers", {}))
         if user_ctx is not None:
-            headers["X-Sleeper-User-Ctx"] = json.dumps(user_ctx)
+            signing_secret = creds.get("user_ctx_signing_secret")
+            if not signing_secret:
+                raise GrantError(
+                    f"MCP server {server.name!r} needs credentials.user_ctx_signing_secret "
+                    "before user_ctx can be forwarded"
+                )
+            timestamp = str(int(time.time()))
+            payload = json.dumps(
+                {"principal": auth_ctx, "context": user_ctx},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            signature = hmac.new(
+                signing_secret.encode(), f"{timestamp}.{payload}".encode(), hashlib.sha256
+            ).hexdigest()
+            headers.update(
+                {
+                    "X-Sleeper-User-Ctx": payload,
+                    "X-Sleeper-User-Ctx-Timestamp": timestamp,
+                    "X-Sleeper-User-Ctx-Signature": f"v1={signature}",
+                }
+            )
 
         if server.transport == "stdio":
             import shlex
@@ -207,7 +234,11 @@ async def build_store_toolset(
 
 async def _lookup(db: AsyncSession, model: type, tenant_id: uuid.UUID, ref: str):
     try:
-        return await db.get(model, uuid.UUID(str(ref)))
+        ref_id = uuid.UUID(str(ref))
     except (ValueError, AttributeError):
-        pass
+        ref_id = None
+    if ref_id is not None:
+        return await db.scalar(
+            select(model).where(model.id == ref_id, model.tenant_id == tenant_id)
+        )
     return await db.scalar(select(model).where(model.tenant_id == tenant_id, model.name == ref))

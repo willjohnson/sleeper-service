@@ -9,13 +9,16 @@ RBAC mirrors the API exactly: any team role makes a thing visible; owner
 promotes versions and approves memory; editor retries jobs.
 """
 
+import hashlib
+import hmac
 import json
 import re
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape
@@ -24,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
+from sleeper_service.auth.rbac import visible_team_ids
 from sleeper_service.constants import Role
 from sleeper_service.db.models import (
     Agent,
@@ -45,8 +49,32 @@ from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
 from sleeper_service.runtime.memory import latest_memory
 
-router = APIRouter(prefix="/ui", include_in_schema=False)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+def _csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+async def _csrf_protect(request: Request) -> None:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    form = await request.form()
+    supplied = str(form.get("_csrf_token", ""))
+    expected = str(request.session.get("csrf_token", ""))
+    if not supplied or not expected or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid CSRF token")
+
+
+router = APIRouter(
+    prefix="/ui",
+    include_in_schema=False,
+    dependencies=[Depends(_csrf_protect)],
+)
 
 
 class NotAuthenticated(Exception):
@@ -90,7 +118,12 @@ async def _tenant_or_home(
 
 
 def _ctx(request: Request, p: UserPrincipal, **extra) -> dict:
-    return {"request": request, "user": p.user, **extra}
+    return {
+        "request": request,
+        "user": p.user,
+        "csrf_token": _csrf_token(request),
+        **extra,
+    }
 
 
 async def _team_role(db: AsyncSession, p: UserPrincipal, team_id: uuid.UUID) -> Role | None:
@@ -115,7 +148,10 @@ async def render_login(
         )
     )
     return templates.TemplateResponse(
-        request, "login.html", {"error": error, "sso": sso}, status_code=status_code
+        request,
+        "login.html",
+        {"error": error, "sso": sso, "csrf_token": _csrf_token(request)},
+        status_code=status_code,
     )
 
 
@@ -131,10 +167,30 @@ async def login(
     password: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
+    from sleeper_service.config import get_settings
+    from sleeper_service.redis_client import get_redis
+
+    settings = get_settings()
+    client_host = request.client.host if request.client else "unknown"
+    identity = hashlib.sha256(f"{client_host}:{email.strip().lower()}".encode()).hexdigest()
+    redis = get_redis()
+    rate_key = f"ui-login:{identity}"
+    count = await redis.incr(rate_key)
+    if count == 1:
+        await redis.expire(rate_key, settings.login_rate_window_s)
+    if count > settings.login_rate_limit:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many login attempts",
+            headers={"Retry-After": str(settings.login_rate_window_s)},
+        )
     user = await db.scalar(select(User).where(User.email == email))
     if user is None or not user.password_hash or not verify_password(password, user.password_hash):
         return await render_login(request, db, "Invalid email or password", status_code=401)
-    request.session["user_id"] = str(user.id)
+    await redis.delete(rate_key)
+    csrf_token = _csrf_token(request)
+    request.session.clear()
+    request.session.update({"user_id": str(user.id), "csrf_token": csrf_token})
     return RedirectResponse("/ui", status_code=303)
 
 
@@ -183,16 +239,20 @@ async def dashboard(
         return tenant
     request.session["tenant_id"] = str(tenant.id)
     tenants = await _visible_tenants(db, p)
-    tenant_agents = select(Agent.id).where(Agent.tenant_id == tenant.id)
+    visible_teams = await visible_team_ids(db, p, tenant.id)
+    tenant_agents = select(Agent.id).where(
+        Agent.tenant_id == tenant.id,
+        Agent.team_id.in_(visible_teams),
+    )
     now = datetime.now(UTC)
 
     total_agents = await db.scalar(
-        select(func.count()).select_from(Agent).where(Agent.tenant_id == tenant.id)
+        select(func.count()).select_from(Agent).where(Agent.id.in_(tenant_agents))
     )
     live_agents = await db.scalar(
         select(func.count())
         .select_from(Agent)
-        .where(Agent.tenant_id == tenant.id, Agent.current_version_id.is_not(None))
+        .where(Agent.id.in_(tenant_agents), Agent.current_version_id.is_not(None))
     )
     week_ago = now - timedelta(days=7)
     jobs_7d = await db.scalar(
@@ -510,23 +570,38 @@ async def agent_detail(
 # --- Jobs ---
 
 
-async def _render_tree(db: AsyncSession, job: Job) -> str:
+async def _render_tree(
+    db: AsyncSession,
+    job: Job,
+    p: UserPrincipal,
+    *,
+    visited: set[uuid.UUID] | None = None,
+    depth: int = 0,
+) -> str:
+    visited = visited or {job.id}
+    if depth >= 50:
+        return ""
     children = list(
         await db.scalars(select(Job).where(Job.parent_job_id == job.id).order_by(Job.created_at))
     )
     if not children:
         return ""
     parts = ["<ul>"]
+    visible_count = 0
     for child in children:
         agent = await db.get(Agent, child.agent_id)
+        if child.id in visited or agent is None or await _team_role(db, p, agent.team_id) is None:
+            continue
+        visible_count += 1
+        visited.add(child.id)
         parts.append(
             f'<li><span class="badge {escape(child.status)}">{escape(child.status)}</span> '
             f"<strong>{escape(agent.name if agent else '?')}</strong> "
             f'<a class="mono" href="/ui/jobs/{child.id}">{str(child.id)[:8]}</a>'
-            f"{await _render_tree(db, child)}</li>"
+            f"{await _render_tree(db, child, p, visited=visited, depth=depth + 1)}</li>"
         )
     parts.append("</ul>")
-    return "".join(parts)
+    return "".join(parts) if visible_count else ""
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -549,7 +624,7 @@ async def job_detail(
     events = list(
         await db.scalars(select(JobEvent).where(JobEvent.job_id == job.id).order_by(JobEvent.id))
     )
-    tree_html = await _render_tree(db, job)
+    tree_html = await _render_tree(db, job, p)
 
     return templates.TemplateResponse(
         request,

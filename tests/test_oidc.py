@@ -188,7 +188,7 @@ async def test_oidc_unknown_email_rejected(
         follow_redirects=False,
     )
     assert r.status_code == 403
-    assert "No Sleeper Service account" in r.text
+    assert "No eligible Sleeper Service account" in r.text
 
     r = await client.get("/ui", follow_redirects=False)
     assert r.headers["location"] == "/ui/login"  # no session was created
@@ -215,3 +215,37 @@ async def test_oidc_login_unconfigured_tenant_redirects(client: AsyncClient, org
     r = await client.get(f"/ui/oidc/{org['tenant']['id']}/login", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/ui/login"
+
+
+async def test_tenant_oidc_cannot_authenticate_superuser(
+    client: AsyncClient, org: dict, bootstrap, idp: dict
+) -> None:
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    await _configure(client, root, tenant_id, idp["issuer"])
+
+    state, nonce = await _start_sso(client, tenant_id, idp["issuer"])
+    r = await client.get(
+        f"/ui/oidc/{tenant_id}/callback",
+        params={"code": f"{nonce}:root@example.com", "state": state},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403
+    r = await client.get("/ui", follow_redirects=False)
+    assert r.headers["location"] == "/ui/login"
+
+
+async def test_tenant_oidc_requires_membership(
+    client: AsyncClient, org: dict, bootstrap, idp: dict
+) -> None:
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    await _configure(client, root, tenant_id, idp["issuer"])
+
+    state, nonce = await _start_sso(client, tenant_id, idp["issuer"])
+    r = await client.get(
+        f"/ui/oidc/{tenant_id}/callback",
+        params={"code": f"{nonce}:dave@example.com", "state": state},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403

@@ -230,6 +230,10 @@ class Job(UUIDPKMixin, Base):
     cost: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal(0))
     callback_url: Mapped[str | None]
     user_ctx: Mapped[dict | None] = mapped_column(JSONB)
+    # Server-derived identity of the authenticated submitter. Kept separate
+    # from caller-provided user_ctx so downstream integrations can distinguish
+    # authenticated platform identity from application context.
+    auth_ctx: Mapped[dict | None] = mapped_column(JSONB)
     idempotency_key: Mapped[str | None]
     # Eval jobs run through the normal pipeline but are excluded from spend
     # rollups and budget refusals (BUILD_PLAN § Eval design)

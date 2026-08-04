@@ -37,6 +37,11 @@ async def create_mcp_server(
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> McpServer:
     await _gate(tenant_id, db, principal, admin=True)
+    if body.transport == "stdio" and not principal.is_superuser:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only instance superusers may register stdio MCP servers",
+        )
     dup = await db.scalar(
         select(McpServer).where(McpServer.tenant_id == tenant_id, McpServer.name == body.name)
     )

@@ -50,7 +50,13 @@ from sleeper_service.ui.oidc import router as ui_oidc_router  # noqa: E402
 from sleeper_service.ui.routes import NotAuthenticated  # noqa: E402
 from sleeper_service.ui.routes import router as ui_router  # noqa: E402
 
-app.add_middleware(SessionMiddleware, secret_key=get_settings().secret_key, same_site="lax")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=get_settings().secret_key,
+    same_site="lax",
+    https_only=get_settings().session_https_only,
+    max_age=get_settings().session_max_age_s,
+)
 app.include_router(ui_router)
 app.include_router(ui_oidc_router)
 app.mount(

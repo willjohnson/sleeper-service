@@ -16,9 +16,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.crypto import decrypt
-from sleeper_service.db.models import OidcConfig, User
+from sleeper_service.db.models import OidcConfig, Team, TeamMember, User
 from sleeper_service.db.session import get_db
-from sleeper_service.ui.routes import render_login
+from sleeper_service.ui.routes import _csrf_token, render_login
 
 router = APIRouter(prefix="/ui/oidc", include_in_schema=False)
 
@@ -69,17 +69,30 @@ async def oidc_callback(
 
     claims = token.get("userinfo") or {}
     email = claims.get("email")
-    if not email or claims.get("email_verified") is False:
+    if not email or claims.get("email_verified") is not True:
         return await render_login(
             request, db, "SSO failed: the identity provider did not assert a verified email",
             status_code=401,
         )
     user = await db.scalar(select(User).where(func.lower(User.email) == email.lower()))
-    if user is None:
+    membership = None
+    if user is not None and not user.is_superuser:
+        membership = await db.scalar(
+            select(TeamMember.user_id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(TeamMember.user_id == user.id, Team.tenant_id == tenant_id)
+            .limit(1)
+        )
+    if user is None or user.is_superuser or membership is None:
         return await render_login(
-            request, db, f"No Sleeper Service account for {email} — ask an owner to add you",
+            request,
+            db,
+            "No eligible Sleeper Service account for this tenant",
             status_code=403,
         )
-    request.session["user_id"] = str(user.id)
-    request.session["tenant_id"] = str(tenant_id)
+    csrf_token = _csrf_token(request)
+    request.session.clear()
+    request.session.update(
+        {"user_id": str(user.id), "tenant_id": str(tenant_id), "csrf_token": csrf_token}
+    )
     return RedirectResponse("/ui", status_code=303)

@@ -121,6 +121,7 @@ def build_delegation_toolset(caller: Agent, job_id: uuid.UUID) -> AbstractToolse
                 parent_job_id=job.id,
                 payload={"prompt": prompt},
                 user_ctx=job.user_ctx,
+                auth_ctx=job.auth_ctx,
             )
             db.add(child)
             await db.commit()

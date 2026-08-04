@@ -203,6 +203,11 @@ async def ingest_event(
         agent,
         version,
         context=context.model_dump(mode="json"),
+        auth_ctx={
+            "type": "event_source",
+            "source_id": str(source.id),
+            "tenant_id": str(source.tenant_id),
+        },
         idempotency_key=idempotency_key,
     )
     return EventAccepted(job_id=job.id, deduped=existed)

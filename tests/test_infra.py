@@ -3,6 +3,7 @@ job listing/retry, health."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
@@ -160,6 +161,7 @@ async def test_callback_failure_notifies(
         sent.append(event_type)
 
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", failing_client)
+    monkeypatch.setattr(callbacks, "validate_callback_target", AsyncMock())
     monkeypatch.setattr(worker_mod.notify, "notify", fake_notify)
 
     await worker_mod.deliver_callback({"job_try": get_settings().callback_max_tries}, job_id)

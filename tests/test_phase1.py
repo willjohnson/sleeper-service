@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import uuid
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -400,6 +401,7 @@ async def test_callback_delivery_and_retries(
         return real_client(transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", make_client)
+    monkeypatch.setattr(callbacks, "validate_callback_target", AsyncMock())
     await deliver_callback({"job_try": 1}, str(job_id))
 
     assert len(received) == 1

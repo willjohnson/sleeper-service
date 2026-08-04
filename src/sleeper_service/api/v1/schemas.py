@@ -323,7 +323,9 @@ class McpServerCreate(BaseModel):
     # streamable_http/sse: endpoint is the URL. stdio: endpoint is the command line.
     endpoint: str = Field(min_length=1)
     transport: str = Field(pattern="^(streamable_http|sse|stdio)$")
-    # {"headers": {"Authorization": "Bearer ..."}} — encrypted at rest
+    # {"headers": {"Authorization": "Bearer ..."},
+    #  "user_ctx_signing_secret": "..."} — encrypted at rest. The signing
+    # secret is required before jobs with user_ctx may use this server.
     credentials: dict | None = None
 
 

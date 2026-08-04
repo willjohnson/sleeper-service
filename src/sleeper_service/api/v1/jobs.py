@@ -33,6 +33,7 @@ from sleeper_service.db.models import (
 from sleeper_service.db.session import get_db
 from sleeper_service.queue import get_pool
 from sleeper_service.runtime import links, spending
+from sleeper_service.runtime.outbound import OutboundUrlError, validate_callback_url
 
 router = APIRouter(tags=["jobs"])
 
@@ -105,6 +106,7 @@ async def create_job(
     context: dict,
     callback_url: str | None = None,
     user_ctx: dict | None = None,
+    auth_ctx: dict | None = None,
     idempotency_key: str | None = None,
     sync: bool = False,
 ) -> tuple[Job, bool]:
@@ -127,6 +129,7 @@ async def create_job(
         payload=context,
         callback_url=callback_url,
         user_ctx=user_ctx,
+        auth_ctx=auth_ctx,
         idempotency_key=idempotency_key,
     )
     db.add(job)
@@ -182,12 +185,38 @@ async def submit_job(
 ) -> Job:
     agent = await _get_agent_for(db, principal, agent_id, submit=True)
     version = await _resolve_version(db, agent, body)
+    tenant = await db.get(Tenant, agent.tenant_id)
+
+    if isinstance(principal, UserPrincipal):
+        auth_ctx = {
+            "type": "user",
+            "user_id": str(principal.user.id),
+            "team_role": principal.roles.get(agent.team_id),
+            "tenant_id": str(agent.tenant_id),
+            "team_id": str(agent.team_id),
+            "agent_id": str(agent.id),
+        }
+    else:
+        auth_ctx = {
+            "type": "invoke_key",
+            "key_id": str(principal.key.id),
+            "scope": principal.scope,
+            "scope_id": str(principal.scope_id),
+            "tenant_id": str(agent.tenant_id),
+            "team_id": str(agent.team_id),
+            "agent_id": str(agent.id),
+        }
 
     if body.context.links:
-        tenant = await db.get(Tenant, agent.tenant_id)
         link_error = links.check_links(body.context.links, tenant.settings or {})
         if link_error is not None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, link_error)
+
+    if body.callback_url:
+        try:
+            validate_callback_url(body.callback_url, tenant.settings or {})
+        except OutboundUrlError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
 
     for file_id in body.context.files:
         file = await db.get(File, file_id)
@@ -201,6 +230,7 @@ async def submit_job(
         context=body.context.model_dump(mode="json"),
         callback_url=body.callback_url,
         user_ctx=body.user_ctx,
+        auth_ctx=auth_ctx,
         idempotency_key=body.idempotency_key,
         sync=sync,
     )
@@ -284,9 +314,16 @@ async def get_job_tree(
         children = await db.scalars(
             select(Job).where(Job.parent_job_id == node.id).order_by(Job.created_at)
         )
-        out.children = [
-            await build(child, depth + 1) for child in children if child.id not in visited
-        ]
+        visible_children = []
+        for child in children:
+            if child.id in visited:
+                continue
+            try:
+                await _get_agent_for(db, principal, child.agent_id, submit=False)
+            except HTTPException:
+                continue
+            visible_children.append(await build(child, depth + 1))
+        out.children = visible_children
         return out
 
     return await build(root)

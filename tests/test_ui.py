@@ -1,5 +1,6 @@
 """Admin UI: session auth, page rendering, owner-gated actions."""
 
+import re
 import uuid
 
 from httpx import AsyncClient
@@ -9,10 +10,18 @@ from tests.conftest import auth
 
 
 async def _login(client: AsyncClient, email: str, password: str = "password-123"):
+    page = await client.get("/ui/login")
+    token = re.search(r'name="_csrf_token" value="([^"]+)"', page.text).group(1)
     r = await client.post(
-        "/ui/login", data={"email": email, "password": password}, follow_redirects=False
+        "/ui/login",
+        data={"email": email, "password": password, "_csrf_token": token},
+        follow_redirects=False,
     )
     return r
+
+
+def _csrf(html: str) -> str:
+    return re.search(r'name="_csrf_token" value="([^"]+)"', html).group(1)
 
 
 async def test_login_flow(client: AsyncClient, risk_agent: dict) -> None:
@@ -70,7 +79,10 @@ async def test_promote_via_ui_owner_only(client: AsyncClient, risk_agent: dict) 
 
     # editor's POST is a no-op
     await _login(client, "bob@example.com")
-    await client.post(f"/ui/agents/{agent_id}/promote/2")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    await client.post(
+        f"/ui/agents/{agent_id}/promote/2", data={"_csrf_token": _csrf(page.text)}
+    )
     r = await client.get(f"/v1/agents/{agent_id}", headers=bob)
     current = r.json()["current_version_id"]
     assert current == risk_agent["version"]["id"]
@@ -79,7 +91,9 @@ async def test_promote_via_ui_owner_only(client: AsyncClient, risk_agent: dict) 
     await _login(client, "alice@example.com")
     page = await client.get(f"/ui/agents/{agent_id}")
     assert "Promote" in page.text
-    await client.post(f"/ui/agents/{agent_id}/promote/2")
+    await client.post(
+        f"/ui/agents/{agent_id}/promote/2", data={"_csrf_token": _csrf(page.text)}
+    )
     r = await client.get(f"/v1/agents/{agent_id}", headers=bob)
     assert r.json()["current_version_id"] != current
 
@@ -103,3 +117,34 @@ async def test_job_page_and_outsider_blocked(client: AsyncClient, risk_agent: di
     await _login(client, "dave@example.com")
     r = await client.get(f"/ui/jobs/{job_id}", follow_redirects=False)
     assert r.status_code == 303
+
+
+async def test_ui_posts_require_csrf(client: AsyncClient, risk_agent: dict) -> None:
+    await _login(client, "alice@example.com")
+    r = await client.post(f"/ui/agents/{risk_agent['agent']['id']}/promote/1")
+    assert r.status_code == 403
+
+
+async def test_login_is_rate_limited(client: AsyncClient) -> None:
+    page = await client.get("/ui/login")
+    token = _csrf(page.text)
+    email = f"rate-limit-{uuid.uuid4()}@example.com"
+    for _ in range(10):
+        r = await client.post(
+            "/ui/login",
+            data={
+                "email": email,
+                "password": "wrong",
+                "_csrf_token": token,
+            },
+        )
+        assert r.status_code == 401
+    r = await client.post(
+        "/ui/login",
+        data={
+            "email": email,
+            "password": "wrong",
+            "_csrf_token": token,
+        },
+    )
+    assert r.status_code == 429

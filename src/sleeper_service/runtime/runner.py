@@ -142,7 +142,11 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         api_key = await resolve_api_key(db, agent, model_row.provider)
         try:
             toolsets = await build_mcp_toolsets(
-                db, agent.tenant_id, version.tool_grants or [], job.user_ctx
+                db,
+                agent.tenant_id,
+                version.tool_grants or [],
+                job.user_ctx,
+                job.auth_ctx,
             )
             store_toolset = await build_store_toolset(
                 db, agent.tenant_id, version.data_store_grants or []

@@ -16,7 +16,7 @@
     {% endif %}
     <div class="spacer"></div>
     <div class="whoami">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</div>
-    <form method="post" action="/ui/logout"><button class="ghost" style="width:100%">Sign out</button></form>
+    <form method="post" action="/ui/logout"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="ghost" style="width:100%">Sign out</button></form>
   </aside>
   <main class="main">
     <div class="topbar">

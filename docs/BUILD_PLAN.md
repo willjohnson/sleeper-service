@@ -116,7 +116,7 @@ worker:
 
 - Async-first with callbacks, because jobs will outlive HTTP timeouts (per the note). Sync mode for fast agents.
 - Retries, idempotency keys on submission, dead-letter status, per-tenant concurrency caps — this queue discipline is the backbone; it's in Phase 1, not deferred.
-- `user_ctx` passthrough: caller's user/team identity rides along and constrains MCP grants at runtime (mitigates the info-leak concern in the note; full row-level enforcement is an open question).
+- Signed user context: Sleeper stores authenticated caller identity separately from caller-provided application context, then sends a canonical, timestamped HMAC envelope using a per-MCP secret. Downstream row-level enforcement verifies the envelope and treats the nested application context as untrusted.
 - **Runtime guardrails**: every agent version has `max_iterations` (tool-call loop cap) and `timeout_s` (wall clock). A stuck loop dies with `iteration_limit` / `timeout` status even if it's under budget.
 - **Rate limiting**: per-API-key request limits (Redis-backed) on top of per-tenant worker concurrency caps.
 
@@ -227,7 +227,7 @@ Three tiers, adopted in order of need — start with the simplest:
 ## Open questions (resolutions logged 2026-08-01)
 
 1. ~~**Datasets**~~ — resolved: datasets = **data stores** (S3/Blob/GCS/Box/local grants, path-scoped, read-only by default). Box with folder-ID scoping: downscoped tokens + name-walk resolution (built natively, not via MCP — deviation logged in the Data stores section). See Data stores section.
-2. ~~**User-context enforcement depth**~~ — resolved: v1 is **passthrough identity only**. Sleeper Service faithfully passes `user_ctx` to MCP servers and records it on the job for audit; row-level enforcement is the data layer's responsibility (e.g., the MCP server sets a session role/variable and Postgres RLS decides). Sleeper Service does not attempt its own row-level security.
+2. ~~**User-context enforcement depth**~~ — resolved: v1 stores server-derived caller identity in `jobs.auth_ctx` and caller-supplied application context in `jobs.user_ctx`. HTTP MCP forwarding requires `credentials.user_ctx_signing_secret` and sends both in a timestamped HMAC envelope. The MCP server verifies authenticity and freshness before using the principal for row-level enforcement; nested application context remains untrusted.
 3. ~~**Name & license**~~ — resolved: **Sleeper Service** (original pick "Cassidy" was taken by cassidyai.com). License: **Apache-2.0** (patent grant + built-in contribution terms keep relicensing clean if a hosted tier ever happens).
 4. ~~**Eval graders**~~ — resolved: deterministic field checks + optional code graders in v1; LLM-as-judge deferred. See Eval design section.
 5. ~~**Runner isolation**~~ — resolved as a tiered path: WASM in-process first (micropython-wasm or Pydantic Monty), disposable containers second (evaluate Anthropic srt), hosted sandboxes as a pluggable third option. See Runner design section.

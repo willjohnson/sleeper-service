@@ -17,6 +17,7 @@ import httpx
 from sleeper_service.config import get_settings
 from sleeper_service.db.models import Job, JobEvent
 from sleeper_service.db.session import get_sessionmaker
+from sleeper_service.runtime.outbound import OutboundUrlError, validate_callback_target
 
 
 def sign(body: bytes, timestamp: int) -> str:
@@ -56,10 +57,17 @@ async def deliver(job_id: uuid.UUID) -> None:
         job = await db.get(Job, job_id)
         if job is None or not job.callback_url:
             return
-        from sleeper_service.db.models import Agent
+        from sleeper_service.db.models import Agent, Tenant
         from sleeper_service.runtime.memory import learning_enabled
 
         agent = await db.get(Agent, job.agent_id)
+        tenant = await db.get(Tenant, agent.tenant_id) if agent is not None else None
+        if tenant is None:
+            raise CallbackDeliveryError("callback job has no tenant")
+        try:
+            await validate_callback_target(job.callback_url, tenant.settings or {})
+        except OutboundUrlError as e:
+            raise CallbackDeliveryError(f"callback destination rejected: {e}") from e
         learning = agent is not None and learning_enabled(agent.options or {})
         body = json.dumps(build_payload(job, learning=learning)).encode()
         signature = sign(body, int(time.time()))

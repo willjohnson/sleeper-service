@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     callback_max_tries: int = 5
     sync_job_timeout_s: int = 120  # cap for ?sync=true regardless of version timeout
 
+    # Browser authentication. Production defaults are secure; local HTTP
+    # development and tests must explicitly disable the Secure cookie flag.
+    session_https_only: bool = True
+    session_max_age_s: int = 28_800
+    login_rate_limit: int = 10
+    login_rate_window_s: int = 300
+
     # Delegation / memory / learning
     max_delegation_depth: int = 3
     memory_max_chars: int = 6000
