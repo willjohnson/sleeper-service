@@ -64,14 +64,19 @@ def _calc_cost(usage: RunUsage, model_name: str) -> Decimal:
         return Decimal(0)
 
 
-async def _load_file_content(payload: dict) -> tuple[list, list[str]]:
-    """Returns (model content parts, untrusted text for injection screening)."""
+async def _load_file_content(payload: dict, tenant_id: uuid.UUID) -> tuple[list, list[str]]:
+    """Returns (model content parts, untrusted text for injection screening).
+
+    Every ingress validates file tenancy before the job is created; the check
+    is repeated here so a payload that reaches the runner by some other route
+    still cannot pull another tenant's file into the prompt.
+    """
     parts: list = []
     texts: list[str] = []
     for file_id in payload.get("files", []):
         async with get_sessionmaker()() as db:
             file = await db.get(File, uuid.UUID(file_id))
-        if file is None:
+        if file is None or file.tenant_id != tenant_id:
             continue
         data = await storage.get_object(file.object_key)
         if file.content_type.startswith(TEXT_TYPES):
@@ -176,7 +181,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
 
     # Assemble user content; collect untrusted text for the injection screen
     prompt_text = job.payload["prompt"]
-    file_parts, file_texts = await _load_file_content(job.payload)
+    file_parts, file_texts = await _load_file_content(job.payload, tenant.id)
     link_blocks = await links.fetch_links(job.payload.get("links", []), tenant.settings or {})
     user_content: list = [prompt_text, *file_parts, *link_blocks]
     untrusted = [prompt_text, *file_texts, *link_blocks]

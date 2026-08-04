@@ -19,6 +19,7 @@ from httpx import AsyncClient
 from joserfc import jwt as jose_jwt
 from joserfc.jwk import RSAKey
 
+from sleeper_service.config import get_settings
 from tests.conftest import auth
 
 CLIENT_ID = "sleeper-ui"
@@ -26,9 +27,15 @@ CLIENT_SECRET = "stub-idp-secret"
 
 
 @pytest.fixture
-async def idp(unused_tcp_port: int) -> dict:
+async def idp(unused_tcp_port: int, monkeypatch) -> dict:
+    # The stub runs on 127.0.0.1 and issuer validation rejects loopback in
+    # production, so the e2e flow needs the dev hatch. Scoped to this fixture:
+    # every other test sees the production default.
+    monkeypatch.setattr(get_settings(), "oidc_allow_loopback_issuers", True)
     issuer = f"http://127.0.0.1:{unused_tcp_port}"
     key = RSAKey.generate_key(2048, parameters={"kid": "test", "use": "sig", "alg": "RS256"})
+    # tests mutate this to make the IdP advertise hostile metadata
+    overrides: dict = {}
 
     stub = FastAPI()
 
@@ -42,6 +49,7 @@ async def idp(unused_tcp_port: int) -> dict:
             "response_types_supported": ["code"],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256"],
+            **overrides,
         }
 
     @stub.get("/jwks")
@@ -77,7 +85,7 @@ async def idp(unused_tcp_port: int) -> dict:
     serve_task = asyncio.create_task(server.serve())
     while not server.started:
         await asyncio.sleep(0.02)
-    yield {"issuer": issuer}
+    yield {"issuer": issuer, "metadata_overrides": overrides}
     server.should_exit = True
     await serve_task
 
@@ -151,6 +159,53 @@ async def test_oidc_config_bad_issuer_rejected(client: AsyncClient, org: dict, b
     assert r.status_code == 422
 
 
+async def test_oidc_config_rejects_private_issuer(
+    client: AsyncClient, org: dict, bootstrap
+) -> None:
+    """A tenant-admin-controlled issuer is a server-side request target —
+    reject non-global destinations like any other outbound URL. No `idp`
+    fixture here, so the loopback dev hatch is off, as in production."""
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    # metadata IP literal
+    r = await client.put(
+        f"/v1/tenants/{tenant_id}/oidc",
+        headers=root,
+        json={
+            "issuer": "http://169.254.169.254/latest",
+            "client_id": "c",
+            "client_secret": "s",
+        },
+    )
+    assert r.status_code == 422
+    assert "non-public" in r.json()["detail"]
+    # loopback hostname (no dev hatch on in tests by default)
+    r = await client.put(
+        f"/v1/tenants/{tenant_id}/oidc",
+        headers=root,
+        json={"issuer": "http://localhost:8080/", "client_id": "c", "client_secret": "s"},
+    )
+    assert r.status_code == 422
+    # credentials in the issuer URL
+    r = await client.put(
+        f"/v1/tenants/{tenant_id}/oidc",
+        headers=root,
+        json={
+            "issuer": "https://user:pass@idp.example.com/",
+            "client_id": "c",
+            "client_secret": "s",
+        },
+    )
+    assert r.status_code == 422
+    # a clean public issuer is accepted
+    r = await client.put(
+        f"/v1/tenants/{tenant_id}/oidc",
+        headers=root,
+        json={"issuer": "https://idp.example.com/", "client_id": "c", "client_secret": "s"},
+    )
+    assert r.status_code == 200
+
+
 # --- Login flow (e2e against the stub IdP) ---
 
 
@@ -209,6 +264,34 @@ async def test_oidc_forged_state_rejected(
     )
     assert r.status_code == 401
     assert "SSO failed" in r.text
+
+
+async def test_oidc_metadata_endpoints_are_validated(
+    client: AsyncClient, org: dict, bootstrap, idp: dict
+) -> None:
+    """A public issuer whose discovery document points the token endpoint at an
+    internal address must not get the tenant's client secret POSTed there —
+    validating the issuer alone leaves the SSRF one level down."""
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    await _configure(client, root, tenant_id, idp["issuer"])
+    overrides = idp["metadata_overrides"]
+
+    for hostile in (
+        {"token_endpoint": "http://169.254.169.254/latest/meta-data/"},
+        {"jwks_uri": "http://10.0.0.7:8200/v1/secret"},
+        {"issuer": "https://someone-elses-idp.example.com"},
+    ):
+        overrides.clear()
+        overrides.update(hostile)
+        r = await client.get(f"/ui/oidc/{tenant_id}/login", follow_redirects=False)
+        assert r.status_code == 400, f"{hostile} was not rejected: {r.status_code}"
+        assert "could not be validated" in r.text
+
+    # the honest document still works
+    overrides.clear()
+    state, _nonce = await _start_sso(client, tenant_id, idp["issuer"])
+    assert state
 
 
 async def test_oidc_login_unconfigured_tenant_redirects(client: AsyncClient, org: dict) -> None:

@@ -284,6 +284,49 @@ async def test_tenant_admin_cannot_register_stdio_mcp(client, org, bootstrap):
 
 
 @pytest.mark.asyncio
+async def test_tenant_admin_cannot_register_local_data_store(client, org, bootstrap):
+    async with get_sessionmaker()() as db:
+        org_team = await db.scalar(
+            select(Team).where(
+                Team.tenant_id == uuid.UUID(org["tenant"]["id"]),
+                Team.is_org_team.is_(True),
+            )
+        )
+    root = auth(bootstrap.superuser_key)
+    alice = auth(org["users"]["alice"]["api_key"])
+    r = await client.put(
+        f"/v1/teams/{org_team.id}/members/{org['users']['alice']['id']}",
+        headers=root,
+        json={"role": "owner"},
+    )
+    assert r.status_code == 200
+
+    # a tenant admin cannot point a data store at the service container's fs
+    r = await client.post(
+        f"/v1/tenants/{org['tenant']['id']}/data-stores",
+        headers=alice,
+        json={"name": "host-fs", "type": "local", "config": {"base_path": "/"}},
+    )
+    assert r.status_code == 403
+
+    # an instance superuser can (operators own the host fs)
+    r = await client.post(
+        f"/v1/tenants/{org['tenant']['id']}/data-stores",
+        headers=root,
+        json={"name": "host-fs", "type": "local", "config": {"base_path": "/tmp"}},
+    )
+    assert r.status_code == 201
+
+    # tenant admins retain the other backends
+    r = await client.post(
+        f"/v1/tenants/{org['tenant']['id']}/data-stores",
+        headers=alice,
+        json={"name": "bucket", "type": "s3", "config": {"bucket": "b"}},
+    )
+    assert r.status_code == 201
+
+
+@pytest.mark.asyncio
 async def test_job_submission_rejects_private_callback(client, risk_agent):
     r = await client.post(
         f"/v1/agents/{risk_agent['agent']['id']}/jobs",

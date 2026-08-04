@@ -8,6 +8,7 @@ key from the event body; duplicates map onto the jobs idempotency constraint
 and return the original job with deduped=true.
 """
 
+import hmac
 import re
 import secrets
 import uuid
@@ -30,7 +31,7 @@ from sleeper_service.auth.keys import hash_key
 from sleeper_service.auth.principal import UserPrincipal, get_user_principal
 from sleeper_service.auth.rbac import require_role
 from sleeper_service.constants import Role
-from sleeper_service.db.models import Agent, EventSource, Tenant
+from sleeper_service.db.models import Agent, EventSource, File, Tenant
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import links as links_mod
 
@@ -150,6 +151,7 @@ async def delete_event_source(
         require_role(principal, agent.team_id, Role.OWNER)
     else:
         from sleeper_service.auth.rbac import require_tenant_admin
+
         await require_tenant_admin(db, principal, tenant_id)
     await db.delete(source)
     await db.commit()
@@ -170,7 +172,11 @@ async def ingest_event(
     db: AsyncSession = Depends(get_db),
 ) -> EventAccepted:
     source = await db.get(EventSource, source_id)
-    if source is None or not x_event_secret or hash_key(x_event_secret) != source.secret_hash:
+    if (
+        source is None
+        or not x_event_secret
+        or not hmac.compare_digest(hash_key(x_event_secret), source.secret_hash)
+    ):
         # One error for both unknown source and bad secret — don't leak which
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid event source or secret")
 
@@ -191,6 +197,11 @@ async def ingest_event(
         link_error = links_mod.check_links(context.links, tenant.settings or {})
         if link_error is not None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, link_error)
+
+    for file_id in context.files:
+        file = await db.get(File, file_id)
+        if file is None or file.tenant_id != agent.tenant_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
 
     idempotency_key = None
     if source.dedup_key_path:

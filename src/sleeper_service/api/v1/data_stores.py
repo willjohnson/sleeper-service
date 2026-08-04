@@ -34,6 +34,11 @@ async def create_data_store(
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> DataStore:
     await _gate(tenant_id, db, principal, admin=True)
+    if body.type == "local" and not principal.is_superuser:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only instance superusers may register local data stores",
+        )
     if body.type not in REQUIRED_CONFIG:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -16,16 +16,16 @@ from sleeper_service.api.v1.schemas import OidcConfigOut, OidcConfigSet
 from sleeper_service.api.v1.tenants import _get_visible_tenant
 from sleeper_service.auth.principal import UserPrincipal, get_user_principal
 from sleeper_service.auth.rbac import require_tenant_admin
+from sleeper_service.config import get_settings
 from sleeper_service.crypto import encrypt
 from sleeper_service.db.models import OidcConfig
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime.outbound import OutboundUrlError, validate_callback_url
 
 router = APIRouter(prefix="/tenants/{tenant_id}/oidc", tags=["oidc"])
 
 
-async def _gate(
-    tenant_id: uuid.UUID, db: AsyncSession, principal: UserPrincipal
-) -> None:
+async def _gate(tenant_id: uuid.UUID, db: AsyncSession, principal: UserPrincipal) -> None:
     await _get_visible_tenant(tenant_id, db, principal)
     await require_tenant_admin(db, principal, tenant_id)
 
@@ -38,6 +38,14 @@ async def set_oidc_config(
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> OidcConfig:
     await _gate(tenant_id, db, principal)
+    try:
+        validate_callback_url(
+            body.issuer,
+            allow_loopback=get_settings().oidc_allow_loopback_issuers,
+            label="OIDC issuer",
+        )
+    except OutboundUrlError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     config = await db.scalar(select(OidcConfig).where(OidcConfig.tenant_id == tenant_id))
     if config is None:
         config = OidcConfig(tenant_id=tenant_id)

@@ -29,6 +29,8 @@ _REDIS = _host_port("REDIS_HOST_PORT", "6379")
 os.environ["DATABASE_URL"] = f"postgresql+asyncpg://sleeper:sleeper@localhost:{_PG}/sleeper_test"
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
 os.environ["SESSION_HTTPS_ONLY"] = "false"
+# OIDC_ALLOW_LOOPBACK_ISSUERS stays at its production default (false) so issuer
+# validation is exercised as deployed; the stub-IdP `idp` fixture turns it on.
 # Redis db 1: isolates test enqueues/rate-limit counters from the compose worker (db 0)
 os.environ["REDIS_URL"] = f"redis://localhost:{_REDIS}/1"
 os.environ["MINIO_BUCKET"] = "sleeper-files-test"

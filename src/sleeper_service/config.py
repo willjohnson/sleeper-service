@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     login_rate_limit: int = 10
     login_rate_window_s: int = 300
 
+    # OIDC issuer validation. Production rejects loopback/private issuers; the
+    # e2e stub IdP runs on 127.0.0.1, so tests enable this hatch explicitly.
+    oidc_allow_loopback_issuers: bool = False
+
     # Delegation / memory / learning
     max_delegation_depth: int = 3
     memory_max_chars: int = 6000

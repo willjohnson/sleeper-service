@@ -246,6 +246,80 @@ def test_template_rendering_unit() -> None:
     assert out["prompt"] == f"v=deep n=5 all={json.dumps(body)} missing="
 
 
+async def test_event_source_rejects_other_tenants_file(
+    client: AsyncClient, risk_agent: dict, bootstrap
+) -> None:
+    """An event secret holder must not pull another tenant's file into the job."""
+    alice = auth(risk_agent["users"]["alice"]["api_key"])  # owner of risk's agent
+    bob = auth(risk_agent["users"]["bob"]["api_key"])  # editor, can upload in risk tenant
+    tenant_id = risk_agent["tenant"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+
+    # create a second tenant + user with a file the risk agent must not see
+    root = auth(bootstrap.superuser_key)
+    other_tenant = (await client.post("/v1/tenants", headers=root, json={"name": "other"})).json()
+    other_user = (
+        await client.post(
+            "/v1/users", headers=root, json={"email": "zoe@example.com", "password": "password-123"}
+        )
+    ).json()
+    other_team = (
+        await client.post(
+            f"/v1/tenants/{other_tenant['id']}/teams",
+            headers=root,
+            json={"name": "other-team", "owner_user_id": other_user["id"]},
+        )
+    ).json()
+    assert other_team["id"]
+    zoe = auth(other_user["api_key"])
+    other_file = (
+        await client.post(
+            f"/v1/files?tenant_id={other_tenant['id']}",
+            headers=zoe,
+            files={"file": ("secret.txt", b"other-tenant-secret", "text/plain")},
+        )
+    ).json()
+
+    # a same-tenant file, accepted as the positive control
+    own_file = (
+        await client.post(
+            f"/v1/files?tenant_id={tenant_id}",
+            headers=bob,
+            files={"file": ("own.txt", b"ok", "text/plain")},
+        )
+    ).json()
+
+    body = {
+        "name": "file-events",
+        "target_agent_id": agent_id,
+        "payload_template": {
+            "prompt": "see {{event.file_id}}",
+            "files": ["{{event.file_id}}"],
+        },
+        "dedup_key_path": "event.id",
+    }
+    r = await client.post(f"/v1/tenants/{tenant_id}/event-sources", headers=alice, json=body)
+    assert r.status_code == 201
+    source = r.json()
+    ok_headers = {"X-Event-Secret": source["secret"]}
+
+    # an event submitter holding only the source secret supplies the file id
+    r = await client.post(
+        f"/v1/events/{source['id']}",
+        json={"event": {"id": "evt-own", "file_id": own_file["id"]}},
+        headers=ok_headers,
+    )
+    assert r.status_code == 202, r.text
+
+    r = await client.post(
+        f"/v1/events/{source['id']}",
+        json={"event": {"id": "evt-other", "file_id": other_file["id"]}},
+        headers=ok_headers,
+    )
+    assert r.status_code == 422, r.text
+    assert "Unknown file" in r.json()["detail"]
+
+
 # --- MCP tool grants ---
 
 
