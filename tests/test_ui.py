@@ -189,3 +189,97 @@ async def test_csrf_token_rotates_on_logout_then_login(client: AsyncClient) -> N
     await _login(client, "alice@example.com")
     after = _csrf((await client.get("/ui/login")).text)
     assert after != signed_in
+
+
+def _request(peer: str = "10.0.0.1", forwarded: str | None = None):
+    """A bare Starlette request with the given peer address and XFF header."""
+    from starlette.requests import Request
+
+    headers = []
+    if forwarded is not None:
+        headers.append((b"x-forwarded-for", forwarded.encode()))
+    return Request(
+        {"type": "http", "client": (peer, 1234), "headers": headers, "method": "GET", "path": "/"}
+    )
+
+
+def test_client_ip_ignores_forwarded_header_by_default(monkeypatch):
+    """Default deployment is direct, so X-Forwarded-For is attacker-supplied
+    and must not be honoured — otherwise varying it per request sidesteps the
+    login limiter entirely, which is worse than keying on the proxy."""
+    from sleeper_service.config import get_settings
+    from sleeper_service.ui.routes import client_ip
+
+    monkeypatch.setattr(get_settings(), "trusted_proxy_hops", 0)
+    assert client_ip(_request(peer="10.0.0.1", forwarded="1.2.3.4")) == "10.0.0.1"
+    assert client_ip(_request(peer="10.0.0.1")) == "10.0.0.1"
+
+
+def test_client_ip_reads_through_trusted_hops(monkeypatch):
+    from sleeper_service.config import get_settings
+    from sleeper_service.ui.routes import client_ip
+
+    settings = get_settings()
+
+    # one proxy: it appended the address it saw, so the client is rightmost
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    assert client_ip(_request(forwarded="203.0.113.7")) == "203.0.113.7"
+
+    # two proxies: the rightmost entry is the inner proxy, the client is next
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 2)
+    assert client_ip(_request(forwarded="203.0.113.7, 172.16.0.9")) == "203.0.113.7"
+
+    # a client prepending its own entries cannot move the selection: with one
+    # trusted hop the real address is still the one the proxy appended
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    assert client_ip(_request(forwarded="9.9.9.9, 8.8.8.8, 203.0.113.7")) == "203.0.113.7"
+
+
+def test_client_ip_falls_back_when_header_is_unusable(monkeypatch):
+    from sleeper_service.config import get_settings
+    from sleeper_service.ui.routes import client_ip
+
+    monkeypatch.setattr(get_settings(), "trusted_proxy_hops", 2)
+    # header absent, malformed, or shorter than the configured hop count
+    assert client_ip(_request(peer="10.0.0.1")) == "10.0.0.1"
+    assert client_ip(_request(peer="10.0.0.1", forwarded="not-an-ip")) == "10.0.0.1"
+    assert client_ip(_request(peer="10.0.0.1", forwarded="  ,  ")) == "10.0.0.1"
+    # one entry but two hops configured: take the leftmost rather than wrap
+    assert client_ip(_request(peer="10.0.0.1", forwarded="203.0.113.7")) == "203.0.113.7"
+
+
+async def test_login_rate_limit_is_per_client_not_per_proxy(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """Behind a proxy the peer address is constant, so without this the limit
+    is effectively per-email: one attacker exhausts it and the real user is
+    locked out from anywhere."""
+    from sleeper_service.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "trusted_proxy_hops", 1)
+    page = await client.get("/ui/login")
+    token = _csrf(page.text)
+    email = f"proxy-limit-{uuid.uuid4()}@example.com"
+
+    attacker = {"X-Forwarded-For": "203.0.113.7"}
+    for _ in range(10):
+        r = await client.post(
+            "/ui/login",
+            data={"email": email, "password": "wrong", "_csrf_token": token},
+            headers=attacker,
+        )
+        assert r.status_code == 401
+    r = await client.post(
+        "/ui/login",
+        data={"email": email, "password": "wrong", "_csrf_token": token},
+        headers=attacker,
+    )
+    assert r.status_code == 429, "the attacker's own address should be limited"
+
+    # a different client address for the same email has its own budget
+    r = await client.post(
+        "/ui/login",
+        data={"email": email, "password": "wrong", "_csrf_token": token},
+        headers={"X-Forwarded-For": "198.51.100.4"},
+    )
+    assert r.status_code == 401, "one address must not lock the account for others"

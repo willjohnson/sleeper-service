@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     login_rate_limit: int = 10
     login_rate_window_s: int = 300
 
+    # Number of trusted reverse proxies in front of the app. 0 (the default)
+    # means the app is reached directly, so X-Forwarded-For is ignored — a
+    # client can set that header freely, and honouring it unconditionally
+    # would let anyone sidestep the login rate limit by varying it per
+    # request. Set it to the real hop count only when every one of those hops
+    # is under your control. Leave it at 0 if you instead run uvicorn with
+    # --proxy-headers, which rewrites the peer address before the app sees it.
+    trusted_proxy_hops: int = 0
+
     # OIDC issuer validation. Production rejects loopback/private issuers; the
     # e2e stub IdP runs on 127.0.0.1, so tests enable this hatch explicitly.
     oidc_allow_loopback_issuers: bool = False

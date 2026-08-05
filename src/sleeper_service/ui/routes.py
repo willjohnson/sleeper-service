@@ -11,6 +11,7 @@ promotes versions and approves memory; editor retries jobs.
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import re
 import secrets
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.auth.rbac import visible_team_ids
+from sleeper_service.config import get_settings
 from sleeper_service.constants import Role
 from sleeper_service.db.models import (
     Agent,
@@ -58,6 +60,38 @@ def _csrf_token(request: Request) -> str:
         token = secrets.token_urlsafe(32)
         request.session["csrf_token"] = token
     return token
+
+
+def client_ip(request: Request) -> str:
+    """The requesting client's address, seeing through trusted proxies.
+
+    Behind a reverse proxy every request arrives from the proxy, so keying a
+    per-IP limit on the peer address collapses it to a single global bucket —
+    for the login limiter that means one attacker can spend a victim's whole
+    budget and lock them out, from anywhere.
+
+    X-Forwarded-For fixes that but is client-controlled, so it is only
+    consulted when `trusted_proxy_hops` says how many proxies are actually in
+    front. Each proxy appends the address it received from, so with N trusted
+    hops the client sits N from the right; anything an attacker prepends stays
+    to the left of that and is never selected. Falls back to the peer address
+    whenever the header is missing, short, or not an address.
+    """
+    peer = request.client.host if request.client else "unknown"
+    hops = get_settings().trusted_proxy_hops
+    if hops <= 0:
+        return peer
+    forwarded = request.headers.get("x-forwarded-for")
+    if not forwarded:
+        return peer
+    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+    if not parts:
+        return peer
+    candidate = parts[-hops] if len(parts) >= hops else parts[0]
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return peer
 
 
 def rotate_csrf_token(request: Request) -> str:
@@ -228,12 +262,10 @@ async def login(
     password: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
-    from sleeper_service.config import get_settings
     from sleeper_service.redis_client import get_redis
 
     settings = get_settings()
-    client_host = request.client.host if request.client else "unknown"
-    identity = hashlib.sha256(f"{client_host}:{email.strip().lower()}".encode()).hexdigest()
+    identity = hashlib.sha256(f"{client_ip(request)}:{email.strip().lower()}".encode()).hexdigest()
     redis = get_redis()
     rate_key = f"ui-login:{identity}"
     count = await redis.incr(rate_key)

@@ -48,9 +48,13 @@ Remaining low-severity items from the review of the audit-2 fixes:
   and the SSO callback. Regression tests assert the pre-auth token stops
   working and the new one starts; both were confirmed to fail against the
   pre-fix code.
-- [ ] Key the login rate limit on the real client IP behind a reverse proxy —
-  `request.client.host` is the proxy, making the limit per-email and enabling
-  cheap account-lockout DoS
+- [x] ~~Key the login rate limit on the real client IP behind a reverse
+  proxy~~ — done 2026-08-05. `client_ip()` reads X-Forwarded-For, but only as
+  far as the new `TRUSTED_PROXY_HOPS` setting says there are real proxies
+  (default 0 = ignore the header, since trusting it on a directly-exposed
+  deployment would let anyone bypass the limit by varying it per request).
+  Regression test: one address exhausting its budget no longer locks the
+  account for another.
 - [ ] Treat a delivery-time `OutboundUrlError` as permanent instead of retrying
   the callback `callback_max_tries` times (`runtime/callbacks.py`)
 
