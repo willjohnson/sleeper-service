@@ -11,6 +11,7 @@ from sleeper_service.config import get_settings
 from sleeper_service.db.models import Job
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.observability import setup_tracing
+from sleeper_service.queue import job_deserializer, job_serializer
 from sleeper_service.runtime import callbacks, notify
 from sleeper_service.runtime.runner import TransientJobError, execute_job, mark_job
 
@@ -131,5 +132,8 @@ class WorkerSettings:
     cron_jobs: ClassVar = [cron(cleanup, minute=13)]  # hourly retention pass
     on_startup = startup
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
+    # JSON, not arq's default pickle — must match queue.get_pool(). See queue.py.
+    job_serializer = staticmethod(job_serializer)
+    job_deserializer = staticmethod(job_deserializer)
     max_tries = max(get_settings().job_max_tries, get_settings().callback_max_tries)
     job_timeout = 3700  # > max version timeout_s; the runner enforces the real cap

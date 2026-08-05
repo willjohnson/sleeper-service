@@ -9,6 +9,7 @@ the identity the IdP asserts.
 """
 
 import asyncio
+import re
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -137,16 +138,31 @@ async def test_oidc_config_rbac_and_secrecy(client: AsyncClient, org: dict, boot
     r = await client.get(f"/v1/tenants/{tenant_id}/oidc", headers=root)
     assert r.status_code == 200 and r.json()["id"] == cfg["id"]
 
-    # the login page now offers SSO for this tenant
-    r = await client.get("/ui/login")
+    # the login page offers SSO once the org names itself...
+    r = await client.get("/ui/login", params={"org": "acme"})
     assert "Continue with acme SSO" in r.text
+    assert str(tenant_id) in r.text
+    # ...and case-insensitively
+    r = await client.get("/ui/login", params={"org": "ACME"})
+    assert "Continue with acme SSO" in r.text
+
+    # ...but the bare page must not enumerate tenants to anonymous callers:
+    # no customer names, no tenant UUIDs (audit 4 #4).
+    r = await client.get("/ui/login")
+    assert "Continue with acme SSO" not in r.text
+    assert str(tenant_id) not in r.text
+    assert "acme" not in r.text
+
+    # an unknown org gets no SSO button
+    r = await client.get("/ui/login", params={"org": "no-such-org"})
+    assert "Continue with no-such-org SSO" not in r.text
 
     r = await client.delete(f"/v1/tenants/{tenant_id}/oidc", headers=root)
     assert r.status_code == 204
     r = await client.get(f"/v1/tenants/{tenant_id}/oidc", headers=root)
     assert r.status_code == 404
-    r = await client.get("/ui/login")
-    assert "SSO" not in r.text
+    r = await client.get("/ui/login", params={"org": "acme"})
+    assert "Continue with acme SSO" not in r.text
 
 
 async def test_oidc_config_bad_issuer_rejected(client: AsyncClient, org: dict, bootstrap) -> None:
@@ -227,6 +243,70 @@ async def test_oidc_login_end_to_end(client: AsyncClient, org: dict, bootstrap, 
     r = await client.get("/ui", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == f"/ui/t/{tenant_id}"
+
+
+async def test_oidc_session_is_scoped_to_the_authenticating_tenant(
+    client: AsyncClient, org: dict, bootstrap, idp: dict
+) -> None:
+    """Audit 4 #1: a tenant's IdP is configured by that tenant's own admin, so
+    the session it mints must not carry the user's roles in *other* tenants.
+    Otherwise a tenant admin points their IdP at a user who happens to be a
+    member of their tenant and inherits that user's access everywhere else."""
+    root = auth(bootstrap.superuser_key)
+    acme_id = org["tenant"]["id"]
+
+    # bob also belongs to a second, unrelated tenant
+    r = await client.post("/v1/tenants", headers=root, json={"name": "other"})
+    assert r.status_code == 201
+    other_id = r.json()["id"]
+    r = await client.post(
+        f"/v1/tenants/{other_id}/teams",
+        headers=root,
+        json={"name": "secrets", "owner_user_id": org["users"]["bob"]["id"]},
+    )
+    assert r.status_code == 201
+
+    # local password auth keeps bob's full scope: both tenants are visible
+    r = await client.post(
+        "/ui/login",
+        data={
+            "email": "bob@example.com",
+            "password": "password-123",
+            "_csrf_token": await _csrf(client),
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    r = await client.get(f"/ui/t/{other_id}", follow_redirects=False)
+    assert r.status_code == 200, "local login should see every tenant bob belongs to"
+    await client.post("/ui/logout", data={"_csrf_token": await _csrf(client)})
+
+    # SSO through acme's IdP authenticates bob, but only for acme
+    await _configure(client, root, acme_id, idp["issuer"])
+    state, nonce = await _start_sso(client, acme_id, idp["issuer"])
+    r = await client.get(
+        f"/ui/oidc/{acme_id}/callback",
+        params={"code": f"{nonce}:bob@example.com", "state": state},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303 and r.headers["location"] == "/ui"
+
+    r = await client.get("/ui", follow_redirects=False)
+    assert r.headers["location"] == f"/ui/t/{acme_id}"
+    r = await client.get(f"/ui/t/{acme_id}", follow_redirects=False)
+    assert r.status_code == 200
+
+    # the other tenant is not reachable from this session
+    r = await client.get(f"/ui/t/{other_id}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui"
+
+
+async def _csrf(client: AsyncClient) -> str:
+    r = await client.get("/ui/login")
+    match = re.search(r'name="_csrf_token" value="([^"]+)"', r.text)
+    assert match is not None
+    return match.group(1)
 
 
 async def test_oidc_unknown_email_rejected(

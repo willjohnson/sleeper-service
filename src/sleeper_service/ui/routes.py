@@ -89,7 +89,31 @@ async def ui_user(request: Request, db: AsyncSession = Depends(get_db)) -> UserP
     if user is None:
         raise NotAuthenticated
     memberships = await db.scalars(select(TeamMember).where(TeamMember.user_id == user.id))
-    return UserPrincipal(user=user, roles={m.team_id: Role(m.role) for m in memberships})
+    roles = {m.team_id: Role(m.role) for m in memberships}
+
+    # An SSO session is scoped to the tenant whose IdP authenticated it. That
+    # IdP is configured by that tenant's own admin, so it must not be able to
+    # mint a session carrying the user's roles in *other* tenants — the
+    # callback's membership check gates entry to the flow, not its scope.
+    # Local password auth is an instance-controlled credential and keeps the
+    # user's full scope.
+    auth_tenant_id = request.session.get("auth_tenant_id")
+    if auth_tenant_id is not None:
+        roles = await _roles_within_tenant(db, roles, uuid.UUID(auth_tenant_id))
+    return UserPrincipal(user=user, roles=roles)
+
+
+async def _roles_within_tenant(
+    db: AsyncSession, roles: dict[uuid.UUID, Role], tenant_id: uuid.UUID
+) -> dict[uuid.UUID, Role]:
+    if not roles:
+        return roles
+    scoped = set(
+        await db.scalars(
+            select(Team.id).where(Team.id.in_(list(roles)), Team.tenant_id == tenant_id)
+        )
+    )
+    return {team_id: role for team_id, role in roles.items() if team_id in scoped}
 
 
 async def _visible_tenants(db: AsyncSession, p: UserPrincipal) -> list[Tenant]:
@@ -136,28 +160,49 @@ async def _team_role(db: AsyncSession, p: UserPrincipal, team_id: uuid.UUID) -> 
 
 
 async def render_login(
-    request: Request, db: AsyncSession, error: str | None, status_code: int = 200
+    request: Request,
+    db: AsyncSession,
+    error: str | None,
+    status_code: int = 200,
+    org: str | None = None,
 ):
-    """Login page with an SSO button per OIDC-configured tenant (additive —
-    local auth always works). Shared with the OIDC callback's error paths."""
-    sso = list(
-        await db.execute(
-            select(Tenant.id, Tenant.name)
-            .join(OidcConfig, OidcConfig.tenant_id == Tenant.id)
-            .order_by(Tenant.name)
-        )
-    )
+    """Login page (local auth always works), with an SSO button for the one
+    organization named in `org`. Shared with the OIDC callback's error paths.
+
+    Deliberately *not* a list of every OIDC-configured tenant: this page is
+    reachable anonymously, so enumerating it would hand any passer-by the
+    operator's customer names and their tenant UUIDs — the same identifiers
+    used throughout /ui/t/{tenant_id} and /v1/tenants/{tenant_id}/…. Standard
+    SSO discovery instead: the user names their org, we resolve exactly one.
+    """
+    sso = []
+    if org and org.strip():
+        row = (
+            await db.execute(
+                select(Tenant.id, Tenant.name)
+                .join(OidcConfig, OidcConfig.tenant_id == Tenant.id)
+                .where(func.lower(Tenant.name) == org.strip().lower())
+            )
+        ).first()
+        if row is not None:
+            sso = [row]
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"error": error, "sso": sso, "csrf_token": _csrf_token(request)},
+        {
+            "error": error,
+            "sso": sso,
+            "org": org or "",
+            "org_missing": bool(org and org.strip()) and not sso,
+            "csrf_token": _csrf_token(request),
+        },
         status_code=status_code,
     )
 
 
 @router.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, db: AsyncSession = Depends(get_db)):
-    return await render_login(request, db, None)
+async def login_page(request: Request, org: str | None = None, db: AsyncSession = Depends(get_db)):
+    return await render_login(request, db, None, org=org)
 
 
 @router.post("/login")

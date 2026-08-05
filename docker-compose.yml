@@ -81,8 +81,12 @@ services:
       POSTGRES_PASSWORD: sleeper
       POSTGRES_DB: sleeper
     ports:
+      # Loopback-only: api/worker reach postgres over the compose network by
+      # service name, so this publication exists purely for host-side psql.
+      # Docker's published ports bypass host firewalls (ufw), so an unbound
+      # "5432:5432" would put the database on every interface.
       # Override POSTGRES_HOST_PORT in .env if 5432 is taken on your host
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -94,8 +98,11 @@ services:
   redis:
     image: redis:7-alpine
     ports:
+      # Loopback-only, and not optional hardening: this Redis has no
+      # requirepass, and the queue carries job definitions the worker executes.
+      # Published on 0.0.0.0 it is an unauthenticated remote foothold.
       # Override REDIS_HOST_PORT in .env if 6379 is taken on your host
-      - "${REDIS_HOST_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -109,8 +116,10 @@ services:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-sleeper}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-sleeper-minio-secret}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Loopback-only: the root credentials here are also the credentials for
+      # the payload bucket holding every tenant's uploads.
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - miniodata:/data
     healthcheck:

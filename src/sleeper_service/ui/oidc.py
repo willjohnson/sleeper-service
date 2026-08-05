@@ -174,6 +174,15 @@ async def oidc_callback(
     csrf_token = _csrf_token(request)
     request.session.clear()
     request.session.update(
-        {"user_id": str(user.id), "tenant_id": str(tenant_id), "csrf_token": csrf_token}
+        {
+            "user_id": str(user.id),
+            # Display preference (which tenant the UI opens on)...
+            "tenant_id": str(tenant_id),
+            # ...and the authorization boundary. `ui_user` narrows the
+            # principal's roles to teams inside this tenant, so a tenant's own
+            # IdP cannot mint a session carrying the user's roles elsewhere.
+            "auth_tenant_id": str(tenant_id),
+            "csrf_token": csrf_token,
+        }
     )
     return RedirectResponse("/ui", status_code=303)

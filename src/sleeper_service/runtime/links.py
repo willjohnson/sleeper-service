@@ -32,6 +32,10 @@ def check_links(urls: list[str], tenant_settings: dict) -> str | None:
 
 
 async def _fetch_one_link(client: httpx.AsyncClient, url: str, allowlist: list[str]) -> str:
+    # Imported here, not at module scope: outbound imports host_allowed from
+    # this module.
+    from sleeper_service.runtime.outbound import OutboundUrlError, validate_callback_target
+
     current_url = url
     max_redirects = 5
     for _ in range(max_redirects):
@@ -40,6 +44,16 @@ async def _fetch_one_link(client: httpx.AsyncClient, url: str, allowlist: list[s
             return f"[fetch failed: disallowed scheme {parsed.scheme!r}]"
         if not host_allowed(current_url, allowlist):
             return f"[fetch failed: host not in tenant allowlist: {current_url}]"
+        # The allowlist says which hosts a tenant *wants* fetched; it does not
+        # say where those hosts resolve. Without this, an allowlist entry (which
+        # a tenant admin controls) could be an internal address or a name with a
+        # private A record, and the worker — which sits on the internal network
+        # and holds SECRET_KEY — would fetch it and hand the body to the model.
+        # Same two-phase check the callback and OIDC paths use, re-run per hop.
+        try:
+            await validate_callback_target(current_url, label="link")
+        except OutboundUrlError as e:
+            return f"[fetch failed: {e}]"
 
         try:
             resp = await client.get(current_url, follow_redirects=False)

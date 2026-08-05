@@ -20,6 +20,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sleeper_service import storage
 from sleeper_service.config import get_settings
+from sleeper_service.constants import TEXT_CONTENT_TYPES
 from sleeper_service.db.models import (
     Agent,
     AgentVersion,
@@ -39,8 +40,6 @@ from sleeper_service.runtime.toolsets import (
     build_mcp_toolsets,
     build_store_toolset,
 )
-
-TEXT_TYPES = ("text/", "application/json", "application/xml", "application/csv")
 
 
 class TransientJobError(Exception):
@@ -79,7 +78,7 @@ async def _load_file_content(payload: dict, tenant_id: uuid.UUID) -> tuple[list,
         if file is None or file.tenant_id != tenant_id:
             continue
         data = await storage.get_object(file.object_key)
-        if file.content_type.startswith(TEXT_TYPES):
+        if file.content_type.startswith(TEXT_CONTENT_TYPES):
             name = file.object_key.rsplit("/", 1)[-1]
             block = f"\n--- file: {name} ---\n{data.decode(errors='replace')}"
             parts.append(block)

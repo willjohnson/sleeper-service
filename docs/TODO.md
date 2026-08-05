@@ -27,7 +27,17 @@ the decision log embedded in each section.
 
 ## Security follow-ups (low severity, from audit-2 review)
 
-Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)) and GPT-5.6 Sol ([SECURITY_AUDIT_REPORT_2.md](SECURITY_AUDIT_REPORT_2.md)); all findings are remediated with regression tests. A third audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_3.md](SECURITY_AUDIT_REPORT_3.md)); its critical and high findings (#1 `local` data store, #2 OIDC issuer SSRF, #3 event-source file isolation) are remediated with regression tests. Review of those fixes found #2's incomplete — the endpoints the discovery document advertises were still unvalidated — and closed it; see the report's Post-Audit Review. Remaining low-severity items from the review of the audit-2 fixes:
+Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)) and GPT-5.6 Sol ([SECURITY_AUDIT_REPORT_2.md](SECURITY_AUDIT_REPORT_2.md)); all findings are remediated with regression tests. A third audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_3.md](SECURITY_AUDIT_REPORT_3.md)); its critical and high findings (#1 `local` data store, #2 OIDC issuer SSRF, #3 event-source file isolation) are remediated with regression tests. Review of those fixes found #2's incomplete — the endpoints the discovery document advertises were still unvalidated — and closed it; see the report's Post-Audit Review.
+
+A fourth audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_4.md](SECURITY_AUDIT_REPORT_4.md)) — Claude Opus 5, whole codebase rather than a diff. Six findings (3 high, 3 medium), **all remediated with regression tests in the same pass**: SSO sessions carrying roles in every tenant, link fetching never resolving its destination, unauthenticated Redis on `0.0.0.0` plus arq's pickle deserializer, credential-less cloud data stores running on the platform's own cloud identity, anonymous tenant enumeration on the login page, and a client-declared content type skipping the injection screen. 154 tests green.
+
+**Deploy notes from audit 4** (do these when shipping it):
+
+- [ ] **Drain the arq queue** before/while deploying — jobs are now JSON-serialized, and pickle payloads already in Redis will not deserialize.
+- [ ] **Review existing credential-less `s3` / `gcs` / `azure_blob` data-store rows** — the new gate cannot establish who created historical rows (same caveat as the audit-3 `local` rows).
+- [ ] **Set `requirepass` on Redis** and move `REDIS_URL` to `redis://:pw@redis:6379/0`. Loopback binding closed the remote path; this closes reachability-as-authorization. Left undone because it needs a coordinated env change.
+
+Remaining low-severity items from the review of the audit-2 fixes:
 
 - [ ] Rotate the CSRF token on login instead of carrying the pre-auth token into
   the authenticated session (`ui/routes.py` login, `ui/oidc.py` callback)
@@ -54,6 +64,12 @@ Open by design from audit-3 (require a threat-model decision before tightening):
   Alert content is platform-controlled so leakage is limited, but an owner
   could confirm internal reachability. Options: an `apprise_allowlist` per
   team/tenant, or restricting Apprise schemes to a vetted set.
+- [ ] **Screen text inside binary uploads** (audit-4 #6 residual): the
+  content-type sniffer stops injection text from *posing* as a PDF, but a
+  genuine PDF with the text in a compressed content stream still reaches the
+  model unscreened — models extract it, `hooks.screen_untrusted` cannot.
+  Needs server-side text extraction (pdf/docx/OCR) feeding the screen, or a
+  policy of refusing binary uploads for agents with sensitive tool grants.
 
 ## Housekeeping
 
@@ -70,6 +86,13 @@ Open by design from audit-3 (require a threat-model decision before tightening):
   `.env` — fine locally, regenerate for any shared deployment. Now surfaced:
   README quickstart note, `.env.example` LANGFUSE_INIT_* hints, and a
   `sleeper init` warning when the well-known dev keys are configured.
+  **The MinIO pair matters more than the rest** (audit-4): BYO s3 endpoints
+  are an intended feature, so a tenant admin may point a data store at any
+  endpoint the worker can reach — including the platform's own MinIO. With
+  the default `sleeper` / `sleeper-minio-secret` unrotated those credentials
+  are public knowledge, which turns an intended feature into a cross-tenant
+  read of the payload bucket. Rotating them is what keeps the two apart; it
+  is not cosmetic.
 - Structured logging is minimal (request IDs + basicConfig); JSON logs and
   API↔worker correlation would help at scale.
 

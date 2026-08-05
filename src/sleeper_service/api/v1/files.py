@@ -18,13 +18,55 @@ from sleeper_service.auth.principal import (
     get_principal,
 )
 from sleeper_service.auth.rbac import visible_team_ids
-from sleeper_service.constants import KeyScope
+from sleeper_service.constants import TEXT_CONTENT_TYPES, KeyScope
 from sleeper_service.db.models import Agent, File, Team, Tenant
 from sleeper_service.db.session import get_db
 
 router = APIRouter(prefix="/files", tags=["files"])
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MiB
+
+# Leading bytes → real type, for the formats a model reads natively.
+_MAGIC: list[tuple[bytes, str]] = [
+    (b"%PDF-", "application/pdf"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"PK\x03\x04", "application/zip"),  # also docx/xlsx/pptx
+]
+
+
+def _looks_like_text(data: bytes) -> bool:
+    sample = data[:8192]
+    if not sample:
+        return True
+    try:
+        text = sample.decode()
+    except UnicodeDecodeError:
+        return False
+    control = sum(1 for ch in text if ord(ch) < 32 and ch not in "\t\n\r")
+    return control / len(text) < 0.01
+
+
+def sniff_content_type(data: bytes, declared: str) -> str:
+    """Derive a file's content type from its bytes.
+
+    The declared type is a security decision, not a display hint: the runner
+    inlines (and therefore injection-screens) only text-typed files and hands
+    everything else to the model as opaque BinaryContent. Trusting the client's
+    multipart header would let anyone who can upload label injection text
+    `application/pdf` and skip the screen entirely, while the identical bytes
+    sent as `text/plain` are caught. So: real magic bytes win, text-looking
+    bytes are treated as text, and the declared type is kept only when it
+    doesn't contradict the content.
+    """
+    for magic, sniffed in _MAGIC:
+        if data.startswith(magic):
+            return sniffed
+    if _looks_like_text(data):
+        return declared if declared.startswith(TEXT_CONTENT_TYPES) else "text/plain"
+    return declared
 
 
 async def resolve_tenant_for_invoke(db: AsyncSession, p: InvokePrincipal) -> uuid.UUID | None:
@@ -73,7 +115,7 @@ async def upload_file(
     safe_name = raw_name or "upload"
     file_id = uuid.uuid4()
     object_key = f"{tenant_id}/payload/{file_id}/{safe_name}"
-    content_type = file.content_type or "application/octet-stream"
+    content_type = sniff_content_type(data, file.content_type or "application/octet-stream")
     await storage.put_object(object_key, data, content_type)
 
     from sleeper_service.runtime.retention import file_expiry

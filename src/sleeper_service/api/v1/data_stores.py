@@ -25,6 +25,16 @@ REQUIRED_CONFIG = {
     "local": "base_path",
 }
 
+# Backends whose SDK falls back to the *host process's* ambient cloud identity
+# when no credential is supplied: s3fs → botocore's chain (env, shared config,
+# then the EC2/ECS/EKS instance role), gcsfs → application default credentials,
+# adlfs → DefaultAzureCredential/managed identity. A credential-less store of
+# these types therefore runs on the platform's own identity rather than the
+# tenant's — the same confused-deputy shape as a `local` store pointing at the
+# container filesystem, so it carries the same superuser-only gate. Operators
+# who genuinely want an ADC-backed store still can; tenant admins cannot.
+AMBIENT_CREDENTIAL_TYPES = {"s3", "azure_blob", "gcs"}
+
 
 @router.post("", response_model=DataStoreOut, status_code=status.HTTP_201_CREATED)
 async def create_data_store(
@@ -38,6 +48,17 @@ async def create_data_store(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Only instance superusers may register local data stores",
+        )
+    if (
+        body.type in AMBIENT_CREDENTIAL_TYPES
+        and not body.credentials
+        and not principal.is_superuser
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"{body.type} data stores require explicit credentials; without them the store "
+            "runs on the platform's own cloud identity, which only instance superusers "
+            "may configure",
         )
     if body.type not in REQUIRED_CONFIG:
         raise HTTPException(

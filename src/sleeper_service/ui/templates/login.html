@@ -19,11 +19,18 @@
       <input type="password" name="password" required>
       <button type="submit">Sign in</button>
     </form>
-    {% if sso %}
     <div class="sso-divider">or</div>
+    {% if sso %}
     {% for tenant_id, tenant_name in sso %}
     <a class="sso-btn" href="/ui/oidc/{{ tenant_id }}/login">Continue with {{ tenant_name }} SSO</a>
     {% endfor %}
+    {% else %}
+    {% if org_missing %}<div class="error">No SSO is configured for that organization.</div>{% endif %}
+    <form method="get" action="/ui/login">
+      <label>Organization</label>
+      <input type="text" name="org" value="{{ org }}" placeholder="Your organization's name" required>
+      <button type="submit">Continue with SSO</button>
+    </form>
     {% endif %}
   </div>
 </div>
