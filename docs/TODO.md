@@ -31,7 +31,10 @@ Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.
 
 A fourth audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_4.md](SECURITY_AUDIT_REPORT_4.md)) — Claude Opus 5, whole codebase rather than a diff. Six findings (3 high, 3 medium), **all remediated with regression tests in the same pass**: SSO sessions carrying roles in every tenant, link fetching never resolving its destination, unauthenticated Redis on `0.0.0.0` plus arq's pickle deserializer, credential-less cloud data stores running on the platform's own cloud identity, anonymous tenant enumeration on the login page, and a client-declared content type skipping the injection screen. 154 tests green.
 
-**Deploy notes from audit 4** (do these when shipping it):
+**Deploy notes from audit 4** (do these when shipping it). Nothing has been
+deployed anywhere yet, and the local dev environment was checked on 2026-08-05
+and needs none of them — Redis was empty (and has no volume, so it is
+ephemeral), and the one local data store has credentials:
 
 - [ ] **Drain the arq queue** before/while deploying — jobs are now JSON-serialized, and pickle payloads already in Redis will not deserialize.
 - [ ] **Review existing credential-less `s3` / `gcs` / `azure_blob` data-store rows** — the new gate cannot establish who created historical rows (same caveat as the audit-3 `local` rows).
@@ -76,8 +79,12 @@ Open by design from audit-3 (require a threat-model decision before tightening):
 - **Repo is on GitHub (private):** https://github.com/willjohnson/sleeper-service —
   flip visibility with `gh repo edit --visibility public` when ready; CI runs
   on push.
-- **Demo poller is running** (`docker compose --profile demo`) and posts a
-  real OpenRouter job every 30s (~$0.30/day). Stop with
+- **Demo poller is stopped** (as of 2026-08-05), and so are `api` and
+  `worker` — only postgres/redis/minio and the Langfuse stack are up, so
+  nothing is spending OpenRouter credit and `/ui` is not reachable. Bring the
+  app back with `docker compose up -d --build api worker` (the `--build` is
+  needed to pick up source changes), and add `--profile demo` for the poller,
+  which posts a real OpenRouter job every 30s (~$0.30/day). Stop it again with
   `docker compose --profile demo down` when not demoing.
 - **Demo risk-analyzer has `memory_approval` on**, so its memory proposals
   queue as pending in the UI (`/ui`, login = the `sleeper init` credentials).
@@ -102,6 +109,10 @@ Open by design from audit-3 (require a threat-model decision before tightening):
   to 5433/6380 via POSTGRES_HOST_PORT/REDIS_HOST_PORT in the gitignored .env
   (native services occupy the defaults here). Tests honor the same overrides
   and create a `sleeper_test` DB.
+- Postgres/redis/minio now publish to `127.0.0.1` only (audit-4 #3). The
+  containers currently up predate that change and are still bound to
+  `0.0.0.0` — a `docker compose up -d` recreates them with the new binding.
+  The host-port overrides above are unaffected.
 - colima runs docker (4 CPU / 6 GiB — resized for Langfuse; no buildx, keep
   the Dockerfile legacy-builder-compatible).
 - `scripts/screenshots.py` recaptures the README screenshots against a
