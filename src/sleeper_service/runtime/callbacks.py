@@ -52,6 +52,16 @@ class CallbackDeliveryError(Exception):
     """Non-2xx or network failure: worth retrying with backoff."""
 
 
+class CallbackDestinationRejected(CallbackDeliveryError):
+    """Outbound policy refused the destination: retrying cannot help.
+
+    The callback URL is fixed on the job and the policy will not change
+    within a retry window, so the remaining attempts would re-resolve the same
+    name and reject it again — burning the backoff schedule and delaying the
+    operator's alert for no reason. Fail once, and say why.
+    """
+
+
 async def deliver(job_id: uuid.UUID) -> None:
     async with get_sessionmaker()() as db:
         job = await db.get(Job, job_id)
@@ -67,7 +77,7 @@ async def deliver(job_id: uuid.UUID) -> None:
         try:
             await validate_callback_target(job.callback_url, tenant.settings or {})
         except OutboundUrlError as e:
-            raise CallbackDeliveryError(f"callback destination rejected: {e}") from e
+            raise CallbackDestinationRejected(f"callback destination rejected: {e}") from e
         learning = agent is not None and learning_enabled(agent.options or {})
         body = json.dumps(build_payload(job, learning=learning)).encode()
         signature = sign(body, int(time.time()))

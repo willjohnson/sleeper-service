@@ -525,3 +525,54 @@ async def test_models_registry_permissions(
     assert r.status_code == 201
     r = await client.get("/v1/models", headers=alice)
     assert len(r.json()) == 1
+
+
+async def test_rejected_callback_destination_is_not_retried(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A destination refused by outbound policy is permanent. Retrying it
+    would re-resolve the same name callback_max_tries times, all failing, and
+    delay the operator's alert by the whole backoff schedule."""
+    from arq import Retry
+
+    from sleeper_service.runtime.outbound import OutboundUrlError
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(
+        client, bob, risk_agent["agent"]["id"], callback_url="https://receiver.example/hook"
+    )
+    job_id = uuid.UUID(r.json()["id"])
+    await runner.execute_job(job_id)
+
+    real_client = httpx.AsyncClient  # bind before patching to avoid recursion
+    attempts = 0
+
+    async def rejecting_target(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OutboundUrlError("callback URL hostname resolves to a non-public address")
+
+    def unreachable_client(**kwargs):  # pragma: no cover
+        raise AssertionError("a rejected destination must never be contacted")
+
+    monkeypatch.setattr(callbacks, "validate_callback_target", rejecting_target)
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", unreachable_client)
+
+    # first try, well below callback_max_tries: still terminal, no Retry raised
+    await deliver_callback({"job_try": 1}, str(job_id))
+    assert attempts == 1
+
+    r = await client.get(f"/v1/jobs/{job_id}/events", headers=bob)
+    failures = [e for e in r.json() if e["type"] == "callback_failed"]
+    assert len(failures) == 1
+    assert "not retrying" in failures[0]["data"]["error"]
+
+    # a transient failure at the same job_try still retries, so the change is
+    # scoped to policy rejections rather than blanket give-up
+    def failing_client(**kwargs) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(lambda req: httpx.Response(500)))
+
+    monkeypatch.setattr(callbacks, "validate_callback_target", AsyncMock())
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", failing_client)
+    with pytest.raises(Retry):
+        await deliver_callback({"job_try": 1}, str(job_id))

@@ -56,22 +56,29 @@ async def deliver_callback(ctx: dict, job_id: str) -> None:
     settings = get_settings()
     try:
         await callbacks.deliver(uuid.UUID(job_id))
+    except callbacks.CallbackDestinationRejected as e:
+        # Policy rejection, not a transient failure: the URL and the policy are
+        # both fixed, so the retries would all fail identically. Alert now.
+        await _abandon_callback(job_id, f"destination rejected, not retrying: {e}")
     except callbacks.CallbackDeliveryError as e:
         if ctx["job_try"] >= settings.callback_max_tries:
-            await callbacks.record_callback_failure(
-                uuid.UUID(job_id), f"gave up after {ctx['job_try']} tries: {e}"
-            )
-            async with get_sessionmaker()() as db:
-                job = await db.get(Job, uuid.UUID(job_id))
-            if job is not None:
-                await notify.notify(
-                    job.agent_id,
-                    "callback_failed",
-                    "Sleeper Service: callback delivery failed",
-                    f"Callback for job {job_id} gave up after {ctx['job_try']} tries: {e}",
-                )
+            await _abandon_callback(job_id, f"gave up after {ctx['job_try']} tries: {e}")
         else:
             raise Retry(defer=15 * 2 ** (ctx["job_try"] - 1)) from e
+
+
+async def _abandon_callback(job_id: str, reason: str) -> None:
+    """Record the terminal failure as a job event and alert the owning team."""
+    await callbacks.record_callback_failure(uuid.UUID(job_id), reason)
+    async with get_sessionmaker()() as db:
+        job = await db.get(Job, uuid.UUID(job_id))
+    if job is not None:
+        await notify.notify(
+            job.agent_id,
+            "callback_failed",
+            "Sleeper Service: callback delivery failed",
+            f"Callback for job {job_id} {reason}",
+        )
 
 
 async def fold_feedback(ctx: dict, feedback_id: str) -> None:

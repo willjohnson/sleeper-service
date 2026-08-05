@@ -55,8 +55,15 @@ Remaining low-severity items from the review of the audit-2 fixes:
   deployment would let anyone bypass the limit by varying it per request).
   Regression test: one address exhausting its budget no longer locks the
   account for another.
-- [ ] Treat a delivery-time `OutboundUrlError` as permanent instead of retrying
-  the callback `callback_max_tries` times (`runtime/callbacks.py`)
+- [x] ~~Treat a delivery-time `OutboundUrlError` as permanent instead of
+  retrying the callback `callback_max_tries` times~~ — done 2026-08-05. It
+  now raises `CallbackDestinationRejected` (a `CallbackDeliveryError`
+  subclass), which the worker records and alerts on immediately instead of
+  scheduling retries that would re-resolve the same name and fail
+  identically. Transient failures retry exactly as before.
+
+**This clears the audit-2 review list.** What remains below needs a
+threat-model decision rather than an implementation.
 
 Open by design from audit-3 (require a threat-model decision before tightening):
 
