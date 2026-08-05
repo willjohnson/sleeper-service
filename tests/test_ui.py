@@ -80,9 +80,7 @@ async def test_promote_via_ui_owner_only(client: AsyncClient, risk_agent: dict) 
     # editor's POST is a no-op
     await _login(client, "bob@example.com")
     page = await client.get(f"/ui/agents/{agent_id}")
-    await client.post(
-        f"/ui/agents/{agent_id}/promote/2", data={"_csrf_token": _csrf(page.text)}
-    )
+    await client.post(f"/ui/agents/{agent_id}/promote/2", data={"_csrf_token": _csrf(page.text)})
     r = await client.get(f"/v1/agents/{agent_id}", headers=bob)
     current = r.json()["current_version_id"]
     assert current == risk_agent["version"]["id"]
@@ -91,9 +89,7 @@ async def test_promote_via_ui_owner_only(client: AsyncClient, risk_agent: dict) 
     await _login(client, "alice@example.com")
     page = await client.get(f"/ui/agents/{agent_id}")
     assert "Promote" in page.text
-    await client.post(
-        f"/ui/agents/{agent_id}/promote/2", data={"_csrf_token": _csrf(page.text)}
-    )
+    await client.post(f"/ui/agents/{agent_id}/promote/2", data={"_csrf_token": _csrf(page.text)})
     r = await client.get(f"/v1/agents/{agent_id}", headers=bob)
     assert r.json()["current_version_id"] != current
 

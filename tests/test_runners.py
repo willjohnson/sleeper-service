@@ -18,6 +18,7 @@ def _docker_available() -> bool:
     except Exception:
         return False
 
+
 needs_docker = pytest.mark.skipif(not _docker_available(), reason="no docker daemon")
 
 

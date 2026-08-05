@@ -18,7 +18,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("jobs", sa.Column("auth_ctx", postgresql.JSONB(astext_type=sa.Text()), nullable=True))
+    op.add_column(
+        "jobs", sa.Column("auth_ctx", postgresql.JSONB(astext_type=sa.Text()), nullable=True)
+    )
 
 
 def downgrade() -> None:
