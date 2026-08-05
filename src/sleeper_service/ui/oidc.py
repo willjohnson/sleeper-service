@@ -25,7 +25,7 @@ from sleeper_service.runtime.outbound import (
     validate_callback_target,
     validate_callback_url,
 )
-from sleeper_service.ui.routes import _csrf_token, render_login
+from sleeper_service.ui.routes import render_login, rotate_csrf_token
 
 router = APIRouter(prefix="/ui/oidc", include_in_schema=False)
 
@@ -171,7 +171,6 @@ async def oidc_callback(
             "No eligible Sleeper Service account for this tenant",
             status_code=403,
         )
-    csrf_token = _csrf_token(request)
     request.session.clear()
     request.session.update(
         {
@@ -182,7 +181,7 @@ async def oidc_callback(
             # principal's roles to teams inside this tenant, so a tenant's own
             # IdP cannot mint a session carrying the user's roles elsewhere.
             "auth_tenant_id": str(tenant_id),
-            "csrf_token": csrf_token,
         }
     )
+    rotate_csrf_token(request)
     return RedirectResponse("/ui", status_code=303)

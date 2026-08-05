@@ -144,3 +144,48 @@ async def test_login_is_rate_limited(client: AsyncClient) -> None:
         },
     )
     assert r.status_code == 429
+
+
+async def test_csrf_token_rotates_on_login(client: AsyncClient, risk_agent: dict) -> None:
+    """The pre-auth token must not survive into the authenticated session.
+
+    Whoever established the pre-auth session knows that token; if login kept
+    it, they could forge state-changing requests once the victim signed in.
+    """
+    page = await client.get("/ui/login")
+    pre_auth = _csrf(page.text)
+
+    r = await client.post(
+        "/ui/login",
+        data={"email": "alice@example.com", "password": "password-123", "_csrf_token": pre_auth},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    agent_id = risk_agent["agent"]["id"]
+    dashboard = await client.get(f"/ui/agents/{agent_id}")
+    post_auth = _csrf(dashboard.text)
+    assert post_auth != pre_auth, "login must mint a new CSRF token"
+
+    # the old token is dead: a request carrying it is refused
+    r = await client.post(f"/ui/agents/{agent_id}/promote/1", data={"_csrf_token": pre_auth})
+    assert r.status_code == 403
+    # ...and the new one still works
+    r = await client.post(
+        f"/ui/agents/{agent_id}/promote/1",
+        data={"_csrf_token": post_auth},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+
+async def test_csrf_token_rotates_on_logout_then_login(client: AsyncClient) -> None:
+    """Logout clears the session, so the next login starts from a fresh token
+    rather than resurrecting the previous session's."""
+    await _login(client, "alice@example.com")
+    signed_in = _csrf((await client.get("/ui/login")).text)
+    await client.post("/ui/logout", data={"_csrf_token": signed_in})
+
+    await _login(client, "alice@example.com")
+    after = _csrf((await client.get("/ui/login")).text)
+    assert after != signed_in

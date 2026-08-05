@@ -309,6 +309,27 @@ async def _csrf(client: AsyncClient) -> str:
     return match.group(1)
 
 
+async def test_sso_login_rotates_the_csrf_token(
+    client: AsyncClient, org: dict, bootstrap, idp: dict
+) -> None:
+    """The SSO callback rebuilds the session; the CSRF token must be rebuilt
+    with it rather than carried over from the pre-authentication session."""
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    await _configure(client, root, tenant_id, idp["issuer"])
+
+    pre_auth = await _csrf(client)
+    state, nonce = await _start_sso(client, tenant_id, idp["issuer"])
+    r = await client.get(
+        f"/ui/oidc/{tenant_id}/callback",
+        params={"code": f"{nonce}:bob@example.com", "state": state},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    assert await _csrf(client) != pre_auth
+
+
 async def test_oidc_unknown_email_rejected(
     client: AsyncClient, org: dict, bootstrap, idp: dict
 ) -> None:

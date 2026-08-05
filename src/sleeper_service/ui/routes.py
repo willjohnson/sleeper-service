@@ -60,6 +60,22 @@ def _csrf_token(request: Request) -> str:
     return token
 
 
+def rotate_csrf_token(request: Request) -> str:
+    """Mint a fresh CSRF token, discarding any prior one.
+
+    Called on every successful login, local or SSO. Carrying the
+    pre-authentication token into the authenticated session would leave the
+    token known to whoever established that pre-auth session: an attacker who
+    can plant their own session cookie on the victim's browser learns the
+    token, and it keeps working after the victim logs in — enough to forge
+    state-changing requests as them. Rotating on the privilege change is the
+    same reason the session itself is rebuilt here.
+    """
+    token = secrets.token_urlsafe(32)
+    request.session["csrf_token"] = token
+    return token
+
+
 async def _csrf_protect(request: Request) -> None:
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
         return
@@ -233,9 +249,9 @@ async def login(
     if user is None or not user.password_hash or not verify_password(password, user.password_hash):
         return await render_login(request, db, "Invalid email or password", status_code=401)
     await redis.delete(rate_key)
-    csrf_token = _csrf_token(request)
     request.session.clear()
-    request.session.update({"user_id": str(user.id), "csrf_token": csrf_token})
+    request.session.update({"user_id": str(user.id)})
+    rotate_csrf_token(request)
     return RedirectResponse("/ui", status_code=303)
 
 

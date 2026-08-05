@@ -42,8 +42,12 @@ ephemeral), and the one local data store has credentials:
 
 Remaining low-severity items from the review of the audit-2 fixes:
 
-- [ ] Rotate the CSRF token on login instead of carrying the pre-auth token into
-  the authenticated session (`ui/routes.py` login, `ui/oidc.py` callback)
+- [x] ~~Rotate the CSRF token on login instead of carrying the pre-auth token
+  into the authenticated session~~ — done 2026-08-05. `rotate_csrf_token()`
+  mints a fresh token after the session is rebuilt, on both the local login
+  and the SSO callback. Regression tests assert the pre-auth token stops
+  working and the new one starts; both were confirmed to fail against the
+  pre-fix code.
 - [ ] Key the login rate limit on the real client IP behind a reverse proxy —
   `request.client.host` is the proxy, making the limit per-email and enabling
   cheap account-lockout DoS
