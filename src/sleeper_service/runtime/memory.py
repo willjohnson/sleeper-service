@@ -88,7 +88,7 @@ async def write_memory(
             if agent is not None and tenant is not None:
                 matched = await hooks.screen_untrusted(db, [content], tenant, agent)
             else:
-                matched = hooks.screen_injection([content], {})
+                matched = await hooks.screen_injection_async([content], {})
             if matched is not None:
                 if source_job_id is not None:
                     db.add(
@@ -111,10 +111,10 @@ async def write_memory(
             # guards a manipulated model, and the deterministic cap below is
             # always the backstop.
             compacted = await learning.compact_memory(db, agent, tenant, content, cap)
-            if compacted is not None and (
-                hooks.screen_injection([compacted], tenant.settings or {}) is None
-            ):
-                content = compacted
+            if compacted is not None:
+                flagged = await hooks.screen_injection_async([compacted], tenant.settings or {})
+                if flagged is None:
+                    content = compacted
 
     content = _enforce_size_cap(content)
     async with get_sessionmaker()() as db:

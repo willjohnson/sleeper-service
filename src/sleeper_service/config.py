@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # e2e stub IdP runs on 127.0.0.1, so tests enable this hatch explicitly.
     oidc_allow_loopback_issuers: bool = False
 
+    # Total wall-clock budget for one prompt-injection heuristic pass, shared
+    # across every pattern and every piece of untrusted content in it. Tenants
+    # supply their own patterns, so the pass needs a ceiling that does not
+    # scale with how many they add. Generous by default because a job may
+    # inline a large text file; lower it if screening latency matters more
+    # than scanning big attachments.
+    injection_screen_timeout_s: float = 5.0
+
     # Delegation / memory / learning
     max_delegation_depth: int = 3
     memory_max_chars: int = 6000

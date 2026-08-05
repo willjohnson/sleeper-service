@@ -67,14 +67,27 @@ threat-model decision rather than an implementation.
 
 Open by design from audit-3 (require a threat-model decision before tightening):
 
-- [ ] **Tenant-defined injection regex ReDoS** (audit-3 #4): `settings.hooks.injection_patterns`
-  are tenant-admin-supplied and run synchronously in worker threads via
-  `screen_injection` with no thread offload or timeout (unlike the tier-2
-  classifier, which is wrapped in `anyio.fail_after`). A catastrophic-
-  backtracking regex could hang workers against crafted inbound content. Options:
-  run the heuristic pass in a thread with a hard timeout, or restrict custom
-  regex authorship to instance superusers (which removes a tenant feature
-  audit 2 deliberately added).
+- [x] ~~**Tenant-defined injection regex ReDoS** (audit-3 #4)~~ — closed
+  2026-08-05 by bounding execution rather than restricting authorship, so
+  tenant admins keep self-service patterns. Three changes: the injection
+  patterns moved from stdlib `re` to `regex`, which resists catastrophic
+  backtracking far better *and* honours a `timeout=` checked during matching
+  (a stdlib match cannot be interrupted at all — it runs in C and ignores
+  cancel scopes, so the "wrap it in `anyio.fail_after`" option originally
+  written here would not have worked); the whole pass shares one
+  `INJECTION_SCREEN_TIMEOUT_S` budget so extra rules do not buy extra worker
+  time; and it runs via `screen_injection_async` off the event loop, since
+  the workers are shared across tenants. Exhausting the budget **fails
+  closed**, returning `screen_timeout:<rule>` so unscreened content is
+  rejected and the offending pattern is named in the job events.
+
+  Two corrections to the original write-up, both found while fixing it: the
+  blocking was on the worker's **event loop**, not a thread, so a hostile
+  pattern stalled every concurrent job in the process rather than one; and
+  `regex` alone removes the classic catastrophic cases at small inputs (58s →
+  1ms on `^(\w+\s?)*$`), but they still blow up at realistic content sizes of
+  a few KB, which is what makes the timeout load-bearing rather than
+  decorative.
 - [ ] **Notification (Apprise) URLs unvalidated outbound** (audit-3 #5):
   `POST /v1/teams/{team_id}/notif-channels` accepts arbitrary Apprise URLs
   from team owners and `runtime/notify` POSTs alert titles/bodies to them —

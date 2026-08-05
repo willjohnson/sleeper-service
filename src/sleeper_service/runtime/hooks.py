@@ -18,15 +18,27 @@ structured output) and an opt-in PII redaction stub
 
 import logging
 import re
+import time
 
 import anyio
 import jsonschema
+import regex
 from pydantic import BaseModel
+
+from sleeper_service.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
-    (name, re.compile(rx, re.IGNORECASE))
+# Injection patterns use `regex`, not the stdlib `re`, because tenants supply
+# their own: `regex` both resists catastrophic backtracking far better and,
+# crucially, honours a `timeout=` it checks *during* matching. A stdlib match
+# cannot be interrupted at all — it runs in C and ignores cancel scopes — so
+# `re` leaves no way to bound a hostile pattern. (PII patterns below stay on
+# `re`: they are platform-controlled, static, and linear.)
+SCREEN_TIMEOUT_RULE = "screen_timeout"
+
+INJECTION_PATTERNS: list[tuple[str, regex.Pattern]] = [
+    (name, regex.compile(rx, regex.IGNORECASE))
     for name, rx in [
         (
             "override_instructions",
@@ -53,7 +65,7 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def _tenant_rules(tenant_settings: dict) -> tuple[list[tuple[str, re.Pattern]], set[str]]:
+def _tenant_rules(tenant_settings: dict) -> tuple[list[tuple[str, regex.Pattern]], set[str]]:
     """Tenant-defined screening config (settings.hooks):
     - injection_patterns: [{"name": ..., "regex": ...}] — extra rules merged
       with the built-ins
@@ -62,11 +74,11 @@ def _tenant_rules(tenant_settings: dict) -> tuple[list[tuple[str, re.Pattern]], 
     Malformed entries are skipped here; the tenants API validates on write.
     """
     cfg = tenant_settings.get("hooks", {})
-    extra: list[tuple[str, re.Pattern]] = []
+    extra: list[tuple[str, regex.Pattern]] = []
     for item in cfg.get("injection_patterns", []):
         try:
-            extra.append((str(item["name"]), re.compile(item["regex"], re.IGNORECASE)))
-        except (KeyError, TypeError, re.error):
+            extra.append((str(item["name"]), regex.compile(item["regex"], regex.IGNORECASE)))
+        except (KeyError, TypeError, regex.error):
             continue
     ignore_rules = cfg.get("injection_ignore_rules", [])
     ignore = set(ignore_rules) if isinstance(ignore_rules, list) else set()
@@ -76,15 +88,53 @@ def _tenant_rules(tenant_settings: dict) -> tuple[list[tuple[str, re.Pattern]], 
 def screen_injection(untrusted_texts: list[str], tenant_settings: dict | None = None) -> str | None:
     """Return the matched rule name if any untrusted text looks like an
     injection attempt, else None. Built-in heuristics plus the tenant's own
-    patterns, minus the tenant's suppressed rules."""
+    patterns, minus the tenant's suppressed rules.
+
+    The whole pass shares one deadline rather than giving each pattern its
+    own, so a tenant cannot buy more worker time by adding more rules.
+
+    Running out of time **fails closed**: it returns a rule name so the caller
+    rejects the content. Screening is what stands between untrusted text and
+    the model, and content that could not be screened is exactly the content
+    not to trust — a bypass would otherwise be available to anyone who can
+    submit input that makes some pattern backtrack. The returned name carries
+    the offending pattern so the cause is visible in the job events. (The
+    tier-2 classifier fails *open* by contrast: it is an optional extra tier,
+    and a vendor outage must not halt every job.)
+
+    Synchronous and potentially slow — async callers should use
+    ``screen_injection_async`` rather than blocking the event loop.
+    """
     extra, ignore = _tenant_rules(tenant_settings or {})
+    deadline = time.monotonic() + get_settings().injection_screen_timeout_s
     for text in untrusted_texts:
         for name, pattern in [*INJECTION_PATTERNS, *extra]:
             if name in ignore:
                 continue
-            if pattern.search(text):
-                return name
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("injection screen exhausted its budget before rule %r", name)
+                return f"{SCREEN_TIMEOUT_RULE}:{name}"
+            try:
+                if pattern.search(text, timeout=remaining):
+                    return name
+            except TimeoutError:
+                logger.warning("injection screen rule %r timed out; rejecting content", name)
+                return f"{SCREEN_TIMEOUT_RULE}:{name}"
     return None
+
+
+async def screen_injection_async(
+    untrusted_texts: list[str], tenant_settings: dict | None = None
+) -> str | None:
+    """``screen_injection`` off the event loop.
+
+    Matching is CPU-bound C code holding the GIL for as long as it runs, so
+    calling it inline would stall every other job sharing the worker — the
+    workers are shared across tenants, which is what makes one tenant's
+    pattern everyone else's problem.
+    """
+    return await anyio.to_thread.run_sync(screen_injection, untrusted_texts, tenant_settings)
 
 
 # --- Tier 2: cheap-model classifier ---
@@ -143,7 +193,7 @@ async def screen_untrusted(db, untrusted_texts: list[str], tenant, agent) -> str
     call site (job pre-hook, memory writes, feedback folds). `tenant` and
     `agent` are ORM rows; `db` resolves the tenant's provider credential."""
     settings = tenant.settings or {}
-    matched = screen_injection(untrusted_texts, settings)
+    matched = await screen_injection_async(untrusted_texts, settings)
     if matched is not None:
         return matched
     model_string = classifier_model_string(settings)
@@ -177,8 +227,8 @@ def validate_hooks_settings(settings: dict) -> str | None:
         if not isinstance(item, dict) or not item.get("name") or "regex" not in item:
             return f"invalid injection pattern {item!r}: needs name and regex"
         try:
-            re.compile(item["regex"])
-        except (re.error, TypeError) as e:
+            regex.compile(item["regex"])
+        except (regex.error, TypeError) as e:
             return f"invalid regex in pattern {item.get('name')!r}: {e}"
     ignore = cfg.get("injection_ignore_rules", [])
     if not isinstance(ignore, list) or not all(isinstance(r, str) for r in ignore):
