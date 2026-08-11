@@ -7,6 +7,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Throwaway credentials for the throwaway MinIO below. There is no shipped
+    # default for these, so CI names them once and both ends use the same pair.
+    env:
+      MINIO_ACCESS_KEY: ci-minio-access
+      MINIO_SECRET_KEY: ci-minio-secret
     services:
       postgres:
         image: postgres:17-alpine
@@ -30,7 +35,7 @@ jobs:
       - name: Start MinIO
         run: >
           docker run -d -p 9000:9000
-          -e MINIO_ROOT_USER=sleeper -e MINIO_ROOT_PASSWORD=sleeper-minio-secret
+          -e MINIO_ROOT_USER=$MINIO_ACCESS_KEY -e MINIO_ROOT_PASSWORD=$MINIO_SECRET_KEY
           minio/minio server /data
       - uses: astral-sh/setup-uv@v5
         with:

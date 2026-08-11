@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import notify, runner
+from sleeper_service.runtime import notify, outbound, runner
 from tests.conftest import auth
 
 
@@ -387,6 +387,7 @@ async def test_mcp_grant_with_tool_filter(
 
 async def test_store_tools_scoping(client: AsyncClient, risk_agent: dict, bootstrap) -> None:
     from sleeper_service import storage
+    from sleeper_service.config import get_settings
     from sleeper_service.runtime.toolsets import build_store_toolset
 
     root = auth(bootstrap.superuser_key)
@@ -399,7 +400,10 @@ async def test_store_tools_scoping(client: AsyncClient, risk_agent: dict, bootst
             "name": "refdata",
             "type": "s3",
             "config": {"bucket": "sleeper-files-test", "endpoint_url": "http://localhost:9000"},
-            "credentials": {"access_key": "sleeper", "secret_key": "sleeper-minio-secret"},
+            "credentials": {
+                "access_key": get_settings().minio_access_key,
+                "secret_key": get_settings().minio_secret_key,
+            },
         },
     )
     assert r.status_code == 201
@@ -543,6 +547,13 @@ async def test_notify_dedup_and_channel_send(
             sends.extend(self.urls)
 
     monkeypatch.setattr(notify.apprise, "Apprise", FakeApprise)
+    # Delivery resolves the destination (audit-3 #5); `.example` never resolves,
+    # so stand in a public address and let the rest of the check run for real.
+    monkeypatch.setattr(
+        outbound.socket,
+        "getaddrinfo",
+        lambda host, port, **kw: [(2, 1, 6, "", ("93.184.216.34", port or 80))],
+    )
 
     await notify.notify(agent_id, "budget", "t", "b")
     await notify.notify(agent_id, "budget", "t", "b")  # deduped inside window

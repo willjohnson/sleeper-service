@@ -1,7 +1,7 @@
 [project]
 name = "sleeper-service"
 version = "0.1.0"
-description = "Agent as a Service — a self-hosted platform for fleets of narrow, single-purpose AI agents exposed as API endpoints."
+description = "Agents as a Service — a self-hosted platform for fleets of narrow, single-purpose AI agents exposed as API endpoints."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
