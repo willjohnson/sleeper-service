@@ -372,7 +372,10 @@ async def _demo_setup() -> None:
                     )
                 )
 
-        # Alert channel → demo-sink echo container (dead_letter + budget)
+        # Alert channel → demo-sink echo container (dead_letter + budget).
+        # Seeded straight into the table, so it skips the create-time
+        # destination check the API applies; delivery still applies it, and
+        # demo-sink is a compose-internal name — hence the note printed below.
         channel = await db.scalar(select(NotifChannel).where(NotifChannel.team_id == team.id))
         if channel is None:
             db.add(
@@ -402,6 +405,12 @@ async def _demo_setup() -> None:
     typer.echo("  Agents: risk-analyzer (delegation+memory+learning), notifier, flaky-agent")
     typer.echo("  Reference store: s3://demo-reference/risk_playbook.md (read-only grant)")
     typer.echo("  Alerts: json://demo-sink:8080/alerts (dead_letter, budget)")
+    if not get_settings().notif_allow_private_hosts:
+        typer.secho(
+            "  ...but alert delivery rejects non-public destinations, and demo-sink is one.\n"
+            "  Set NOTIF_ALLOW_PRIVATE_HOSTS=true in .env to see demo alerts land.",
+            fg="yellow",
+        )
     typer.echo("\nStart the feed: docker compose --profile demo up -d")
 
 

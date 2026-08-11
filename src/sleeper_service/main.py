@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Sleeper Service",
-    description="Agent as a Service — one agent, one task, a thousand of them.",
+    description="Agents as a Service — one agent, one task, a thousand of them.",
     version=__version__,
     lifespan=lifespan,
 )

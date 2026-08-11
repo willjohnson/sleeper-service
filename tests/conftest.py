@@ -8,9 +8,10 @@ import os
 import uuid
 
 
-def _host_port(name: str, default: str) -> str:
-    """Compose host-port override, from the environment or the local .env
-    (machines whose standard ports are occupied set these there)."""
+def _from_env(name: str, default: str) -> str:
+    """A setting from the environment or the local .env: compose host-port
+    overrides (machines whose standard ports are occupied set these there) and
+    the MinIO credentials, which tests share with the running container."""
     if os.environ.get(name):
         return os.environ[name]
     try:
@@ -23,8 +24,8 @@ def _host_port(name: str, default: str) -> str:
     return default
 
 
-_PG = _host_port("POSTGRES_HOST_PORT", "5432")
-_REDIS = _host_port("REDIS_HOST_PORT", "6379")
+_PG = _from_env("POSTGRES_HOST_PORT", "5432")
+_REDIS = _from_env("REDIS_HOST_PORT", "6379")
 
 os.environ["DATABASE_URL"] = f"postgresql+asyncpg://sleeper:sleeper@localhost:{_PG}/sleeper_test"
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
@@ -34,6 +35,10 @@ os.environ["SESSION_HTTPS_ONLY"] = "false"
 # Redis db 1: isolates test enqueues/rate-limit counters from the compose worker (db 0)
 os.environ["REDIS_URL"] = f"redis://localhost:{_REDIS}/1"
 os.environ["MINIO_BUCKET"] = "sleeper-files-test"
+# No shipped default any more (audit-4 housekeeping): tests must use whatever
+# the MinIO they talk to was started with.
+os.environ["MINIO_ACCESS_KEY"] = _from_env("MINIO_ACCESS_KEY", "sleeper")
+os.environ["MINIO_SECRET_KEY"] = _from_env("MINIO_SECRET_KEY", "sleeper-minio-secret")
 os.environ["LANGFUSE_HOST"] = ""  # never export test traces (overrides .env)
 
 import asyncpg

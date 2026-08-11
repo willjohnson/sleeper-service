@@ -1,6 +1,6 @@
 # Sleeper Service — Build Plan
 
-*Name: **Sleeper Service** — Agent as a Service. After the GSV from Iain M. Banks' *Excession*, which quietly built and maintained a fleet of 80,000. Renamed 2026-08-01: original working name "Cassidy" collides with CassidyAI, a funded company in the same space (fittingly, Cassidy is also a Grateful Dead song).*
+*Name: **Sleeper Service** — Agents as a Service. After the GSV from Iain M. Banks' *Excession*, which quietly built and maintained a fleet of 80,000. Renamed 2026-08-01: original working name "Cassidy" collides with CassidyAI, a funded company in the same space (fittingly, Cassidy is also a Grateful Dead song).*
 
 Source: `notes/daily/2026-07/2026-07-30.md` + scoping decisions (2026-08-01).
 
@@ -171,6 +171,7 @@ Ownership means nothing if the owner never hears about failures. Keep it simple 
 
 - Each team configures one or more notification channels (an Apprise URL, encrypted at rest) and subscribes to events: job dead-lettered, callback retries exhausted, spending limit tripped, agent error-rate threshold crossed.
 - Alerts fire from the worker via the normal queue, deduplicated per agent per window so a broken agent doesn't page 500 times.
+- **Destination policy** ✅ *added 2026-08-11 (audit-3 #5)*: leveraging Apprise means a team owner names a URL the worker then connects to, which is the same server-side outbound path as callbacks and links. Two properties of the ~250 supported schemes make an arbitrary one unsafe — a few notify the worker host rather than the network (`dbus://`, `macosx://`, `syslog://`), and most of the rest embed a hostname, which turns adding a channel into a reachability probe of the internal network. *As built (`runtime/outbound.py`): the scheme decides the policy. `HOSTED_APPRISE_SCHEMES` are services whose endpoint is fixed by the provider, where the URL's authority is credential material (`slack://TokenA/TokenB/TokenC`) and there is nothing to resolve; `CUSTOM_HOST_APPRISE_SCHEMES` are self-hosted servers and generic webhooks, whose host must clear the same address policy as a callback. Anything on neither list is refused. `NOTIF_EXTRA_SCHEMES` widens the set for a deployment needing something unvetted, but treats the addition as custom-host, so widening can add a destination and never an exemption. `notif_scheme_allowlist` in tenant settings intersects, so a tenant can narrow but never widen. Checked at channel creation for fast feedback and again at delivery with a fresh resolution, where a rejected channel is skipped and logged (never with its URL — it embeds credentials) while the rest of the alert still goes out. `mailto://` is deliberately off the list: Apprise connects to a provider-mapped server or `smtp.<domain>`, not the URL's host, so validating the host would not validate the destination — email alerts go via `mailgun`/`sendgrid`/`ses`. `NOTIF_ALLOW_PRIVATE_HOSTS` exists for deployments whose alert server shares the worker's private network, and is what the compose demo needs for its in-network `demo-sink`.*
 
 ## Admin UI & human auth
 

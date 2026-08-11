@@ -1,6 +1,6 @@
 # Sleeper Service
 
-**Agent as a Service.** One agent. One task. A thousand of them.
+**Agents as a Service.** One agent. One task. A thousand of them.
 
 Sleeper Service is an open-source, self-hosted platform for running fleets of narrow, single-purpose AI agents as API endpoints. Instead of one autonomous agent trying to do everything, you define many small agents that each do one job well — repeatedly, auditably, and inside your existing orchestrated workflows.
 
@@ -39,7 +39,7 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 
 **Safety & spend** — Prompt-injection screening over all untrusted content (payload, files, links) with `rejected` status and audit events: on by default, tenant-tunable (add custom patterns, suppress a built-in rule that false-positives on your domain), disable-able per tenant or agent; memory writes and feedback comments pass the same screen (poisoning defense). An opt-in second tier (`hooks.injection_classifier_model`) asks a cheap model for a structured verdict on anything the heuristics pass — fail-open, hard-timeboxed, and not billed to job spend. Monthly spending limits per agent: pre-flight refusal with auditable `budget_exceeded` rows; per-job token/cost accounting via genai-prices. Provider credentials encrypted at rest (Fernet).
 
-**Events & alerting** — Webhook event sources with `{{path}}` payload templates and `dedup_key_path` dedup. Apprise notification channels per team (Slack/email/SMS/100+ services) subscribed to `dead_letter`, `budget`, `eval_regression` — deduplicated per agent per window.
+**Events & alerting** — Webhook event sources with `{{path}}` payload templates and `dedup_key_path` dedup. Apprise notification channels per team (Slack/email/SMS/100+ services) subscribed to `dead_letter`, `budget`, `eval_regression` — deduplicated per agent per window. Channel URLs are a server-side outbound path like callbacks, so schemes are limited to a vetted set (`NOTIF_EXTRA_SCHEMES` widens it, `notif_scheme_allowlist` narrows it per tenant) and any host in one is re-resolved and rejected if it is not public.
 
 **Delegation** — Built-in `list_agents` (the rolodex: names, descriptions, I/O schemas) and `call_agent` tools, gated per agent (none/team/tenant). Child jobs carry `parent_job_id`; `GET /v1/jobs/{id}/tree` returns the audited tree. Depth caps and cycle detection.
 
@@ -149,11 +149,19 @@ Python / FastAPI, PydanticAI agent runtime, Postgres, Redis + arq workers, MCP f
 
 ```bash
 git clone https://github.com/willjohnson/sleeper-service.git && cd sleeper-service
-cp .env.example .env        # set SECRET_KEY and a provider API key
+cp .env.example .env        # set SECRET_KEY, the MINIO_* pair, and a provider API key
 docker compose up -d
 docker compose exec api sleeper init          # first tenant, team, superuser → prints your API key
 docker compose exec api sleeper seed-models   # register starter models (incl. keyless test provider)
 ```
+
+> **Why MinIO credentials up front?** They guard the payload bucket holding
+> every tenant's uploads, and BYO s3 endpoints are an intended feature — a
+> tenant admin can point a data store at any endpoint the worker reaches,
+> including this one. So there is no shipped default to leave unrotated:
+> compose refuses to start without the pair. Rotating later needs
+> `docker compose up -d --force-recreate minio` and a matching update to any
+> data store configured with the old pair.
 
 > **Deploying anywhere shared?** The optional Langfuse profile bootstraps itself
 > from `.env` and compose defaults: project keys (`LANGFUSE_PUBLIC_KEY` /

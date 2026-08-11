@@ -18,6 +18,10 @@ E2B-as-abstraction evaluated and passed over — rationale in BUILD_PLAN
 § Runner design). 126 tests green. See BUILD_PLAN.md for design intent and
 the decision log embedded in each section.
 
+Since then the security follow-up list below has been worked down: as of
+2026-08-11 the only open item is screening text inside binary uploads, and
+172 tests are green.
+
 ## Remaining from the build plan
 
 1. **Runner tier 3 — hosted sandboxes** (BUILD_PLAN § Runner design) —
@@ -65,7 +69,9 @@ Remaining low-severity items from the review of the audit-2 fixes:
 **This clears the audit-2 review list.** What remains below needs a
 threat-model decision rather than an implementation.
 
-Open by design from audit-3 (require a threat-model decision before tightening):
+Items that were parked for a threat-model decision. Both audit-3 entries are
+now closed; the audit-4 residual at the end is the only one still open, and it
+is the one that genuinely needs a policy call rather than a validator:
 
 - [x] ~~**Tenant-defined injection regex ReDoS** (audit-3 #4)~~ — closed
   2026-08-05 by bounding execution rather than restricting authorship, so
@@ -88,13 +94,29 @@ Open by design from audit-3 (require a threat-model decision before tightening):
   1ms on `^(\w+\s?)*$`), but they still blow up at realistic content sizes of
   a few KB, which is what makes the timeout load-bearing rather than
   decorative.
-- [ ] **Notification (Apprise) URLs unvalidated outbound** (audit-3 #5):
-  `POST /v1/teams/{team_id}/notif-channels` accepts arbitrary Apprise URLs
-  from team owners and `runtime/notify` POSTs alert titles/bodies to them —
-  a server-side outbound path with no `validate_callback_*`-style check.
-  Alert content is platform-controlled so leakage is limited, but an owner
-  could confirm internal reachability. Options: an `apprise_allowlist` per
-  team/tenant, or restricting Apprise schemes to a vetted set.
+- [x] ~~**Notification (Apprise) URLs unvalidated outbound** (audit-3 #5)~~ —
+  closed 2026-08-11 by doing both of the options originally listed here, since
+  they turned out to solve different halves. The scheme allowlist is what stops
+  `dbus://` / `macosx://` / `syslog://`, which notify the **worker host** rather
+  than the network — a case the write-up above missed by framing the finding as
+  purely a reachability probe. The host check is what closes the probe itself.
+  `HOSTED_APPRISE_SCHEMES` (endpoint fixed by the provider, so the authority is
+  credentials — `slack://TokenA/TokenB/TokenC` — and resolving it would reject a
+  good URL) is split from `CUSTOM_HOST_APPRISE_SCHEMES` (self-hosted servers and
+  generic webhooks, host validated exactly like a callback); anything on neither
+  list is refused. `NOTIF_EXTRA_SCHEMES` widens the set but always as
+  custom-host, so widening can never buy an exemption from the address check,
+  and tenant `notif_scheme_allowlist` intersects rather than unions. Validated
+  at creation and again at delivery against a fresh resolution.
+
+  Two notes from building it. `mailto://` is deliberately **not** allowlisted:
+  Apprise connects to a provider-mapped server or `smtp.<domain>`, never the
+  URL's own host, so host validation there would be validating the wrong name —
+  email alerts go through `mailgun` / `sendgrid` / `ses` instead. And the
+  compose demo alerts to `json://demo-sink:8080/alerts`, an in-network name that
+  the new rule correctly rejects; `NOTIF_ALLOW_PRIVATE_HOSTS=true` is the
+  supported way to run it (also the honest answer for self-hosters alerting to
+  an internal Mattermost or Gotify), and `sleeper demo-seed` now says so.
 - [ ] **Screen text inside binary uploads** (audit-4 #6 residual): the
   content-type sniffer stops injection text from *posing* as a PDF, but a
   genuine PDF with the text in a compressed content stream still reaches the
@@ -107,13 +129,16 @@ Open by design from audit-3 (require a threat-model decision before tightening):
 - **Repo is on GitHub (private):** https://github.com/willjohnson/sleeper-service —
   flip visibility with `gh repo edit --visibility public` when ready; CI runs
   on push.
-- **Demo poller is stopped** (as of 2026-08-05), and so are `api` and
-  `worker` — only postgres/redis/minio and the Langfuse stack are up, so
-  nothing is spending OpenRouter credit and `/ui` is not reachable. Bring the
-  app back with `docker compose up -d --build api worker` (the `--build` is
-  needed to pick up source changes), and add `--profile demo` for the poller,
-  which posts a real OpenRouter job every 30s (~$0.30/day). Stop it again with
-  `docker compose --profile demo down` when not demoing.
+- **Demo poller is stopped** (as of 2026-08-05). `api` and `worker` **are**
+  running as of 2026-08-11 — the earlier note here said otherwise and was
+  wrong; they were up, just idle, so `/ui` is reachable. Nothing is spending
+  OpenRouter credit while the demo profile is down. Restart the app after
+  source changes with `docker compose up -d --build api worker` (the `--build`
+  is needed to pick them up), and add `--profile demo` for the poller, which
+  posts a real OpenRouter job every 30s (~$0.30/day). Stop it again with
+  `docker compose --profile demo down` when not demoing. The demo's alert
+  channel needs `NOTIF_ALLOW_PRIVATE_HOSTS=true` to deliver (see audit-3 #5
+  above); it is **not** set in the local `.env`.
 - **Demo risk-analyzer has `memory_approval` on**, so its memory proposals
   queue as pending in the UI (`/ui`, login = the `sleeper init` credentials).
   Approve/reject or toggle the option off.
@@ -121,13 +146,20 @@ Open by design from audit-3 (require a threat-model decision before tightening):
   `.env` — fine locally, regenerate for any shared deployment. Now surfaced:
   README quickstart note, `.env.example` LANGFUSE_INIT_* hints, and a
   `sleeper init` warning when the well-known dev keys are configured.
-  **The MinIO pair matters more than the rest** (audit-4): BYO s3 endpoints
-  are an intended feature, so a tenant admin may point a data store at any
-  endpoint the worker can reach — including the platform's own MinIO. With
-  the default `sleeper` / `sleeper-minio-secret` unrotated those credentials
-  are public knowledge, which turns an intended feature into a cross-tenant
-  read of the payload bucket. Rotating them is what keeps the two apart; it
-  is not cosmetic.
+- [x] ~~**MinIO credentials** (audit-4, the one that mattered most here)~~ —
+  rotated 2026-08-11, and the shipped default is gone rather than replaced.
+  `minio_access_key` / `minio_secret_key` are now required settings with no
+  default, and compose uses `${MINIO_ACCESS_KEY:?...}` instead of a fallback,
+  so there is nothing left to leave unrotated: BYO s3 endpoints are an intended
+  feature, a tenant admin can point a data store at the platform's own MinIO,
+  and a published pair made that a cross-tenant read of the payload bucket.
+  Verified locally: a roundtrip succeeds on the new pair and `sleeper` /
+  `sleeper-minio-secret` now gets `PermissionError`. **The demo `reference`
+  data store had the old pair encrypted in its row** and was re-encrypted with
+  the new one — worth remembering for any real deployment, since rotating the
+  server alone silently breaks every data store configured with the old pair.
+  CI names its own throwaway pair; `tests/conftest.py` reads `.env` for it the
+  same way it already read the host-port overrides.
 - Structured logging is minimal (request IDs + basicConfig); JSON logs and
   API↔worker correlation would help at scale.
 

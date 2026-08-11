@@ -12,9 +12,14 @@ import anyio
 import apprise
 
 from sleeper_service.crypto import decrypt
-from sleeper_service.db.models import Agent, NotifChannel
+from sleeper_service.db.models import Agent, NotifChannel, Team, Tenant
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.redis_client import get_redis
+from sleeper_service.runtime.outbound import (
+    OutboundUrlError,
+    notif_policy,
+    validate_apprise_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +42,25 @@ async def notify(agent_id: uuid.UUID, event_type: str, title: str, body: str) ->
         channels = list(
             await db.scalars(select(NotifChannel).where(NotifChannel.team_id == agent.team_id))
         )
-    urls = [decrypt(c.apprise_url_enc) for c in channels if event_type in (c.events or [])]
+        team = await db.get(Team, agent.team_id)
+        tenant = await db.get(Tenant, team.tenant_id) if team else None
+    tenant_settings = (tenant.settings or {}) if tenant else {}
+
+    # Re-check every destination here, not just at channel creation: a hostname
+    # that was public then can point at an internal address now, and tenant
+    # policy may have narrowed since. A rejected channel is skipped, not fatal —
+    # the other channels for this alert still deliver.
+    urls = []
+    for channel_url in (
+        decrypt(c.apprise_url_enc) for c in channels if event_type in (c.events or [])
+    ):
+        try:
+            await validate_apprise_target(channel_url, tenant_settings, **notif_policy())
+        except OutboundUrlError as e:
+            # The URL embeds credentials, so log the reason and never the URL.
+            logger.warning("skipping alert channel for agent %s: %s", agent_id, e)
+            continue
+        urls.append(channel_url)
     if not urls:
         return
 

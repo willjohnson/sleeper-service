@@ -7,6 +7,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from httpx import AsyncClient
 from pydantic_ai import ModelRetry
 from sqlalchemy import select
 
@@ -585,3 +586,148 @@ def test_queue_jobs_are_json_not_pickle():
     # unpickled — the decoder has no code path that instantiates anything
     with pytest.raises(ValueError):
         job_deserializer(pickle.dumps({"f": "run_job", "a": ["x"]}))
+
+
+# --- Audit 3 #5: Apprise notification URLs are a server-side outbound path ---
+
+
+def test_apprise_scheme_must_be_vetted():
+    """A team owner supplies these and the worker connects to them, so schemes
+    that notify the worker host rather than the network are refused outright."""
+    from sleeper_service.runtime.outbound import validate_apprise_url
+
+    for url in ("dbus://", "macosx://", "syslog://localhost", "windows://", "growl://10.0.0.1"):
+        with pytest.raises(OutboundUrlError, match="not permitted"):
+            validate_apprise_url(url)
+
+    # A provider-hosted scheme carries credentials in the authority, not a
+    # destination, so there is nothing to resolve.
+    assert validate_apprise_url("slack://TokenA/TokenB/TokenC/#channel") is None
+    assert validate_apprise_url("pover://user@token") is None
+    # A generic webhook names a real host, which the caller must then resolve.
+    assert validate_apprise_url("json://alerts.example/hook") == "alerts.example"
+
+
+def test_apprise_rejects_internal_destinations():
+    """The finding: an owner could confirm internal reachability by pointing a
+    channel at it. Same address policy the callback path already applies."""
+    from sleeper_service.runtime.outbound import validate_apprise_url
+
+    for url in (
+        "json://127.0.0.1:6379/x",
+        "json://10.0.0.5/hook",
+        "jsons://192.168.1.1/hook",
+        "json://169.254.169.254/latest/meta-data",
+        "json://localhost:9000/hook",
+        "ntfy://redis.internal/alerts",
+        "gotify://printer.local/x",
+    ):
+        with pytest.raises(OutboundUrlError, match="non-public"):
+            validate_apprise_url(url)
+
+    # ...unless the operator has said the alert server shares the private network
+    assert validate_apprise_url("json://10.0.0.5/hook", allow_private_hosts=True) == "10.0.0.5"
+
+
+def test_apprise_extra_schemes_cannot_skip_the_host_check():
+    """NOTIF_EXTRA_SCHEMES widens the vetted set. Anything added that way is
+    treated as custom-host, so widening can add a service but never buy an
+    exemption from the address check."""
+    from sleeper_service.runtime.outbound import validate_apprise_url
+
+    extra = frozenset({"zulip"})
+    with pytest.raises(OutboundUrlError, match="not permitted"):
+        validate_apprise_url("zulip://bot@org/token")
+    assert validate_apprise_url("zulip://bot@org.example/token", extra_schemes=extra) == (
+        "org.example"
+    )
+    with pytest.raises(OutboundUrlError, match="non-public"):
+        validate_apprise_url("zulip://bot@10.1.2.3/token", extra_schemes=extra)
+
+
+def test_apprise_tenant_allowlist_narrows_only():
+    """A tenant may restrict its teams further; it may not admit a scheme the
+    platform has not vetted."""
+    from sleeper_service.runtime.outbound import validate_apprise_url
+
+    settings = {"notif_scheme_allowlist": ["slack"]}
+    assert validate_apprise_url("slack://a/b/c", settings) is None
+    with pytest.raises(OutboundUrlError, match="not permitted"):
+        validate_apprise_url("json://alerts.example/hook", settings)
+    # widening from tenant settings is not possible — the intersection is empty
+    with pytest.raises(OutboundUrlError, match="not permitted"):
+        validate_apprise_url("dbus://", {"notif_scheme_allowlist": ["dbus"]})
+
+
+async def test_notif_channel_create_rejects_internal_url(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """The endpoint from the finding: POST notif-channels took any Apprise URL."""
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    team_id = risk_agent["team"]["id"]
+
+    for bad in ("json://127.0.0.1:6379/probe", "dbus://", "json://postgres.internal/x"):
+        r = await client.post(
+            f"/v1/teams/{team_id}/notif-channels",
+            headers=alice,
+            json={"apprise_url": bad, "events": ["budget"]},
+        )
+        assert r.status_code == 422, bad
+
+    r = await client.post(
+        f"/v1/teams/{team_id}/notif-channels",
+        headers=alice,
+        json={"apprise_url": "slack://TokenA/TokenB/TokenC", "events": ["budget"]},
+    )
+    assert r.status_code == 201
+
+
+async def test_notify_revalidates_destination_at_send(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Creation-time validation cannot see a name that starts resolving
+    internally later, so delivery resolves again and skips what it rejects."""
+    from sleeper_service.runtime import notify as notify_mod
+    from sleeper_service.runtime import outbound
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    team_id = risk_agent["team"]["id"]
+    agent_id = uuid.UUID(risk_agent["agent"]["id"])
+
+    r = await client.post(
+        f"/v1/teams/{team_id}/notif-channels",
+        headers=alice,
+        json={"apprise_url": "json://rebind.example/hook", "events": ["budget"]},
+    )
+    assert r.status_code == 201
+
+    sends: list[str] = []
+
+    class FakeApprise:
+        def __init__(self):
+            self.urls = []
+
+        def add(self, url):
+            self.urls.append(url)
+
+        def notify(self, title, body):
+            sends.extend(self.urls)
+
+    monkeypatch.setattr(notify_mod.apprise, "Apprise", FakeApprise)
+
+    # the host now answers with a private address
+    def rebound(host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.7", port or 80))]
+
+    monkeypatch.setattr(outbound.socket, "getaddrinfo", rebound)
+    await notify_mod.notify(agent_id, "budget", "t", "b")
+    assert sends == []
+
+    # and delivers once it resolves publicly again
+    def public(host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 80))]
+
+    monkeypatch.setattr(outbound.socket, "getaddrinfo", public)
+    await notify_mod.get_redis().delete(f"alert:{agent_id}:budget")  # clear the dedup window
+    await notify_mod.notify(agent_id, "budget", "t", "b")
+    assert sends == ["json://rebind.example/hook"]
