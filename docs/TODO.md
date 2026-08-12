@@ -121,8 +121,23 @@ is the one that genuinely needs a policy call rather than a validator:
   content-type sniffer stops injection text from *posing* as a PDF, but a
   genuine PDF with the text in a compressed content stream still reaches the
   model unscreened — models extract it, `hooks.screen_untrusted` cannot.
-  Needs server-side text extraction (pdf/docx/OCR) feeding the screen, or a
-  policy of refusing binary uploads for agents with sensitive tool grants.
+  **Designed 2026-08-12 — see [BUILD_PLAN](BUILD_PLAN.md) § Binary upload
+  screening.** Worth correcting one framing in the line above: this is not a
+  missing hook. The pre-hook is default-on and correct; `_load_file_content`
+  simply never adds a binary file to the list it screens, so the hook is
+  handed an empty feed. The work is an extraction step upstream of it, and
+  the screen itself does not change.
+
+  Two things the design surfaced that make this more than a library call.
+  Extraction means running pypdf over hostile input **inside the worker**,
+  which holds `SECRET_KEY` and every decrypted provider credential — the
+  `docker` runner backend is the obvious containment, but it is opt-in behind
+  `RUNNER_BACKENDS`, so the sandboxed path cannot be the default. And
+  coverage is inherently partial (encrypted PDFs, scans, unknown formats),
+  which is what makes the fail-open / fail-closed / conditional-on-grants
+  choice the real decision rather than an implementation detail.
+  Recommendation is in the section: conditional on grants, phased in behind
+  a fail-open first cut.
 
 ## Housekeeping
 
