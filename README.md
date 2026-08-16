@@ -149,7 +149,7 @@ Python / FastAPI, PydanticAI agent runtime, Postgres, Redis + arq workers, MCP f
 
 ```bash
 git clone https://github.com/willjohnson/sleeper-service.git && cd sleeper-service
-cp .env.example .env        # set SECRET_KEY, the MINIO_* pair, and a provider API key
+cp .env.example .env        # set SECRET_KEY, MINIO_*, REDIS_PASSWORD, and a provider API key
 docker compose up -d
 docker compose exec api sleeper init          # first tenant, team, superuser → prints your API key
 docker compose exec api sleeper seed-models   # register starter models (incl. keyless test provider)
@@ -162,6 +162,11 @@ docker compose exec api sleeper seed-models   # register starter models (incl. k
 > compose refuses to start without the pair. Rotating later needs
 > `docker compose up -d --force-recreate minio` and a matching update to any
 > data store configured with the old pair.
+
+> **Redis also requires a credential up front.** Set `REDIS_PASSWORD` to a
+> URL-safe random value; Compose uses it for the server, health check, API, and
+> worker and refuses to start without it. Host-side tools should use an
+> authenticated `REDIS_URL`, as shown in `.env.example`.
 
 > **Deploying anywhere shared?** The optional Langfuse profile bootstraps itself
 > from `.env` and compose defaults: project keys (`LANGFUSE_PUBLIC_KEY` /
