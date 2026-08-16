@@ -40,9 +40,32 @@ deployed anywhere yet, and the local dev environment was checked on 2026-08-05
 and needs none of them — Redis was empty (and has no volume, so it is
 ephemeral), and the one local data store has credentials:
 
-- [ ] **Drain the arq queue** before/while deploying — jobs are now JSON-serialized, and pickle payloads already in Redis will not deserialize.
-- [ ] **Review existing credential-less `s3` / `gcs` / `azure_blob` data-store rows** — the new gate cannot establish who created historical rows (same caveat as the audit-3 `local` rows).
-- [ ] **Set `requirepass` on Redis** and move `REDIS_URL` to `redis://:pw@redis:6379/0`. Loopback binding closed the remote path; this closes reachability-as-authorization. Left undone because it needs a coordinated env change.
+- [x] ~~**Drain the arq queue** before/while deploying — jobs are now
+  JSON-serialized, and pickle payloads already in Redis will not
+  deserialize.~~ — closed 2026-08-15. The serializer change had already been
+  deployed to the only Sleeper Service environment (local); Redis DB 0 was
+  inspected afterward and `arq:queue` had length 0, with no `arq:job:*` or
+  `arq:result:*` keys. The sole `arq:*` key was the current worker's health
+  check, so there were no legacy payloads to delete. A fresh deployment also
+  starts with an empty queue.
+- [x] ~~**Review existing credential-less `s3` / `gcs` / `azure_blob`
+  data-store rows** — the new gate cannot establish who created historical
+  rows (same caveat as the audit-3 `local` rows).~~ — closed 2026-08-16. The
+  only Sleeper Service environment is local. Its `data_stores` table contains
+  one `s3` row with encrypted credentials, no `gcs` or `azure_blob` rows, and
+  no credential-less rows of any of those three types. No historical rows
+  needed remediation; the creation gate covers new rows.
+- [x] ~~**Set `requirepass` on Redis** and move `REDIS_URL` to
+  `redis://:pw@redis:6379/0`. Loopback binding closed the remote path; this
+  closes reachability-as-authorization. Left undone because it needs a
+  coordinated env change.~~ — done 2026-08-16. Compose now requires a
+  URL-safe `REDIS_PASSWORD`, starts Redis with `requirepass`, authenticates
+  its health check through `REDISCLI_AUTH`, and injects authenticated URLs
+  into the API and worker. Host-side tests use the same password on isolated
+  DB 1. The local credential was generated in the gitignored `.env`, Redis,
+  API, and worker were recreated, authenticated `PING` returned `PONG`, an
+  unauthenticated one returned `NOAUTH`, `/healthz` reported Redis healthy,
+  the worker became healthy, and all 172 tests passed.
 
 Remaining low-severity items from the review of the audit-2 fixes:
 
@@ -141,9 +164,8 @@ is the one that genuinely needs a policy call rather than a validator:
 
 ## Housekeeping
 
-- **Repo is on GitHub (private):** https://github.com/willjohnson/sleeper-service —
-  flip visibility with `gh repo edit --visibility public` when ready; CI runs
-  on push.
+- **Repo is public on GitHub:** https://github.com/willjohnson/sleeper-service —
+  CI runs on push.
 - **Demo poller is stopped** (as of 2026-08-05). `api` and `worker` **are**
   running as of 2026-08-11 — the earlier note here said otherwise and was
   wrong; they were up, just idle, so `/ui` is reachable. Nothing is spending
@@ -157,10 +179,6 @@ is the one that genuinely needs a policy call rather than a validator:
 - **Demo risk-analyzer has `memory_approval` on**, so its memory proposals
   queue as pending in the UI (`/ui`, login = the `sleeper init` credentials).
   Approve/reject or toggle the option off.
-- **Placeholder Langfuse keys** (`pk-lf-sleeper-dev`) and demo passwords in
-  `.env` — fine locally, regenerate for any shared deployment. Now surfaced:
-  README quickstart note, `.env.example` LANGFUSE_INIT_* hints, and a
-  `sleeper init` warning when the well-known dev keys are configured.
 - [x] ~~**MinIO credentials** (audit-4, the one that mattered most here)~~ —
   rotated 2026-08-11, and the shipped default is gone rather than replaced.
   `minio_access_key` / `minio_secret_key` are now required settings with no
@@ -184,10 +202,6 @@ is the one that genuinely needs a policy call rather than a validator:
   to 5433/6380 via POSTGRES_HOST_PORT/REDIS_HOST_PORT in the gitignored .env
   (native services occupy the defaults here). Tests honor the same overrides
   and create a `sleeper_test` DB.
-- Postgres/redis/minio now publish to `127.0.0.1` only (audit-4 #3). The
-  containers currently up predate that change and are still bound to
-  `0.0.0.0` — a `docker compose up -d` recreates them with the new binding.
-  The host-port overrides above are unaffected.
 - colima runs docker (4 CPU / 6 GiB — resized for Langfuse; no buildx, keep
   the Dockerfile legacy-builder-compatible).
 - `scripts/screenshots.py` recaptures the README screenshots against a

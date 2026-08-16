@@ -7,11 +7,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Throwaway credentials for the throwaway MinIO below. There is no shipped
-    # default for these, so CI names them once and both ends use the same pair.
+    # Throwaway credentials for the throwaway services below. There are no
+    # shipped defaults, so CI names them once and both ends use the same pair.
     env:
       MINIO_ACCESS_KEY: ci-minio-access
       MINIO_SECRET_KEY: ci-minio-secret
+      REDIS_PASSWORD: ci-redis-password
     services:
       postgres:
         image: postgres:17-alpine
@@ -23,15 +24,17 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U sleeper" --health-interval 5s
           --health-timeout 3s --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 5s
-          --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      # a service container can't pass a command, so MinIO starts as a step
+      # Service containers cannot pass server commands, so these start as
+      # steps: MinIO needs `server /data`, and Redis needs `requirepass`.
+      - name: Start Redis
+        run: |
+          docker run -d --name sleeper-ci-redis -p 6379:6379 \
+            -e REDIS_PASSWORD="$REDIS_PASSWORD" \
+            redis:7-alpine sh -c 'exec redis-server --requirepass "$REDIS_PASSWORD"'
+          until docker exec -e REDISCLI_AUTH="$REDIS_PASSWORD" \
+            sleeper-ci-redis redis-cli ping | grep -q PONG; do sleep 1; done
       - name: Start MinIO
         run: >
           docker run -d -p 9000:9000
