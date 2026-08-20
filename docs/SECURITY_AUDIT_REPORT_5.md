@@ -79,9 +79,10 @@ server). stdio endpoints are command lines, superuser-gated, and untouched.
 `MCP_ALLOW_PRIVATE_HOSTS` (operator-level, default false) mirrors
 `NOTIF_ALLOW_PRIVATE_HOSTS` for deployments whose MCP servers genuinely share
 a network with the worker — the compose `mcp-*` sidecar shape anticipated in
-the BUILD_PLAN. With it set, URL syntax is still enforced but the address
-check and resolution are skipped; widening is a deployment decision, never a
-tenant one.
+the BUILD_PLAN. With it set, the full URL syntax policy (scheme, hostname,
+no credentials-in-URL, valid port) is still enforced through the shared
+validator — only the address policy and connect-time resolution are skipped;
+widening is a deployment decision, never a tenant one.
 
 **Regression coverage:** registration refuses a metadata literal, a loopback
 name, and a `.internal` host while accepting a public endpoint and leaving
@@ -134,12 +135,17 @@ file it learned the id of to a job.
 
 **Fix:** only `KeyScope.TENANT` invoke keys pass the file boundary now;
 `resolve_tenant_for_invoke` is gone (it existed only to widen this check).
-Job submission is unaffected: `context.files` references are validated
-against the agent's tenant at submit and re-checked in the runner, without
-needing file-endpoint access.
+The job surface enforces the same boundary: a `context.files` reference has
+the runner inline the file's content into the prompt, and the submitter reads
+it back through the job output — the same read by another door — so job
+submission refuses (403) `context.files` from invoke keys scoped below the
+tenant. User submissions and tenant-covering keys are unaffected:
+`context.files` references are validated against the agent's tenant at submit
+and re-checked in the runner.
 
 **Regression coverage:** a tenant-covering key uploads and reads; an
-agent-scoped key gets 404 on read, metadata, and upload alike.
+agent-scoped key gets 404 on read, metadata, and upload alike, and 403 when
+referencing a tenant file in a job submission.
 
 ## Design Tensions — Decided And Remediated (Post-Audit)
 
@@ -157,18 +163,27 @@ close them. Each is remediated below with regression coverage in
   **Remediation:** eval jobs are subject to the budget pre-flight and mid-run
   check exactly like production jobs, their cost rolls into `month_spend`, and
   `POST /agents/{id}/eval-runs` refuses (409) at an exhausted budget before
-  creating the run — the same shape as job submission. Eval jobs keep their
-  other distinctions: no callbacks, excluded from error-rate alerting.
-  BUILD_PLAN § Eval design updated to record the change.
+  creating the run — the same shape as job submission. `run_eval` itself also
+  refuses at the top and aborts mid-suite if the budget runs out, marking the
+  run `budget_exceeded` (with an owner notification) rather than completing it
+  at a fabricated 0% pass rate — which would fire a spurious regression alert,
+  become the baseline a real regression is compared against, and make a
+  pending memory version look like it failed its gate. This covers the memory
+  eval gate, which enqueues runs without going through the API route. Eval
+  jobs keep their other distinctions: no callbacks, excluded from error-rate
+  alerting. BUILD_PLAN § Eval design updated to record the change.
 - **Unbounded request bodies on authenticated JSON paths.** `JobSubmit`
   prompts and `user_ctx`, and event-source webhook bodies, had no size cap;
   only files were capped (finding 2 fixed the enforcement of that cap).
-  **Remediation:** `JsonBodyLimitMiddleware` (main.py) rejects
-  `application/json` bodies over `JSON_BODY_MAX_BYTES` (default 1 MiB) with a
-  413 — on the Content-Length header when present, and on the bytes as they
-  stream in when it is not, so chunked requests cannot slip past. Multipart
-  uploads are exempt: the files route enforces `MAX_FILE_SIZE` on the rolled
-  size.
+  **Remediation:** `BodyLimitMiddleware` (main.py) rejects bodies over
+  `REQUEST_BODY_MAX_BYTES` (default 1 MiB) with a 413 — on the Content-Length
+  header when present, and on the bytes as they stream in when it is not, so
+  chunked requests cannot slip past. The cap applies regardless of declared
+  content type, because FastAPI buffers the body before it inspects the
+  Content-Type or resolves auth — a JSON-only cap would be bypassed by
+  relabelling the body. Multipart uploads are the one exemption: Starlette
+  streams them to disk and the files route enforces `MAX_FILE_SIZE` on the
+  rolled size.
 - **`matches_regex` eval checks used stdlib `re` with no timeout.** The
   injection screen moved to the `regex` module with a checked timeout
   precisely because a stdlib match cannot be interrupted; the eval grader's

@@ -26,10 +26,11 @@ class Settings(BaseSettings):
     callback_max_tries: int = 5
     sync_job_timeout_s: int = 120  # cap for ?sync=true regardless of version timeout
 
-    # Cap on application/json request bodies. JSON endpoints buffer the whole
-    # body to parse it, so this bounds request memory; multipart uploads are
-    # exempt (the files route enforces MAX_FILE_SIZE on the rolled size).
-    json_body_max_bytes: int = 1_048_576
+    # Cap on request bodies. FastAPI buffers the whole body into memory
+    # before content-type inspection or auth, so this bounds request memory
+    # for every endpoint; multipart uploads are exempt (streamed to disk, and
+    # the files route enforces MAX_FILE_SIZE on the rolled size).
+    request_body_max_bytes: int = 1_048_576
 
     # Browser authentication. Production defaults are secure; local HTTP
     # development and tests must explicitly disable the Secure cookie flag.

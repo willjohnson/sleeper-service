@@ -218,10 +218,21 @@ async def submit_job(
         except OutboundUrlError as e:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
 
-    for file_id in body.context.files:
-        file = await db.get(File, file_id)
-        if file is None or file.tenant_id != agent.tenant_id:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
+    if body.context.files:
+        # Files are tenant-scoped and invoke keys below the tenant have no
+        # file surface (files.py _check_tenant_access). Referencing a file
+        # here would be that read by another door: the runner inlines the
+        # content into the prompt and the key collects it from the job
+        # output — so the job surface enforces the same boundary.
+        if isinstance(principal, InvokePrincipal) and principal.scope != KeyScope.TENANT:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Invoke keys scoped below the tenant cannot reference files",
+            )
+        for file_id in body.context.files:
+            file = await db.get(File, file_id)
+            if file is None or file.tenant_id != agent.tenant_id:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
 
     job, existed = await create_job(
         db,

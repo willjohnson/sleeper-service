@@ -11,8 +11,8 @@ Covers the three findings fixed in the audit pass:
 
 And the three audit-5 design tensions Will decided to close (2026-08-19):
 
-eval jobs are subject to spending limits and spend rollups; JSON request
-bodies are size-capped; eval matches_regex checks run bounded by a timeout.
+eval jobs are subject to spending limits and spend rollups; request bodies
+are size-capped; eval matches_regex checks run bounded by a timeout.
 """
 
 import socket
@@ -23,11 +23,22 @@ from decimal import Decimal
 import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from sleeper_service.api.v1.files import MAX_FILE_SIZE, upload_file
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.config import get_settings
-from sleeper_service.db.models import Agent, AgentVersion, Job, McpServer, Team, Tenant, User
+from sleeper_service.db.models import (
+    Agent,
+    AgentVersion,
+    EvalCase,
+    EvalRun,
+    Job,
+    McpServer,
+    Team,
+    Tenant,
+    User,
+)
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.runtime import runner, spending
 from sleeper_service.runtime.evals import run_check, validate_checks
@@ -166,6 +177,23 @@ async def test_mcp_private_endpoints_allowed_when_operator_opts_in(
     assert built  # no GrantError, no connection attempt
 
 
+async def test_mcp_private_flag_keeps_url_syntax_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator opt-in skips only the address policy: credentials-in-URL
+    and malformed ports are refused exactly as on every other outbound path,
+    instead of being stored and failing opaquely at job runtime."""
+    from sleeper_service.runtime.outbound import OutboundUrlError, validate_mcp_url
+
+    monkeypatch.setattr(get_settings(), "mcp_allow_private_hosts", True)
+
+    with pytest.raises(OutboundUrlError, match="credentials"):
+        validate_mcp_url("http://user:pass@mcp-sidecar:8000/mcp")
+    with pytest.raises(OutboundUrlError, match="port"):
+        validate_mcp_url("http://mcp-sidecar:99999/mcp")
+    validate_mcp_url("http://mcp-sidecar:8000/mcp")  # in-policy sidecar still fine
+
+
 # --- Finding 2: oversized uploads must be rejected before they are read ---
 
 
@@ -242,6 +270,49 @@ async def test_invoke_key_scope_gates_file_access(
         files={"file": ("x.txt", b"x", "text/plain")},
     )
     assert r.status_code == 404, "agent-scoped invoke key uploaded a tenant file"
+
+
+async def test_narrow_invoke_key_cannot_reference_files_in_jobs(
+    client: AsyncClient, org: dict, risk_agent: dict
+) -> None:
+    """The file boundary by another door: the runner inlines context.files
+    into the prompt and the submitter reads the content back through the job
+    output, so job submission enforces the same tenant-key-only rule."""
+    alice = auth(org["users"]["alice"]["api_key"])
+    bob = auth(org["users"]["bob"]["api_key"])
+    tenant_id = org["tenant"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+
+    r = await client.post(
+        "/v1/api-keys/invoke",
+        headers=alice,
+        json={"scope": "agent", "scope_id": agent_id, "name": "job-file-probe"},
+    )
+    assert r.status_code == 201, r.text
+    agent_key = auth(r.json()["api_key"])
+
+    r = await client.post(
+        f"/v1/files?tenant_id={tenant_id}",
+        headers=bob,
+        files={"file": ("secret.txt", b"tenant secret", "text/plain")},
+    )
+    assert r.status_code == 201, r.text
+    file_id = r.json()["id"]
+
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs",
+        headers=agent_key,
+        json={"context": {"prompt": "read it", "files": [file_id]}},
+    )
+    assert r.status_code == 403, "agent-scoped invoke key attached a tenant file to a job"
+
+    # without files the same key still submits within its scope
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs",
+        headers=agent_key,
+        json={"context": {"prompt": "no files"}},
+    )
+    assert r.status_code == 202, r.text
 
 
 # --- Post-audit follow-up: eval jobs subject to spending limits and rollups ---
@@ -392,6 +463,53 @@ async def test_start_eval_run_refused_at_exhausted_budget(
     assert "monthly spend" in r.json()["detail"]
 
 
+async def test_run_eval_refused_at_exhausted_budget(client: AsyncClient, risk_agent: dict) -> None:
+    """run_eval refuses at the top — not only in the API route — because the
+    memory eval gate enqueues runs without passing through it, and a queued
+    run can outlive its pre-flight. Completing instead at 0% would fire a
+    spurious regression alert and then become the baseline that masks a real
+    one."""
+    from sleeper_service.runtime.evals import run_eval
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    version_id = risk_agent["version"]["id"]
+
+    r = await client.patch(f"/v1/agents/{agent_id}", headers=bob, json={"spending_limit": "0"})
+    assert r.status_code == 200
+
+    async with get_sessionmaker()() as db:
+        db.add(
+            EvalCase(
+                agent_id=uuid.UUID(agent_id),
+                name="never-runs",
+                input={"prompt": "assess"},
+                checks=[{"path": "risk_level", "op": "equals", "value": "low"}],
+            )
+        )
+        run = EvalRun(agent_id=uuid.UUID(agent_id), agent_version_id=uuid.UUID(version_id))
+        db.add(run)
+        await db.commit()
+        run_id = run.id
+
+    await run_eval(run_id)
+
+    async with get_sessionmaker()() as db:
+        run = await db.get(EvalRun, run_id)
+    assert run.status == "budget_exceeded"
+    assert run.pass_rate is None  # unevaluated, not 0%
+    assert run.finished_at is not None
+
+    # no case job was created for the refused run
+    async with get_sessionmaker()() as db:
+        eval_jobs = list(
+            await db.scalars(
+                select(Job).where(Job.agent_id == uuid.UUID(agent_id), Job.is_eval.is_(True))
+            )
+        )
+    assert eval_jobs == []
+
+
 # --- Post-audit follow-up: JSON request body cap ---
 
 
@@ -399,7 +517,7 @@ async def test_oversized_json_body_rejected(client: AsyncClient, risk_agent: dic
     """JSON endpoints buffer the whole body to parse it, so the body is capped."""
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     agent_id = risk_agent["agent"]["id"]
-    cap = get_settings().json_body_max_bytes
+    cap = get_settings().request_body_max_bytes
 
     r = await client.post(
         f"/v1/agents/{agent_id}/jobs",
@@ -423,9 +541,9 @@ async def test_json_body_limit_counts_streamed_chunks(
 ) -> None:
     """Chunked requests carry no Content-Length, so the cap is enforced on the
     bytes as they stream in, not only on the header."""
-    from sleeper_service.main import JsonBodyLimitMiddleware
+    from sleeper_service.main import BodyLimitMiddleware
 
-    monkeypatch.setattr(get_settings(), "json_body_max_bytes", 10)
+    monkeypatch.setattr(get_settings(), "request_body_max_bytes", 10)
 
     async def run_over(body_chunks: list[bytes]) -> tuple[bool, list[dict]]:
         messages = [
@@ -453,7 +571,7 @@ async def test_json_body_limit_counts_streamed_chunks(
             sent.append(message)
 
         scope = {"type": "http", "headers": [(b"content-type", b"application/json")]}
-        await JsonBodyLimitMiddleware(inner_app)(scope, receive, send)
+        await BodyLimitMiddleware(inner_app)(scope, receive, send)
         return app_completed, sent
 
     # over the cap across two chunks: rejected, app never finishes the body
@@ -466,6 +584,65 @@ async def test_json_body_limit_counts_streamed_chunks(
     app_completed, sent = await run_over([b"a" * 5, b"a" * 5])
     assert app_completed
     assert not sent  # the inner app sent no response of its own
+
+
+async def test_body_limit_applies_regardless_of_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FastAPI buffers the whole body before it inspects the Content-Type or
+    resolves auth, so a JSON-only cap is bypassed by relabelling the body
+    text/plain — the cap engages on every request except multipart, which
+    Starlette streams and the files route caps on the rolled size."""
+    from sleeper_service.main import BodyLimitMiddleware
+
+    monkeypatch.setattr(get_settings(), "request_body_max_bytes", 10)
+
+    async def run_with(content_type: bytes, body: bytes) -> tuple[bool, list[dict]]:
+        reached_app = False
+
+        async def inner_app(scope, receive, send):
+            nonlocal reached_app
+            reached_app = True
+            while True:
+                message = await receive()
+                if message["type"] == "http.request" and not message.get("more_body"):
+                    break
+
+        sent: list[dict] = []
+
+        async def send(message):
+            sent.append(message)
+
+        messages = iter([{"type": "http.request", "body": body, "more_body": False}])
+
+        async def receive():
+            return next(messages)
+
+        scope = {
+            "type": "http",
+            "headers": [
+                (b"content-type", content_type),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+        await BodyLimitMiddleware(inner_app)(scope, receive, send)
+        return reached_app, sent
+
+    # an oversized body declared text/plain: rejected on the header, app never runs
+    reached_app, sent = await run_with(b"text/plain", b"a" * 11)
+    assert not reached_app
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 413
+
+    # ...and with no recognizable JSON type at all
+    reached_app, sent = await run_with(b"application/hal+json", b"a" * 11)
+    assert not reached_app
+    assert sent[0]["status"] == 413
+
+    # multipart is the one exemption
+    reached_app, sent = await run_with(b"multipart/form-data; boundary=x", b"a" * 11)
+    assert reached_app
+    assert not sent
 
 
 # --- Post-audit follow-up: bounded matches_regex eval checks ---

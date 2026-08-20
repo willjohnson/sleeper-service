@@ -4,7 +4,9 @@ A test case is a saved job input plus a list of checks; because agent outputs
 are typed JSON, grading is deterministic and free. Eval jobs run through the
 normal pipeline — hooks and tracing apply — and are flagged is_eval: no
 callbacks and excluded from error-rate alerting, but subject to spending
-limits and included in spend rollups like any other job.
+limits and included in spend rollups like any other job. A run at an
+exhausted budget is refused (status "budget_exceeded"), never completed at a
+fabricated pass rate — see _refuse_run.
 
 Check format ({"path": "risk_level", "op": ..., "value": ...}):
 - equals        output[path] == value
@@ -35,7 +37,7 @@ from sqlalchemy import func, select
 
 from sleeper_service.db.models import Agent, AgentVersion, EvalCase, EvalRun, Job
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import notify, runners
+from sleeper_service.runtime import notify, runners, spending
 
 VALID_OPS = {"equals", "contains", "in_range", "matches_regex", "is_valid", "code"}
 PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
@@ -166,9 +168,41 @@ def _grade_output(checks: list, output: dict | None, output_schema: dict | None)
     ]
 
 
+async def _refuse_run(
+    eval_run_id: uuid.UUID, agent: Agent, detail: str, results: list | None = None
+) -> None:
+    """The budget ran out before or during the suite. Cases that were never
+    executed are unevaluated, not failed — so the run must not complete at a
+    fabricated pass rate that would fire a spurious regression alert, become
+    the baseline a real regression is compared against, or make a pending
+    memory version look like it failed the quality gate."""
+    async with get_sessionmaker()() as db:
+        run = await db.get(EvalRun, eval_run_id)
+        run.status = "budget_exceeded"
+        if results:
+            run.results = results
+        run.finished_at = datetime.now(UTC)
+        await db.commit()
+    await notify.notify(
+        agent.id,
+        "budget",
+        f"Sleeper Service: budget exceeded — {agent.name}",
+        f"Eval run {eval_run_id} was refused: {detail}."
+        + (
+            " This run gates a PENDING memory version, which remains unevaluated."
+            if run.memory_version_id
+            else ""
+        ),
+    )
+
+
 async def run_eval(eval_run_id: uuid.UUID) -> None:
     """Execute every case for the run's agent, grade, store results.
-    Sequential on purpose: suites are small and provider-friendly."""
+    Sequential on purpose: suites are small and provider-friendly.
+
+    Budget refusal lives here, not only in the API route: every entry point
+    (manual runs and the memory eval gate) funnels through this function, and
+    a queued run can outlive its pre-flight."""
     from sleeper_service.runtime import runner as runner_mod
 
     sessionmaker = get_sessionmaker()
@@ -182,6 +216,16 @@ async def run_eval(eval_run_id: uuid.UUID) -> None:
                 select(EvalCase).where(EvalCase.agent_id == run.agent_id).order_by(EvalCase.name)
             )
         )
+        agent = await db.get(Agent, run.agent_id)
+        spend = await spending.budget_exhausted(db, agent)
+
+    if spend is not None:
+        await _refuse_run(
+            eval_run_id,
+            agent,
+            f"monthly spend {spend} reached limit {agent.spending_limit}",
+        )
+        return
 
     results = []
     passed_cases = 0
@@ -205,6 +249,12 @@ async def run_eval(eval_run_id: uuid.UUID) -> None:
 
         async with sessionmaker() as db:
             job = await db.get(Job, job_id)
+
+        if job.status == "budget_exceeded":
+            # The budget ran out mid-suite; the remaining cases would all be
+            # refused too. Abort rather than grade unexecuted cases as failed.
+            await _refuse_run(eval_run_id, agent, str(job.error), results=results)
+            return
 
         if job.status == "succeeded":
             # in a thread: code graders hold the (GIL-released) call for up
