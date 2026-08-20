@@ -25,6 +25,7 @@ from sleeper_service.constants import Role
 from sleeper_service.db.models import AgentVersion, EvalCase, EvalRun
 from sleeper_service.db.session import get_db
 from sleeper_service.queue import get_pool
+from sleeper_service.runtime import spending
 from sleeper_service.runtime.evals import validate_checks
 
 router = APIRouter(prefix="/agents/{agent_id}", tags=["evals"])
@@ -122,6 +123,16 @@ async def start_eval_run(
     case_count = await db.scalar(select(EvalCase.id).where(EvalCase.agent_id == agent_id).limit(1))
     if case_count is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Agent has no eval cases yet")
+
+    # Same pre-flight as job submission: refuse (auditable, nothing created)
+    # when the agent's monthly budget is exhausted — eval jobs consume the
+    # budget like any other job.
+    spend = await spending.budget_exhausted(db, agent)
+    if spend is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"monthly spend {spend} reached limit {agent.spending_limit}",
+        )
 
     run = EvalRun(
         agent_id=agent_id,

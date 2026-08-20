@@ -260,3 +260,39 @@ async def validate_apprise_target(
     if host is None or allow_private_hosts:
         return
     await _resolve_and_check(host, urlparse(url).port, allow_loopback=False, label=NOTIF_LABEL)
+
+
+# --- MCP server endpoints (BUILD_PLAN § Stack) ---
+#
+# A tenant admin registers the endpoint; the worker connects to it on every
+# job that grants the server. That makes it a server-initiated outbound
+# destination like a callback or a fetched link, and it gets the same
+# treatment: scheme and address policy at registration (fast feedback), plus
+# a fresh resolution at connect time — a name that was public when the server
+# was registered can point at an internal address by the time a job runs.
+#
+# MCP_ALLOW_PRIVATE_HOSTS widens this for deployments whose MCP servers share
+# a network with the worker (the compose `mcp-*` sidecar shape): URL syntax
+# is still enforced, the address check is not.
+
+MCP_LABEL = "MCP endpoint"
+
+
+def validate_mcp_url(url: str) -> None:
+    """Registration-time check for an MCP HTTP endpoint. No network I/O."""
+    if get_settings().mcp_allow_private_hosts:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise OutboundUrlError(f"{MCP_LABEL} must use http or https")
+        if not parsed.hostname:
+            raise OutboundUrlError(f"{MCP_LABEL} must include a hostname")
+        return
+    validate_callback_url(url, label=MCP_LABEL)
+
+
+async def validate_mcp_target(url: str) -> None:
+    """Connect-time check: resolve the endpoint and reject any non-public
+    address, the same two-phase check callback delivery uses."""
+    if get_settings().mcp_allow_private_hosts:
+        return
+    await validate_callback_target(url, label=MCP_LABEL)

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.crypto import decrypt
 from sleeper_service.db.models import DataStore, McpServer
+from sleeper_service.runtime.outbound import OutboundUrlError, validate_mcp_target
 
 MAX_READ_BYTES = 200_000
 
@@ -96,6 +97,13 @@ async def build_mcp_toolsets(
                 StdioTransport(command=command, args=args), id=f"mcp-{server.name}"
             )
         else:  # streamable_http | sse — FastMCP infers from the URL
+            # Registration validated the endpoint's syntax and address policy;
+            # DNS can move between then and this job, so resolve again before
+            # connecting — the same two-phase check callback delivery uses.
+            try:
+                await validate_mcp_target(server.endpoint)
+            except OutboundUrlError as e:
+                raise GrantError(f"MCP server {server.name!r} endpoint rejected: {e}") from e
             toolset = MCPToolset(server.endpoint, id=f"mcp-{server.name}", headers=headers or None)
 
         allowed = grant.get("tools")

@@ -25,7 +25,6 @@ async def month_spend(db: AsyncSession, agent_id: uuid.UUID) -> Decimal:
         select(func.coalesce(func.sum(Job.cost), 0)).where(
             Job.agent_id == agent_id,
             Job.created_at >= month_start(),
-            Job.is_eval.is_(False),  # eval runs never count against production limits
         )
     )
     return Decimal(total)

@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     callback_max_tries: int = 5
     sync_job_timeout_s: int = 120  # cap for ?sync=true regardless of version timeout
 
+    # Cap on application/json request bodies. JSON endpoints buffer the whole
+    # body to parse it, so this bounds request memory; multipart uploads are
+    # exempt (the files route enforces MAX_FILE_SIZE on the rolled size).
+    json_body_max_bytes: int = 1_048_576
+
     # Browser authentication. Production defaults are secure; local HTTP
     # development and tests must explicitly disable the Secure cookie flag.
     session_https_only: bool = True
@@ -62,6 +67,13 @@ class Settings(BaseSettings):
     # worker's private network — it removes the internal-reachability check.
     notif_extra_schemes: str = ""
     notif_allow_private_hosts: bool = False
+
+    # MCP server endpoints are fetched by the worker on every job that grants
+    # the server, so non-public addresses are refused by default. Allow them
+    # only where the MCP servers share a private network with the worker (the
+    # compose mcp-* sidecar shape) — the same trade NOTIF_ALLOW_PRIVATE_HOSTS
+    # makes for self-hosted alert servers.
+    mcp_allow_private_hosts: bool = False
 
     # Delegation / memory / learning
     max_delegation_depth: int = 3

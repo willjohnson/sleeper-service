@@ -2,14 +2,16 @@
 
 A test case is a saved job input plus a list of checks; because agent outputs
 are typed JSON, grading is deterministic and free. Eval jobs run through the
-normal pipeline — hooks and tracing apply — but are flagged is_eval: no
-callbacks, excluded from spend rollups, exempt from budget refusal.
+normal pipeline — hooks and tracing apply — and are flagged is_eval: no
+callbacks and excluded from error-rate alerting, but subject to spending
+limits and included in spend rollups like any other job.
 
 Check format ({"path": "risk_level", "op": ..., "value": ...}):
 - equals        output[path] == value
 - contains      value in output[path] (string or array)
 - in_range      value = [min, max], inclusive
-- matches_regex re.search(value, str(output[path]))
+- matches_regex re.search(value, str(output[path])) — bounded by a timeout
+                (REGEX_CHECK_TIMEOUT_S), since patterns are editor-supplied
 - is_valid      output validates against the version's output_schema (no path)
 - code          {"op": "code", "code": "def grade(output): ..."} — grade(output)
                 runs sandboxed (runtime/runners.py); truthy return = pass.
@@ -21,7 +23,6 @@ eval suite triggers a run pinned to that memory; a pass rate below the last
 completed run for the same agent version alerts the owning team.
 """
 
-import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -29,6 +30,7 @@ from typing import Any
 
 import anyio
 import jsonschema
+import regex
 from sqlalchemy import func, select
 
 from sleeper_service.db.models import Agent, AgentVersion, EvalCase, EvalRun, Job
@@ -41,6 +43,12 @@ PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
 # Validation runs editor-supplied top-level statements at case-creation time,
 # in the API process — keep the cap tight so a hostile def can't stall a route
 GRADER_VALIDATE_LIMITS = {**runners.DEFAULT_LIMITS, "max_duration_secs": 1.0}
+
+# Editor-supplied patterns search model output inside a worker thread that
+# holds the GIL while matching, so the `regex` module with a checked timeout
+# bounds them — the same containment the injection screen applies to tenant
+# patterns. A check that could not complete fails; it does not pass.
+REGEX_CHECK_TIMEOUT_S = 5.0
 
 
 def _dig(output: Any, path: str) -> Any:
@@ -94,7 +102,20 @@ def run_check(check: dict, output: dict | None, output_schema: dict | None) -> t
             ok = False
         return ok, f"{path}={actual!r}, expected within {value!r}"
     if op == "matches_regex":
-        ok = actual is not None and re.search(str(value), str(actual)) is not None
+        try:
+            pattern = regex.compile(str(value))
+            ok = (
+                actual is not None
+                and pattern.search(str(actual), timeout=REGEX_CHECK_TIMEOUT_S) is not None
+            )
+        except TimeoutError:
+            return (
+                False,
+                f"regex /{value}/ timed out after {REGEX_CHECK_TIMEOUT_S}s "
+                "(possible catastrophic backtracking)",
+            )
+        except regex.error as e:
+            return False, f"invalid regex /{value}/: {e}"
         return ok, f"{path}={actual!r}, expected to match /{value}/"
     return False, f"unknown op {op!r}"
 
@@ -112,6 +133,11 @@ def validate_checks(checks: list) -> str | None:
             return f"check {check!r} requires a path"
         if op in PATH_OPS and "value" not in check:
             return f"check {check!r} requires a value"
+        if op == "matches_regex":
+            try:
+                regex.compile(str(check["value"]))
+            except (regex.error, TypeError) as e:
+                return f"invalid regex in matches_regex value: {e}"
         if op == "code":
             code = check.get("code")
             if not isinstance(code, str) or not code.strip():
