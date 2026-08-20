@@ -3,10 +3,12 @@ import uuid as uuid_mod
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+from starlette import status as http_status
+from starlette.datastructures import Headers
 from starlette.middleware.sessions import SessionMiddleware
 
 from sleeper_service import __version__, storage
@@ -21,6 +23,87 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PLACEHOLDER_SECRETS = {"change-me", "changeme", "secret", ""}
+
+
+class BodyLimitMiddleware:
+    """Rejects oversized request bodies with a 413.
+
+    FastAPI buffers the entire body into memory before it inspects the
+    Content-Type or resolves auth, so the cap applies to every request, not
+    just declared-JSON ones — a JSON-only cap is bypassed by relabelling the
+    body ``text/plain``, and the buffering happens pre-auth. Multipart is the
+    one exemption: Starlette streams it, spooling file parts to disk, and the
+    files route enforces MAX_FILE_SIZE on the rolled size before reading.
+
+    The Content-Length header is the fast path; ASGI servers enforce the
+    declared length as a framing rule, so a body that carries one needs no
+    per-chunk counting. Chunked requests carry no length and are counted as
+    the bytes stream in. The streaming check raises HTTPException from the
+    receive channel: FastAPI's body parsing re-raises HTTPException (anything
+    else becomes an opaque 400 "error parsing the body"), so the cap surfaces
+    as a real 413.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            await self.app(scope, receive, send)
+            return
+        cap = get_settings().request_body_max_bytes
+        length = headers.get("content-length")
+        if length is not None and length.isdigit():
+            if int(length) > cap:
+                await self._reject(scope, receive, send, cap)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > cap:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_413_CONTENT_TOO_LARGE,
+                        detail=f"Request body exceeds {cap} bytes",
+                    )
+            return message
+
+        response_started = False
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except HTTPException as e:
+            # Reaches here only when the wrapped app let the cap exception
+            # escape (FastAPI's ExceptionMiddleware handles it instead);
+            # answer directly so the rejection never surfaces as a crash —
+            # unless a response already started, where a second
+            # http.response.start would violate the ASGI protocol.
+            if e.status_code != http_status.HTTP_413_CONTENT_TOO_LARGE or response_started:
+                raise
+            await self._reject(scope, receive, send, cap)
+
+    async def _reject(self, scope, receive, send, cap: int) -> None:
+        response = JSONResponse(
+            {"detail": f"Request body exceeds {cap} bytes"},
+            status_code=http_status.HTTP_413_CONTENT_TOO_LARGE,
+        )
+        await response(scope, receive, send)
 
 
 @asynccontextmanager
@@ -57,6 +140,7 @@ app.add_middleware(
     https_only=get_settings().session_https_only,
     max_age=get_settings().session_max_age_s,
 )
+app.add_middleware(BodyLimitMiddleware)
 app.include_router(ui_router)
 app.include_router(ui_oidc_router)
 app.mount(

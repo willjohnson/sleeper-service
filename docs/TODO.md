@@ -35,6 +35,8 @@ Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.
 
 A fourth audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_4.md](SECURITY_AUDIT_REPORT_4.md)) — Claude Opus 5, whole codebase rather than a diff. Six findings (3 high, 3 medium), **all remediated with regression tests in the same pass**: SSO sessions carrying roles in every tenant, link fetching never resolving its destination, unauthenticated Redis on `0.0.0.0` plus arq's pickle deserializer, credential-less cloud data stores running on the platform's own cloud identity, anonymous tenant enumeration on the login page, and a client-declared content type skipping the injection screen. 154 tests green.
 
+A fifth audit ran 2026-08-19 ([SECURITY_AUDIT_REPORT_5.md](SECURITY_AUDIT_REPORT_5.md)) — GLM 5.3 via pi, whole codebase again with a focus on cross-component handoffs. Three findings, **all remediated with regression tests in the same pass**: MCP HTTP endpoints as the one server-initiated outbound path that never resolved its destination (now validated at registration and connect time, with an operator-level `MCP_ALLOW_PRIVATE_HOSTS` for internal sidecars), the upload size cap enforced only after the whole body was read into memory, and agent/team-scoped invoke keys getting tenant-wide file access. It also raised three **design tensions** — eval runs exempt from spending limits and rollups, unbounded JSON request bodies, and stdlib-`re` eval `matches_regex` checks without a timeout — which Will decided to close the same day; all three are remediated with regression tests (see the report's post-audit section). 187 tests green.
+
 **Deploy notes from audit 4** (do these when shipping it). Nothing has been
 deployed anywhere yet, and the local dev environment was checked on 2026-08-05
 and needs none of them — Redis was empty (and has no volume, so it is
@@ -66,6 +68,16 @@ ephemeral), and the one local data store has credentials:
   API, and worker were recreated, authenticated `PING` returned `PONG`, an
   unauthenticated one returned `NOAUTH`, `/healthz` reported Redis healthy,
   the worker became healthy, and all 172 tests passed.
+
+**Deploy notes from audit 5** (when shipping it). The local environment is
+the only deployment and its `mcp_servers` table is empty (checked
+2026-08-19), so nothing is expected to break — but in general:
+
+- Existing `mcp_servers` rows with `streamable_http`/`sse` transports should
+  be reviewed before deploying the endpoint validation: the gate cannot
+  establish who created historical rows, and jobs against internal endpoints
+  will now fail at run time unless `MCP_ALLOW_PRIVATE_HOSTS=true` is set for
+  api **and** worker.
 
 Remaining low-severity items from the review of the audit-2 fixes:
 

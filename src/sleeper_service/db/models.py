@@ -235,8 +235,8 @@ class Job(UUIDPKMixin, Base):
     # authenticated platform identity from application context.
     auth_ctx: Mapped[dict | None] = mapped_column(JSONB)
     idempotency_key: Mapped[str | None]
-    # Eval jobs run through the normal pipeline but are excluded from spend
-    # rollups and budget refusals (BUILD_PLAN § Eval design)
+    # Eval jobs run through the normal pipeline with no callbacks; they count
+    # against spending limits and in spend rollups like any other job
     is_eval: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     started_at: Mapped[datetime | None]

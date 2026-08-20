@@ -234,7 +234,7 @@ A test case is just a saved job input plus a list of checks. Because agent outpu
 2. **Code graders (v1, optional)** ✅ *shipped 2026-08-02 (evening), once the tier-1 sandbox landed* — a small Python function per case (check op `code`, body defines `grade(output)`; truthy return = pass) for logic beyond simple assertions. Runs in the Monty sandbox (see Runner design) with tight caps; grader source is validated in the sandbox at case creation. The earlier deferral rationale stands recorded: executing editor-supplied Python in-worker without isolation would be RCE by design (decided 2026-08-02).
 3. **LLM-as-judge (later)** — a pinned judge model scores free-text fields against a rubric. Costs tokens, adds noise, and the rubric itself needs versioning — deferred until field checks prove insufficient.
 
-Tables: `eval_cases (agent_id, input, checks[])`, `eval_runs (agent_version_id, results, pass_rate)`. Eval jobs reuse the normal job pipeline (so hooks and tracing apply) but skip callbacks and don't count against production spending limits.
+Tables: `eval_cases (agent_id, input, checks[])`, `eval_runs (agent_version_id, results, pass_rate)`. Eval jobs reuse the normal job pipeline (so hooks and tracing apply) but skip callbacks. *Changed 2026-08-19 (audit-5 follow-up, decided by Will): eval jobs count against spending limits and in spend rollups like any other job — the original exemption meant any editor could trigger provider spend that was both unbounded (never refused) and invisible (excluded from the spend dashboard).*
 
 ## Runner design (sandboxed code execution)
 

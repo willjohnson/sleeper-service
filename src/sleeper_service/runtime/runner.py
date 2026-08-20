@@ -99,12 +99,11 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         tenant = await db.get(Tenant, agent.tenant_id)
         model_row = await db.get(Model, version.model_id)
 
-        # Budget pre-flight (re-checked here so queued backlogs can't overrun);
-        # eval jobs are exempt — they neither consume nor get refused by limits.
+        # Budget pre-flight (re-checked here so queued backlogs can't overrun).
         # What's left of the month's budget also bounds this single run: the
         # loop below re-checks accrued cost between model calls.
         remaining_budget: Decimal | None = None
-        if not job.is_eval and agent.spending_limit is not None:
+        if agent.spending_limit is not None:
             spend = await spending.month_spend(db, agent.id)
             if spend >= agent.spending_limit:
                 await _finalize(

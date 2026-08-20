@@ -12,14 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sleeper_service import storage
 from sleeper_service.api.v1.schemas import FileOut
 from sleeper_service.auth.principal import (
-    InvokePrincipal,
     Principal,
     UserPrincipal,
     get_principal,
 )
 from sleeper_service.auth.rbac import visible_team_ids
 from sleeper_service.constants import TEXT_CONTENT_TYPES, KeyScope
-from sleeper_service.db.models import Agent, File, Team, Tenant
+from sleeper_service.db.models import File, Tenant
 from sleeper_service.db.session import get_db
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -69,25 +68,19 @@ def sniff_content_type(data: bytes, declared: str) -> str:
     return declared
 
 
-async def resolve_tenant_for_invoke(db: AsyncSession, p: InvokePrincipal) -> uuid.UUID | None:
-    if p.scope == KeyScope.TENANT:
-        return p.scope_id
-    if p.scope == KeyScope.TEAM:
-        team = await db.get(Team, p.scope_id)
-        return team.tenant_id if team else None
-    agent = await db.get(Agent, p.scope_id)
-    return agent.tenant_id if agent else None
-
-
 async def _check_tenant_access(
     db: AsyncSession, principal: Principal, tenant_id: uuid.UUID
 ) -> None:
     if isinstance(principal, UserPrincipal):
         if principal.is_superuser or await visible_team_ids(db, principal, tenant_id):
             return
-    else:
-        if await resolve_tenant_for_invoke(db, principal) == tenant_id:
-            return
+    elif principal.scope == KeyScope.TENANT and principal.scope_id == tenant_id:
+        # Files are tenant-scoped, so only a tenant-covering invoke key
+        # matches the boundary. Narrower keys stay on the job surface
+        # (submission within scope, results, feedback) and get no direct
+        # file access — reading or writing any file in the tenant is not
+        # theirs to do.
+        return
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
 
 
@@ -103,8 +96,16 @@ async def upload_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     await _check_tenant_access(db, principal, tenant_id)
 
+    # Reject on the rolled size before reading: read() pulls the whole
+    # spooled body into memory, so a check that only runs afterwards cannot
+    # prevent an oversized upload from exhausting it.
+    if file.size is not None and file.size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"File exceeds {MAX_FILE_SIZE} bytes",
+        )
     data = await file.read()
-    if len(data) > MAX_FILE_SIZE:
+    if len(data) > MAX_FILE_SIZE:  # backstop: size is None when unknown
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             f"File exceeds {MAX_FILE_SIZE} bytes",

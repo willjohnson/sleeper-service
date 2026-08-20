@@ -195,6 +195,10 @@ async def test_integration_uuid_lookup_is_tenant_qualified():
 async def test_user_context_requires_per_server_signature(monkeypatch):
     from sleeper_service.runtime import toolsets
 
+    # HTTP endpoints now resolve at connect time (audit 5), so pin DNS like
+    # the callback tests do
+    monkeypatch.setattr(socket, "getaddrinfo", _resolves_to("93.184.216.34"))
+
     captured = {}
 
     class FakeToolset:
@@ -255,6 +259,8 @@ async def test_secretless_server_fails_closed_after_credentialed_grant(monkeypat
     # credentials must still fail closed on user_ctx, even when an earlier
     # grant in the same version resolved a server that has a signing secret.
     from sleeper_service.runtime import toolsets
+
+    monkeypatch.setattr(socket, "getaddrinfo", _resolves_to("93.184.216.34"))
 
     captured = []
 

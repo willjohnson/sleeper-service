@@ -59,6 +59,7 @@ def validate_callback_url(
     tenant_settings: dict | None = None,
     *,
     allow_loopback: bool = False,
+    allow_private_hosts: bool = False,
     label: str = "callback URL",
 ) -> tuple[str, int]:
     """Validate syntax and policy without performing network I/O.
@@ -67,6 +68,10 @@ def validate_callback_url(
     the OIDC issuer path so the e2e stub IdP can exercise the real Authlib code
     flow in tests. Production must leave it false. It relaxes loopback only:
     ``.local`` / ``.internal`` stay rejected either way.
+
+    ``allow_private_hosts`` skips the address policy entirely while keeping
+    every syntax check (scheme, hostname, no credentials, valid port) — for
+    operator-level opt-ins whose destination shares a network with the worker.
 
     ``label`` names the destination in error messages, which reach API clients.
     """
@@ -83,7 +88,8 @@ def validate_callback_url(
         raise OutboundUrlError(f"{label} has an invalid port") from e
 
     host = parsed.hostname.lower().rstrip(".")
-    _check_host_policy(host, allow_loopback=allow_loopback, label=label)
+    if not allow_private_hosts:
+        _check_host_policy(host, allow_loopback=allow_loopback, label=label)
 
     allowlist = (tenant_settings or {}).get("callback_allowlist", [])
     if allowlist and not host_allowed(url, allowlist):
@@ -260,3 +266,41 @@ async def validate_apprise_target(
     if host is None or allow_private_hosts:
         return
     await _resolve_and_check(host, urlparse(url).port, allow_loopback=False, label=NOTIF_LABEL)
+
+
+# --- MCP server endpoints (BUILD_PLAN § Stack) ---
+#
+# A tenant admin registers the endpoint; the worker connects to it on every
+# job that grants the server. That makes it a server-initiated outbound
+# destination like a callback or a fetched link, and it gets the same
+# treatment: scheme and address policy at registration (fast feedback), plus
+# a fresh resolution at connect time — a name that was public when the server
+# was registered can point at an internal address by the time a job runs.
+#
+# MCP_ALLOW_PRIVATE_HOSTS widens this for deployments whose MCP servers share
+# a network with the worker (the compose `mcp-*` sidecar shape): the full URL
+# syntax policy (scheme, hostname, no credentials, valid port) is still
+# enforced through the shared validator — only the address policy and the
+# connect-time resolution are skipped.
+
+MCP_LABEL = "MCP endpoint"
+
+
+def validate_mcp_url(url: str) -> None:
+    """Registration-time check for an MCP HTTP endpoint. No network I/O."""
+    validate_callback_url(
+        url,
+        allow_private_hosts=get_settings().mcp_allow_private_hosts,
+        label=MCP_LABEL,
+    )
+
+
+async def validate_mcp_target(url: str) -> None:
+    """Connect-time check: resolve the endpoint and reject any non-public
+    address, the same two-phase check callback delivery uses."""
+    if get_settings().mcp_allow_private_hosts:
+        # No resolution, but a stored endpoint that predates the current
+        # syntax policy is still refused rather than connected to.
+        validate_callback_url(url, allow_private_hosts=True, label=MCP_LABEL)
+        return
+    await validate_callback_target(url, label=MCP_LABEL)

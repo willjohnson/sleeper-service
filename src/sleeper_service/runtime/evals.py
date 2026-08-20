@@ -2,14 +2,18 @@
 
 A test case is a saved job input plus a list of checks; because agent outputs
 are typed JSON, grading is deterministic and free. Eval jobs run through the
-normal pipeline — hooks and tracing apply — but are flagged is_eval: no
-callbacks, excluded from spend rollups, exempt from budget refusal.
+normal pipeline — hooks and tracing apply — and are flagged is_eval: no
+callbacks and excluded from error-rate alerting, but subject to spending
+limits and included in spend rollups like any other job. A run at an
+exhausted budget is refused (status "budget_exceeded"), never completed at a
+fabricated pass rate — see _refuse_run.
 
 Check format ({"path": "risk_level", "op": ..., "value": ...}):
 - equals        output[path] == value
 - contains      value in output[path] (string or array)
 - in_range      value = [min, max], inclusive
-- matches_regex re.search(value, str(output[path]))
+- matches_regex re.search(value, str(output[path])) — bounded by a timeout
+                (REGEX_CHECK_TIMEOUT_S), since patterns are editor-supplied
 - is_valid      output validates against the version's output_schema (no path)
 - code          {"op": "code", "code": "def grade(output): ..."} — grade(output)
                 runs sandboxed (runtime/runners.py); truthy return = pass.
@@ -21,7 +25,6 @@ eval suite triggers a run pinned to that memory; a pass rate below the last
 completed run for the same agent version alerts the owning team.
 """
 
-import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -29,11 +32,12 @@ from typing import Any
 
 import anyio
 import jsonschema
+import regex
 from sqlalchemy import func, select
 
 from sleeper_service.db.models import Agent, AgentVersion, EvalCase, EvalRun, Job
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import notify, runners
+from sleeper_service.runtime import notify, runners, spending
 
 VALID_OPS = {"equals", "contains", "in_range", "matches_regex", "is_valid", "code"}
 PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
@@ -41,6 +45,12 @@ PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
 # Validation runs editor-supplied top-level statements at case-creation time,
 # in the API process — keep the cap tight so a hostile def can't stall a route
 GRADER_VALIDATE_LIMITS = {**runners.DEFAULT_LIMITS, "max_duration_secs": 1.0}
+
+# Editor-supplied patterns search model output inside a worker thread that
+# holds the GIL while matching, so the `regex` module with a checked timeout
+# bounds them — the same containment the injection screen applies to tenant
+# patterns. A check that could not complete fails; it does not pass.
+REGEX_CHECK_TIMEOUT_S = 5.0
 
 
 def _dig(output: Any, path: str) -> Any:
@@ -94,7 +104,20 @@ def run_check(check: dict, output: dict | None, output_schema: dict | None) -> t
             ok = False
         return ok, f"{path}={actual!r}, expected within {value!r}"
     if op == "matches_regex":
-        ok = actual is not None and re.search(str(value), str(actual)) is not None
+        try:
+            pattern = regex.compile(str(value))
+            ok = (
+                actual is not None
+                and pattern.search(str(actual), timeout=REGEX_CHECK_TIMEOUT_S) is not None
+            )
+        except TimeoutError:
+            return (
+                False,
+                f"regex /{value}/ timed out after {REGEX_CHECK_TIMEOUT_S}s "
+                "(possible catastrophic backtracking)",
+            )
+        except regex.error as e:
+            return False, f"invalid regex /{value}/: {e}"
         return ok, f"{path}={actual!r}, expected to match /{value}/"
     return False, f"unknown op {op!r}"
 
@@ -112,6 +135,11 @@ def validate_checks(checks: list) -> str | None:
             return f"check {check!r} requires a path"
         if op in PATH_OPS and "value" not in check:
             return f"check {check!r} requires a value"
+        if op == "matches_regex":
+            try:
+                regex.compile(str(check["value"]))
+            except (regex.error, TypeError) as e:
+                return f"invalid regex in matches_regex value: {e}"
         if op == "code":
             code = check.get("code")
             if not isinstance(code, str) or not code.strip():
@@ -140,9 +168,41 @@ def _grade_output(checks: list, output: dict | None, output_schema: dict | None)
     ]
 
 
+async def _refuse_run(
+    eval_run_id: uuid.UUID, agent: Agent, detail: str, results: list | None = None
+) -> None:
+    """The budget ran out before or during the suite. Cases that were never
+    executed are unevaluated, not failed — so the run must not complete at a
+    fabricated pass rate that would fire a spurious regression alert, become
+    the baseline a real regression is compared against, or make a pending
+    memory version look like it failed the quality gate."""
+    async with get_sessionmaker()() as db:
+        run = await db.get(EvalRun, eval_run_id)
+        run.status = "budget_exceeded"
+        if results:
+            run.results = results
+        run.finished_at = datetime.now(UTC)
+        await db.commit()
+    await notify.notify(
+        agent.id,
+        "budget",
+        f"Sleeper Service: budget exceeded — {agent.name}",
+        f"Eval run {eval_run_id} was refused: {detail}."
+        + (
+            " This run gates a PENDING memory version, which remains unevaluated."
+            if run.memory_version_id
+            else ""
+        ),
+    )
+
+
 async def run_eval(eval_run_id: uuid.UUID) -> None:
     """Execute every case for the run's agent, grade, store results.
-    Sequential on purpose: suites are small and provider-friendly."""
+    Sequential on purpose: suites are small and provider-friendly.
+
+    Budget refusal lives here, not only in the API route: every entry point
+    (manual runs and the memory eval gate) funnels through this function, and
+    a queued run can outlive its pre-flight."""
     from sleeper_service.runtime import runner as runner_mod
 
     sessionmaker = get_sessionmaker()
@@ -156,6 +216,16 @@ async def run_eval(eval_run_id: uuid.UUID) -> None:
                 select(EvalCase).where(EvalCase.agent_id == run.agent_id).order_by(EvalCase.name)
             )
         )
+        agent = await db.get(Agent, run.agent_id)
+        spend = await spending.budget_exhausted(db, agent)
+
+    if spend is not None:
+        await _refuse_run(
+            eval_run_id,
+            agent,
+            f"monthly spend {spend} reached limit {agent.spending_limit}",
+        )
+        return
 
     results = []
     passed_cases = 0
@@ -179,6 +249,12 @@ async def run_eval(eval_run_id: uuid.UUID) -> None:
 
         async with sessionmaker() as db:
             job = await db.get(Job, job_id)
+
+        if job.status == "budget_exceeded":
+            # The budget ran out mid-suite; the remaining cases would all be
+            # refused too. Abort rather than grade unexecuted cases as failed.
+            await _refuse_run(eval_run_id, agent, str(job.error), results=results)
+            return
 
         if job.status == "succeeded":
             # in a thread: code graders hold the (GIL-released) call for up

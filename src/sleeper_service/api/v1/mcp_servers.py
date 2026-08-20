@@ -14,6 +14,7 @@ from sleeper_service.auth.rbac import require_tenant_admin, visible_team_ids
 from sleeper_service.crypto import encrypt
 from sleeper_service.db.models import McpServer, Tenant
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime.outbound import OutboundUrlError, validate_mcp_url
 
 router = APIRouter(prefix="/tenants/{tenant_id}/mcp-servers", tags=["mcp-servers"])
 
@@ -42,6 +43,15 @@ async def create_mcp_server(
             status.HTTP_403_FORBIDDEN,
             "Only instance superusers may register stdio MCP servers",
         )
+    if body.transport != "stdio":
+        # The worker connects to this endpoint on every granted job, so it is
+        # a server-side outbound destination and clears the same address
+        # policy as a callback URL. Checked again at connect time — see
+        # runtime/toolsets.build_mcp_toolsets.
+        try:
+            validate_mcp_url(body.endpoint)
+        except OutboundUrlError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     dup = await db.scalar(
         select(McpServer).where(McpServer.tenant_id == tenant_id, McpServer.name == body.name)
     )
