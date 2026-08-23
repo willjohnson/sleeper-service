@@ -89,6 +89,9 @@ class Agent(UUIDPKMixin, TimestampMixin, Base):
     )
     spending_limit: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     options: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Retirement is a soft archive, never a delete: jobs.agent_id is the one
+    # FK to agents that does not cascade, so job history outlives the agent.
+    archived_at: Mapped[datetime | None] = mapped_column(index=True)
 
 
 class AgentVersion(UUIDPKMixin, Base):

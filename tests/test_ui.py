@@ -633,3 +633,89 @@ async def test_settings_error_does_not_open_the_version_form(
     assert body.count('<details class="subpanel" open>') == 1
     assert body.rindex('<details class="subpanel" open>', 0, settings_form) < settings_form
     assert '<details class="subpanel" open>' not in body[settings_form:version_form]
+
+
+# --- Archiving ---
+
+
+async def test_archive_hides_agent_and_refuses_new_work(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    tenant_id = risk_agent["tenant"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/archive",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    # Gone from the active table, listed under Archived instead.
+    page = await _agents_page(client, tenant_id)
+    assert "Archived (1)" in page
+    active = page.split("Archived (1)")[0]
+    assert "risk-analyzer" not in active
+
+    # Refuses new work through the API...
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=alice, json={"context": {"prompt": "check this"}}
+    )
+    assert r.status_code == 409
+    assert "archived" in r.json()["detail"]
+
+    # ...and drops out of API listings unless asked for.
+    listed = (await client.get("/v1/agents", headers=alice)).json()
+    assert [a["id"] for a in listed] == []
+    listed = (await client.get("/v1/agents?include_archived=true", headers=alice)).json()
+    assert [a["id"] for a in listed] == [agent_id]
+
+    # History survives.
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    assert len(versions) == 1
+
+
+async def test_restore_brings_the_agent_back(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    assert (await client.post(f"/v1/agents/{agent_id}/archive", headers=alice)).status_code == 200
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Archived" in page.text
+    # An archived agent offers no way to give it more work.
+    assert "New version" not in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/restore",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "New version" in page.text
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=alice, json={"context": {"prompt": "check this"}}
+    )
+    assert r.status_code in (201, 202)
+
+
+async def test_archive_is_owner_only(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Archive agent" not in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/archive",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["archived_at"] is None

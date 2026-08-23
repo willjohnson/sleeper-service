@@ -4,6 +4,20 @@
 {% block content %}
 <div class="panel">
   <h2>Overview</h2>
+  {% if agent.archived_at %}
+  <div class="notice">
+    <div>
+      <strong>Archived</strong> on {{ agent.archived_at.strftime('%Y-%m-%d') }} — this agent takes
+      no new work. Its jobs, versions and evals are untouched.
+    </div>
+    {% if can_archive %}
+    <form method="post" action="/ui/agents/{{ agent.id }}/restore">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <button class="subtle">Restore</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
   <p class="muted" style="margin-top:0">{{ agent.description or "No description." }}</p>
   <div class="pill-row">
     {% if agent.options.get('delegation') in ('team', 'tenant') %}<span class="badge opt">delegates: {{ agent.options['delegation'] }}</span>{% endif %}
@@ -67,6 +81,15 @@
       </div>
     </form>
   </details>
+  {% endif %}
+
+  {% if can_archive and not agent.archived_at %}
+  <form method="post" action="/ui/agents/{{ agent.id }}/archive" class="subpanel">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <button class="subtle">Archive agent</button>
+    <span class="muted">Retires it from listings and refuses new work. Nothing is deleted, and
+      you can restore it later.</span>
+  </form>
   {% endif %}
 </div>
 

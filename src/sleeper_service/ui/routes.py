@@ -602,7 +602,11 @@ async def _render_agents_page(
             await db.scalars(select(Agent).where(Agent.team_id == team.id).order_by(Agent.name))
         )
         agent_views = []
+        archived_views = []
         for a in agents:
+            if a.archived_at is not None:
+                archived_views.append({"id": a.id, "name": a.name, "archived_at": a.archived_at})
+                continue
             version = (
                 await db.get(AgentVersion, a.current_version_id) if a.current_version_id else None
             )
@@ -629,6 +633,7 @@ async def _render_agents_page(
                 "is_org_team": team.is_org_team,
                 "role": role.value if role else None,
                 "agents": agent_views,
+                "archived": archived_views,
             }
         )
 
@@ -906,7 +911,8 @@ async def _render_agent_detail(
             eval_case_count=eval_case_count,
             recent_jobs=recent_jobs,
             can_promote=role == Role.OWNER,
-            can_edit=role in (Role.OWNER, Role.EDITOR),
+            can_edit=role in (Role.OWNER, Role.EDITOR) and agent.archived_at is None,
+            can_archive=role == Role.OWNER,
             models=await _model_strings(db),
             current_version_model=(current or {}).get("model_string", "").removeprefix("?"),
             current_version_prompt=(current or {}).get("prompt", ""),
@@ -993,6 +999,36 @@ async def ui_update_agent(
     agent.spending_limit = limit
     agent.options = options
     await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/archive")
+async def ui_archive_agent(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent = await db.get(Agent, agent_id)
+    if agent and agent.archived_at is None and await _team_role(db, p, agent.team_id) == Role.OWNER:
+        agent.archived_at = datetime.now(UTC)
+        await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/restore")
+async def ui_restore_agent(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent = await db.get(Agent, agent_id)
+    if (
+        agent
+        and agent.archived_at is not None
+        and await _team_role(db, p, agent.team_id) == Role.OWNER
+    ):
+        agent.archived_at = None
+        await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
 
@@ -1269,7 +1305,10 @@ async def ui_retry_job(
     job = await db.get(Job, job_id)
     if job is not None and job.status in ("dead_letter", "failed", "timeout"):
         agent = await db.get(Agent, job.agent_id)
-        if await _team_role(db, p, agent.team_id) in (Role.OWNER, Role.EDITOR):
+        if agent.archived_at is None and await _team_role(db, p, agent.team_id) in (
+            Role.OWNER,
+            Role.EDITOR,
+        ):
             job.status = "queued"
             job.output = None
             job.error = None

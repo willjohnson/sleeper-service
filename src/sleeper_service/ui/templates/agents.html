@@ -99,6 +99,28 @@
     {% endfor %}
   </table>
   {% else %}<div class="muted">No agents yet.</div>{% endif %}
+
+  {% if team.archived %}
+  <details class="subpanel">
+    <summary class="muted">Archived ({{ team.archived|length }})</summary>
+    <table>
+      {% for a in team.archived %}
+      <tr>
+        <td><a href="/ui/agents/{{ a.id }}">{{ a.name }}</a></td>
+        <td class="muted">archived {{ a.archived_at.strftime('%Y-%m-%d') }}</td>
+        <td>
+          {% if team.role == 'owner' %}
+          <form method="post" action="/ui/agents/{{ a.id }}/restore" style="display:inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle">Restore</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
 </div>
 {% endfor %}
 {% endblock %}
