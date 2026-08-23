@@ -767,9 +767,7 @@ async def test_archive_is_owner_only(client: AsyncClient, risk_agent: dict) -> N
 ROOT = ("root@example.com", "root-password")
 
 
-async def test_create_team_via_ui(
-    client: AsyncClient, org: dict, bootstrap: Bootstrap
-) -> None:
+async def test_create_team_via_ui(client: AsyncClient, org: dict, bootstrap: Bootstrap) -> None:
     tenant_id = org["tenant"]["id"]
     await _login(client, *ROOT)
     listing = await _agents_page(client, tenant_id)
