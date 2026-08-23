@@ -34,8 +34,13 @@ def main() -> None:
         page.goto(f"{args.base}/ui/login")
         page.fill("input[name=email]", args.email)
         page.fill("input[name=password]", args.password)
-        page.click("button[type=submit]")
-        page.wait_for_url("**/ui/t/**")
+        # The SSO block below the password form has a submit button of its own,
+        # so name the button rather than matching on type=submit. Waiting on the
+        # settled page instead of a navigation event: login redirects twice
+        # (/ui/login -> /ui -> /ui/t/{id}) and lands before a wait_for_url
+        # registered after the click ever sees it.
+        page.get_by_role("button", name="Sign in").click()
+        page.wait_for_function("() => location.pathname.startsWith('/ui/t/')")
 
         shots = [
             (f"/ui/t/{args.tenant}", "dashboard.png", 1200),
