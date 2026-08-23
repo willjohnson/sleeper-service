@@ -1,11 +1,13 @@
 """Admin UI: session auth, page rendering, owner-gated actions."""
 
+import json
 import re
 import uuid
 
 from httpx import AsyncClient
 
 from sleeper_service.runtime import runner
+from sleeper_service.runtime.evals import run_eval
 from tests.conftest import Bootstrap, auth
 
 
@@ -113,6 +115,166 @@ async def test_job_page_and_outsider_blocked(client: AsyncClient, risk_agent: di
     await _login(client, "dave@example.com")
     r = await client.get(f"/ui/jobs/{job_id}", follow_redirects=False)
     assert r.status_code == 303
+
+
+async def test_agent_page_charts_activity(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+
+    await _login(client, "bob@example.com")
+    r = await client.get(f"/ui/agents/{agent_id}")
+    assert "Jobs per day by status" in r.text
+    assert "Tokens per day" in r.text
+    assert "no jobs" in r.text  # nothing run yet, so no average to quote
+
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=bob, json={"context": {"prompt": "hi"}}
+    )
+    await runner.execute_job(uuid.UUID(r.json()["id"]))
+
+    r = await client.get(f"/ui/agents/{agent_id}")
+    assert "tokens/job" in r.text
+    charts = re.search(r'jobsPerDayChart\("jobsChart", (\{.*?\})\);', r.text).group(1)
+    assert sum(sum(s["counts"]) for s in json.loads(charts)["statuses"]) == 1
+    tokens = re.search(r'tokensPerDayChart\("tokensChart", (\{.*?\})\);', r.text).group(1)
+    assert sum(json.loads(tokens)["tokens_in"]) > 0
+
+
+async def test_create_eval_case_and_run_from_the_ui(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")
+
+    # a run with no cases is refused, and the reason survives the redirect
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "No cases yet" in page.text
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-runs",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    assert "Add an eval case" in r.text
+    assert "Add an eval case" not in (await client.get(f"/ui/agents/{agent_id}")).text  # one-shot
+
+    form = await client.get(f"/ui/agents/{agent_id}/eval-cases/new")
+    assert form.status_code == 200
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-cases",
+        data={
+            "_csrf_token": _csrf(form.text),
+            "name": "low-risk",
+            "prompt": "calm markets today",
+            # TestModel answers risk_level=low, so both rows pass; blank rows drop out
+            "check_op": ["equals", "is_valid", "", ""],
+            "check_path": ["risk_level", "", "", ""],
+            "check_value": ["low", "", "", ""],
+            "extra_checks": "",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    cases = (await client.get(f"/v1/agents/{agent_id}/eval-cases", headers=bob)).json()
+    assert [c["name"] for c in cases] == ["low-risk"]
+    assert cases[0]["input"]["prompt"] == "calm markets today"
+    assert cases[0]["checks"] == [
+        {"op": "equals", "path": "risk_level", "value": "low"},
+        {"op": "is_valid"},
+    ]
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "low-risk" in page.text
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-runs",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    runs = (await client.get(f"/v1/agents/{agent_id}/eval-runs", headers=bob)).json()
+    assert len(runs) == 1
+    await run_eval(uuid.UUID(runs[0]["id"]))  # as the worker would
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "100%" in page.text
+
+    # and the case can be deleted again
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-cases/{cases[0]['id']}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+    )
+    assert (await client.get(f"/v1/agents/{agent_id}/eval-cases", headers=bob)).json() == []
+
+
+async def test_eval_case_form_rejects_bad_input(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")
+    form = await client.get(f"/ui/agents/{agent_id}/eval-cases/new")
+    token = _csrf(form.text)
+
+    async def post(**fields):
+        data = {"_csrf_token": token, "name": "case", "prompt": "hi", "extra_checks": "", **fields}
+        return await client.post(f"/ui/agents/{agent_id}/eval-cases", data=data)
+
+    # no checks at all
+    r = await post()
+    assert r.status_code == 400
+    assert "At least one check" in r.text
+
+    # a path op with no path
+    r = await post(check_op=["equals"], check_path=[""], check_value=["low"])
+    assert r.status_code == 400
+    assert "needs a path" in r.text
+
+    # the JSON escape hatch has to be JSON, and a list of checks
+    r = await post(extra_checks="not json")
+    assert "not valid JSON" in r.text
+    r = await post(extra_checks='{"op": "is_valid"}')
+    assert "JSON array" in r.text
+
+    # a code grader that doesn't parse is refused, as it is on the API
+    r = await post(extra_checks='[{"op": "code", "code": "def grade(:"}]')
+    assert r.status_code == 400
+    assert "invalid grader" in r.text
+    # the typed input survives the error
+    assert "def grade(:" in r.text
+
+    # a working code grader goes through
+    grader = "def grade(output):\n    return output['risk_level'] == 'low'"
+    r = await post(extra_checks=json.dumps([{"op": "code", "code": grader}]))
+    assert r.status_code == 303
+
+    # duplicate name
+    r = await post(check_op=["is_valid"], check_path=[""], check_value=[""])
+    assert r.status_code == 400
+    assert "already exists" in r.text
+
+
+async def test_eval_actions_are_editor_only(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    await client.post(
+        f"/v1/agents/{agent_id}/eval-cases",
+        headers=bob,
+        json={"name": "a-case", "input": {"prompt": "hi"}, "checks": [{"op": "is_valid"}]},
+    )
+
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "a-case" in page.text  # visible, but not editable
+    assert "New case" not in page.text
+    assert "Run eval" not in page.text
+
+    token = _csrf(page.text)
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/new", follow_redirects=False)
+    assert r.status_code == 303
+    r = await client.post(f"/ui/agents/{agent_id}/eval-runs", data={"_csrf_token": token})
+    assert (await client.get(f"/v1/agents/{agent_id}/eval-runs", headers=bob)).json() == []
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-cases",
+        data={"_csrf_token": token, "name": "sneaky", "prompt": "hi", "check_op": ["is_valid"]},
+    )
+    cases = (await client.get(f"/v1/agents/{agent_id}/eval-cases", headers=bob)).json()
+    assert [c["name"] for c in cases] == ["a-case"]
 
 
 async def test_ui_posts_require_csrf(client: AsyncClient, risk_agent: dict) -> None:

@@ -37,6 +37,23 @@
   {% endif %}
 </div>
 
+<div class="grid2">
+  <div class="panel">
+    <h2 class="with-action">Jobs per day by status
+      <span class="muted" style="font-weight:400">{{ chart_days }} days</span>
+    </h2>
+    <canvas id="jobsChart" height="210"></canvas>
+  </div>
+  <div class="panel">
+    <h2 class="with-action">Tokens per day
+      <span class="muted" style="font-weight:400">
+        {% if jobs_total %}avg {{ '{:,.0f}'.format(avg_tokens_per_job) }} tokens/job{% else %}no jobs{% endif %}
+      </span>
+    </h2>
+    <canvas id="tokensChart" height="210"></canvas>
+  </div>
+</div>
+
 <div class="panel">
   <h2 class="with-action">Versions
     {% if can_edit %}
@@ -134,9 +151,54 @@
 </div>
 {% endif %}
 
-<div class="grid2">
-  <div class="panel">
-    <h2>Eval runs</h2>
+<div class="panel">
+  <h2 class="with-action">Evals
+    {% if can_edit %}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}/eval-cases/new">New case</a>
+      <form method="post" action="/ui/agents/{{ agent.id }}/eval-runs">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <button class="subtle">Run eval</button>
+      </form>
+    </span>
+    {% endif %}
+  </h2>
+  <p class="muted" style="margin-top:0">
+    A case is a saved prompt plus the checks its output must pass. A run replays every
+    case against the current version{% if agent.current_version_id %} (v{{ current_version_no }}){% endif %}.
+  </p>
+
+  {% if eval_cases %}
+  <table>
+    <tr><th>Case</th><th>Prompt</th><th>Checks</th><th class="col-actions"></th></tr>
+    {% for c in eval_cases %}
+    <tr>
+      <td><strong>{{ c.name }}</strong></td>
+      <td class="muted">{{ c.input.get('prompt', '')|truncate(70) }}</td>
+      <td>
+        <div class="pill-row">
+          {% for check in c.checks %}
+          <span class="badge opt">{{ check.op }}{% if check.path %} {{ check.path }}{% endif %}</span>
+          {% endfor %}
+        </div>
+      </td>
+      <td>
+        {% if can_edit %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/agents/{{ agent.id }}/eval-cases/{{ c.id }}/delete">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Delete</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<div class="muted">No cases yet — a run needs at least one.</div>{% endif %}
+
+  <div class="subpanel" style="display:block">
+    <h2 style="margin-bottom:8px">Runs</h2>
     {% if eval_runs %}
     <table>
       <tr><th>Run</th><th>Version</th><th>Status</th><th>Pass rate</th><th>When</th></tr>
@@ -150,22 +212,29 @@
       </tr>
       {% endfor %}
     </table>
-    {% else %}<div class="muted">No eval runs. {{ eval_case_count }} case(s) defined.</div>{% endif %}
-  </div>
-
-  <div class="panel">
-    <h2>Recent jobs</h2>
-    <table>
-      <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
-      {% for j in recent_jobs %}
-      <tr>
-        <td><a class="mono" href="/ui/jobs/{{ j.id }}">{{ j.id|string|truncate(8, true, '') }}</a>{% if j.is_eval %} <span class="badge opt">eval</span>{% endif %}</td>
-        <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
-        <td>{{ j.tokens_in + j.tokens_out }}</td>
-        <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
-      </tr>
-      {% endfor %}
-    </table>
+    {% else %}<div class="muted">No runs yet.</div>{% endif %}
   </div>
 </div>
+
+<div class="panel">
+  <h2>Recent jobs</h2>
+  <table>
+    <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
+    {% for j in recent_jobs %}
+    <tr>
+      <td><a class="mono" href="/ui/jobs/{{ j.id }}">{{ j.id|string|truncate(8, true, '') }}</a>{% if j.is_eval %} <span class="badge opt">eval</span>{% endif %}</td>
+      <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
+      <td>{{ j.tokens_in + j.tokens_out }}</td>
+      <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<script src="/ui/static/vendor/chart.umd.min.js"></script>
+<script src="/ui/static/charts.js"></script>
+<script>
+jobsPerDayChart("jobsChart", {{ jobs_chart | safe }});
+tokensPerDayChart("tokensChart", {{ tokens_chart | safe }});
+</script>
 {% endblock %}

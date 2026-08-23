@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+import anyio
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -28,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.api.v1.agents import GOVERNED_OPTION_KEYS
+from sleeper_service.api.v1.schemas import JobContext
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.auth.rbac import is_tenant_admin, visible_team_ids
@@ -51,6 +53,7 @@ from sleeper_service.db.models import (
 )
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
+from sleeper_service.runtime.evals import PATH_OPS, validate_checks
 from sleeper_service.runtime.memory import latest_memory
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -193,13 +196,27 @@ async def _tenant_or_home(
     return tenant
 
 
+# Blank check rows offered on the new-eval-case form.
+CHECK_ROWS = 4
+
+
+def _flash(request: Request, message: str) -> None:
+    """One-shot error for a POST that redirects instead of re-rendering; the
+    next page render picks it up as `error`."""
+    request.session["flash"] = message
+
+
 def _ctx(request: Request, p: UserPrincipal, **extra) -> dict:
-    return {
+    ctx = {
         "request": request,
         "user": p.user,
         "csrf_token": _csrf_token(request),
         **extra,
     }
+    flash = request.session.pop("flash", None)
+    if flash and not ctx.get("error"):
+        ctx["error"] = flash
+    return ctx
 
 
 async def _team_role(db: AsyncSession, p: UserPrincipal, team_id: uuid.UUID) -> Role | None:
@@ -425,6 +442,55 @@ async def switch_tenant(request: Request, tenant_id: str):
 # --- Dashboard ---
 
 
+CHART_DAYS = 14
+
+
+async def _activity_charts(db: AsyncSession, scope, now: datetime) -> dict:
+    """Jobs-by-status and token totals bucketed by day over the last fortnight,
+    plus the mean tokens a job burned in that window. `scope` narrows Job to a
+    tenant or a single agent."""
+    since = now - timedelta(days=CHART_DAYS - 1)
+    day = func.date_trunc("day", Job.created_at)
+    rows = (
+        await db.execute(
+            select(day.label("day"), Job.status, func.count())
+            .where(scope, Job.created_at >= since)
+            .group_by(day, Job.status)
+        )
+    ).all()
+    token_rows = (
+        await db.execute(
+            select(day.label("day"), func.sum(Job.tokens_in), func.sum(Job.tokens_out))
+            .where(scope, Job.created_at >= since)
+            .group_by(day)
+        )
+    ).all()
+
+    days = [(since + timedelta(days=i)).date() for i in range(CHART_DAYS)]
+    labels = [d.strftime("%m-%d") for d in days]
+    statuses = sorted({status for _, status, _ in rows})
+    by_day_status = {(d.date(), s): c for d, s, c in rows}
+    by_day_tokens = {d.date(): (ti or 0, to or 0) for d, ti, to in token_rows}
+    jobs_total = sum(c for _, _, c in rows)
+    tokens_total = sum(ti + to for ti, to in by_day_tokens.values())
+    return {
+        "jobs_chart": {
+            "labels": labels,
+            "statuses": [
+                {"name": s, "counts": [by_day_status.get((d, s), 0) for d in days]}
+                for s in statuses
+            ],
+        },
+        "tokens_chart": {
+            "labels": labels,
+            "tokens_in": [by_day_tokens.get(d, (0, 0))[0] for d in days],
+            "tokens_out": [by_day_tokens.get(d, (0, 0))[1] for d in days],
+        },
+        "jobs_total": jobs_total,
+        "avg_tokens_per_job": (tokens_total / jobs_total) if jobs_total else 0,
+    }
+
+
 @router.get("/t/{tenant_id}", response_class=HTMLResponse)
 async def dashboard(
     request: Request,
@@ -475,44 +541,7 @@ async def dashboard(
         )
     )
 
-    # charts: last 14 days
-    since = now - timedelta(days=13)
-    day = func.date_trunc("day", Job.created_at)
-    rows = (
-        await db.execute(
-            select(day.label("day"), Job.status, func.count())
-            .where(Job.agent_id.in_(tenant_agents), Job.created_at >= since)
-            .group_by(day, Job.status)
-        )
-    ).all()
-    token_rows = (
-        await db.execute(
-            select(
-                day.label("day"),
-                func.sum(Job.tokens_in),
-                func.sum(Job.tokens_out),
-            )
-            .where(Job.agent_id.in_(tenant_agents), Job.created_at >= since)
-            .group_by(day)
-        )
-    ).all()
-
-    days = [(since + timedelta(days=i)).date() for i in range(14)]
-    labels = [d.strftime("%m-%d") for d in days]
-    statuses = sorted({status for _, status, _ in rows})
-    by_day_status = {(d.date(), s): c for d, s, c in rows}
-    jobs_chart = {
-        "labels": labels,
-        "statuses": [
-            {"name": s, "counts": [by_day_status.get((d, s), 0) for d in days]} for s in statuses
-        ],
-    }
-    by_day_tokens = {d.date(): (ti or 0, to or 0) for d, ti, to in token_rows}
-    tokens_chart = {
-        "labels": labels,
-        "tokens_in": [by_day_tokens.get(d, (0, 0))[0] for d in days],
-        "tokens_out": [by_day_tokens.get(d, (0, 0))[1] for d in days],
-    }
+    charts = await _activity_charts(db, Job.agent_id.in_(tenant_agents), now)
 
     recent = (
         await db.execute(
@@ -553,8 +582,8 @@ async def dashboard(
                 "success_rate": (succeeded_7d / jobs_7d) if jobs_7d else 0,
                 "cost_30d": cost_30d,
             },
-            jobs_chart=json.dumps(jobs_chart),
-            tokens_chart=json.dumps(tokens_chart),
+            jobs_chart=json.dumps(charts["jobs_chart"]),
+            tokens_chart=json.dumps(charts["tokens_chart"]),
             recent_jobs=recent_jobs,
         ),
     )
@@ -1221,14 +1250,17 @@ async def agent_detail(
         }
         for r, vno in runs_rows
     ]
-    eval_case_count = await db.scalar(
-        select(func.count()).select_from(EvalCase).where(EvalCase.agent_id == agent.id)
+    eval_cases = list(
+        await db.scalars(
+            select(EvalCase).where(EvalCase.agent_id == agent.id).order_by(EvalCase.name)
+        )
     )
     recent_jobs = list(
         await db.scalars(
             select(Job).where(Job.agent_id == agent.id).order_by(Job.created_at.desc()).limit(10)
         )
     )
+    charts = await _activity_charts(db, Job.agent_id == agent.id, datetime.now(UTC))
 
     return templates.TemplateResponse(
         request,
@@ -1247,8 +1279,16 @@ async def agent_detail(
             current_memory=current_memory,
             pending_memory=pending_memory,
             eval_runs=eval_runs,
-            eval_case_count=eval_case_count,
+            current_version_no=next(
+                (v["version_no"] for v in versions if v["id"] == agent.current_version_id), None
+            ),
+            eval_cases=eval_cases,
             recent_jobs=recent_jobs,
+            jobs_chart=json.dumps(charts["jobs_chart"]),
+            tokens_chart=json.dumps(charts["tokens_chart"]),
+            chart_days=CHART_DAYS,
+            jobs_total=charts["jobs_total"],
+            avg_tokens_per_job=charts["avg_tokens_per_job"],
             can_promote=role == Role.OWNER,
             can_edit=role in (Role.OWNER, Role.EDITOR) and agent.archived_at is None,
             can_archive=role == Role.OWNER,
@@ -1259,8 +1299,9 @@ async def agent_detail(
 async def _agent_form_page(
     db: AsyncSession, p: UserPrincipal, agent_id: uuid.UUID
 ) -> tuple[Agent | None, Role | None, RedirectResponse | None]:
-    """Shared gate for the two agent-scoped form pages: visible, editor+, and
-    not archived (a retired agent takes no new work, so nothing to fill in)."""
+    """Shared gate for the agent-scoped form pages and eval actions: visible,
+    editor+, and not archived (a retired agent takes no new work, so nothing to
+    fill in)."""
     agent = await db.get(Agent, agent_id)
     if agent is None:
         return None, None, RedirectResponse("/ui", status_code=303)
@@ -1505,6 +1546,234 @@ async def ui_create_version(
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+# --- Evals ---
+
+# The grid offers the ops that fit three boxes; a code grader needs its source,
+# so it goes through the JSON escape hatch beside the grid.
+ROW_OPS = [*sorted(PATH_OPS), "is_valid"]
+
+
+def _check_value(raw: str):
+    """A value typed into the checks grid: JSON when it parses — numbers,
+    [min, max], true — otherwise the literal string the editor typed."""
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _checks_from_form(
+    ops: list[str], paths: list[str], values: list[str], extra: str
+) -> tuple[list, str | None]:
+    """Guided rows first, then the raw-JSON checks appended. Blank rows are
+    skipped, so the form can offer more rows than a case needs."""
+    checks: list = []
+    for op, path, value in zip(ops, paths, values, strict=False):
+        op = op.strip()
+        if not op:
+            continue
+        if op not in ROW_OPS:
+            return [], f"Unknown check {op!r}."
+        check: dict = {"op": op}
+        if op in PATH_OPS:
+            if not path.strip():
+                return [], f"A {op} check needs a path into the output."
+            check["path"] = path.strip()
+            check["value"] = _check_value(value)
+        checks.append(check)
+
+    if extra.strip():
+        try:
+            parsed = json.loads(extra)
+        except json.JSONDecodeError as e:
+            return [], f"Extra checks are not valid JSON: {e}"
+        if not isinstance(parsed, list) or not all(isinstance(c, dict) for c in parsed):
+            return [], "Extra checks must be a JSON array of check objects."
+        checks.extend(parsed)
+
+    if not checks:
+        return [], "At least one check is required."
+    return checks, None
+
+
+async def _render_new_eval_case(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+
+    form = form or {}
+    rows = list(
+        zip(
+            form.get("check_op", []),
+            form.get("check_path", []),
+            form.get("check_value", []),
+            strict=False,
+        )
+    )
+    rows += [("", "", "")] * max(0, CHECK_ROWS - len(rows))
+    return templates.TemplateResponse(
+        request,
+        "eval_case_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            row_ops=ROW_OPS,
+            rows=rows,
+            error=error,
+            form=form,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/agents/{agent_id}/eval-cases/new", response_class=HTMLResponse)
+async def new_eval_case_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_new_eval_case(request, agent_id, db, p)
+
+
+@router.post("/agents/{agent_id}/eval-cases")
+async def ui_create_eval_case(
+    request: Request,
+    agent_id: uuid.UUID,
+    name: str = Form(""),
+    prompt: str = Form(""),
+    check_op: list[str] = Form(default_factory=list),
+    check_path: list[str] = Form(default_factory=list),
+    check_value: list[str] = Form(default_factory=list),
+    extra_checks: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {
+        "name": name,
+        "prompt": prompt,
+        "check_op": check_op,
+        "check_path": check_path,
+        "check_value": check_value,
+        "extra_checks": extra_checks,
+    }
+
+    async def fail(message: str):
+        return await _render_new_eval_case(
+            request, agent_id, db, p, error=message, form=form, status_code=400
+        )
+
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+
+    name = name.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    if not prompt.strip():
+        return await fail("A prompt is required — it is the job input the case runs.")
+
+    checks, error = _checks_from_form(check_op, check_path, check_value, extra_checks)
+    if error is not None:
+        return await fail(error)
+    # Same gate as the API: a code check is compiled in the sandbox, which
+    # blocks, so keep it off the event loop.
+    error = await anyio.to_thread.run_sync(validate_checks, checks)
+    if error is not None:
+        return await fail(error)
+
+    if await db.scalar(
+        select(EvalCase).where(EvalCase.agent_id == agent.id, EvalCase.name == name)
+    ):
+        return await fail(f"A case named {name!r} already exists for this agent.")
+
+    db.add(
+        EvalCase(
+            agent_id=agent.id,
+            name=name,
+            input=JobContext(prompt=prompt.strip()).model_dump(mode="json"),
+            checks=checks,
+            created_by=p.user.id,
+        )
+    )
+    await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/eval-cases/{case_id}/delete")
+async def ui_delete_eval_case(
+    agent_id: uuid.UUID,
+    case_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    case = await db.get(EvalCase, case_id)
+    if case is not None and case.agent_id == agent_id:
+        await db.delete(case)
+        await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/eval-runs")
+async def ui_start_eval_run(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    from sleeper_service.queue import get_pool
+
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    back = RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+    # Mirrors POST /v1/agents/{id}/eval-runs, which refuses each of these
+    # rather than queueing a run that could only fail.
+    if agent.current_version_id is None:
+        _flash(request, "This agent has no versions yet — create one before running an eval.")
+        return back
+    has_case = await db.scalar(select(EvalCase.id).where(EvalCase.agent_id == agent.id).limit(1))
+    if has_case is None:
+        _flash(request, "Add an eval case before starting a run.")
+        return back
+    spend = await spending.budget_exhausted(db, agent)
+    if spend is not None:
+        _flash(request, f"Monthly spend {spend} has reached the limit {agent.spending_limit}.")
+        return back
+
+    run = EvalRun(
+        agent_id=agent.id,
+        agent_version_id=agent.current_version_id,
+        created_by=p.user.id,
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    pool = await get_pool()
+    await pool.enqueue_job("run_eval", str(run.id))
+    return back
 
 
 # --- Jobs ---
