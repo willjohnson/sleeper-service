@@ -25,8 +25,8 @@
            placeholder="What this agent is for" value="{{ form.description or '' }}">
 
     <label for="na-limit">Spending limit</label>
-    <input id="na-limit" type="text" name="spending_limit" inputmode="decimal"
-           placeholder="blank for no limit" value="{{ form.spending_limit or '' }}">
+    <input id="na-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
+           placeholder="no limit" value="{{ form.spending_limit or '' }}">
 
     <label for="na-model">Model</label>
     <select id="na-model" name="model" required>
@@ -64,8 +64,7 @@
     </div>
     {% endif %}
 
-    <div></div>
-    <div><button type="submit">Create agent</button></div>
+    <div class="form-actions"><button type="submit">Create agent</button></div>
   </form>
 </details>
 {% endif %}

@@ -224,6 +224,58 @@ def _form_int(raw: str, default: int, lo: int, hi: int, label: str) -> tuple[int
     return value, None
 
 
+async def _clean_agent_fields(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    name: str,
+    spending_limit: str,
+    *,
+    exclude: uuid.UUID | None = None,
+) -> tuple[str, Decimal | None, str | None]:
+    """Shared by create and edit. Returns (name, limit, error message)."""
+    name = name.strip()
+    if not name:
+        return name, None, "Name is required."
+    if len(name) > 200:
+        return name, None, "Name must be 200 characters or fewer."
+    stmt = select(Agent).where(Agent.tenant_id == tenant_id, Agent.name == name)
+    if exclude is not None:
+        stmt = stmt.where(Agent.id != exclude)
+    if await db.scalar(stmt):
+        return name, None, f"An agent named {name!r} already exists in this tenant."
+
+    limit = None
+    raw = spending_limit.strip()
+    if raw:
+        try:
+            limit = Decimal(raw)
+        except InvalidOperation:
+            return name, None, "Spending limit must be a number, or blank for no limit."
+        if limit <= 0:
+            return name, None, "Spending limit must be greater than zero."
+    return name, limit, None
+
+
+def _options_from_form(
+    delegation: str, memory: bool, learning: bool, memory_approval: bool
+) -> dict:
+    options: dict = {}
+    if delegation in ("team", "tenant"):
+        options["delegation"] = delegation
+    for key, value in (
+        ("memory", memory),
+        ("learning", learning),
+        ("memory_approval", memory_approval),
+    ):
+        if value:
+            options[key] = True
+    return options
+
+
+def _governed_change(old: dict, new: dict) -> bool:
+    return any(bool(old.get(k)) != bool(new.get(k)) for k in GOVERNED_OPTION_KEYS)
+
+
 async def _new_version(
     db: AsyncSession,
     agent: Agent,
@@ -667,38 +719,16 @@ async def ui_create_agent(
     if role not in (Role.OWNER, Role.EDITOR):
         return await fail(f"You need the editor role on {team.name} to create an agent there.")
 
-    options: dict = {}
-    if delegation in ("team", "tenant"):
-        options["delegation"] = delegation
-    for key, value in (
-        ("memory", memory),
-        ("learning", learning),
-        ("memory_approval", memory_approval),
-    ):
-        if value:
-            options[key] = True
-    if options.keys() & set(GOVERNED_OPTION_KEYS) and role != Role.OWNER:
+    options = _options_from_form(delegation, memory, learning, memory_approval)
+    if _governed_change({}, options) and role != Role.OWNER:
         return await fail(
             "Memory, learning and approval are owner-managed — ask an owner of "
             f"{team.name}, or create the agent without them."
         )
 
-    name = name.strip()
-    if not name:
-        return await fail("Name is required.")
-    if len(name) > 200:
-        return await fail("Name must be 200 characters or fewer.")
-    if await db.scalar(select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == name)):
-        return await fail(f"An agent named {name!r} already exists in this tenant.")
-
-    limit = None
-    if spending_limit.strip():
-        try:
-            limit = Decimal(spending_limit.strip())
-        except InvalidOperation:
-            return await fail("Spending limit must be a number, or blank for no limit.")
-        if limit <= 0:
-            return await fail("Spending limit must be greater than zero.")
+    name, limit, err = await _clean_agent_fields(db, tenant.id, name, spending_limit)
+    if err:
+        return await fail(err)
 
     prompt = prompt.strip()
     if not prompt:
@@ -743,6 +773,7 @@ async def _render_agent_detail(
     p: UserPrincipal,
     *,
     error: str | None = None,
+    error_form: str | None = None,
     form: dict | None = None,
     status_code: int = 200,
 ):
@@ -882,6 +913,7 @@ async def _render_agent_detail(
             current_version_iters=(current or {}).get("max_iterations", 10),
             current_version_timeout=(current or {}).get("timeout_s", 300),
             error=error,
+            error_form=error_form,
             form=form or {},
         ),
         status_code=status_code,
@@ -896,6 +928,72 @@ async def agent_detail(
     p: UserPrincipal = Depends(ui_user),
 ):
     return await _render_agent_detail(request, agent_id, db, p)
+
+
+@router.post("/agents/{agent_id}/settings")
+async def ui_update_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    name: str = Form(""),
+    description: str = Form(""),
+    spending_limit: str = Form(""),
+    delegation: str = Form("none"),
+    memory: bool = Form(False),
+    learning: bool = Form(False),
+    memory_approval: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    """Edit name, description, spending limit and options. Mirrors
+    PATCH /v1/agents/{id}: editors change the rest, owners change the
+    governed options — and only when a governed value actually flips."""
+    settings = {
+        "name": name,
+        "description": description,
+        "spending_limit": spending_limit,
+        "delegation": delegation,
+        "memory": memory,
+        "learning": learning,
+        "memory_approval": memory_approval,
+    }
+
+    async def fail(message: str):
+        return await _render_agent_detail(
+            request,
+            agent_id,
+            db,
+            p,
+            error=message,
+            error_form="settings",
+            form={"settings": settings},
+            status_code=400,
+        )
+
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return RedirectResponse("/ui", status_code=303)
+    role = await _team_role(db, p, agent.team_id)
+    if role is None:
+        return RedirectResponse("/ui", status_code=303)
+    if role not in (Role.OWNER, Role.EDITOR):
+        return await fail("You need the editor role on this team to change these settings.")
+
+    options = _options_from_form(delegation, memory, learning, memory_approval)
+    if _governed_change(agent.options or {}, options) and role != Role.OWNER:
+        return await fail("Memory, learning and approval are owner-managed.")
+
+    name, limit, err = await _clean_agent_fields(
+        db, agent.tenant_id, name, spending_limit, exclude=agent.id
+    )
+    if err:
+        return await fail(err)
+
+    agent.name = name
+    agent.description = description.strip()
+    agent.spending_limit = limit
+    agent.options = options
+    await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
 
 @router.post("/agents/{agent_id}/versions")
@@ -918,7 +1016,14 @@ async def ui_create_version(
 
     async def fail(message: str):
         return await _render_agent_detail(
-            request, agent_id, db, p, error=message, form=form, status_code=400
+            request,
+            agent_id,
+            db,
+            p,
+            error=message,
+            error_form="version",
+            form=form,
+            status_code=400,
         )
 
     agent = await db.get(Agent, agent_id)

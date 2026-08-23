@@ -483,3 +483,153 @@ async def test_create_version_refused_for_viewers(client: AsyncClient, risk_agen
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
     assert len(versions) == 1
+
+
+async def test_edit_agent_settings(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Edit" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "risk-analyzer-renamed",
+            "description": "Now with a better description",
+            "spending_limit": "25",
+            "delegation": "team",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["name"] == "risk-analyzer-renamed"
+    assert agent["description"] == "Now with a better description"
+    assert agent["spending_limit"] == "25.0000"
+    assert agent["options"] == {"delegation": "team"}
+    # Editing settings must not create a version.
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert len(versions) == 1
+
+
+async def test_edit_clears_spending_limit_and_rejects_bad_input(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    await client.patch(f"/v1/agents/{agent_id}", headers=alice, json={"spending_limit": "9"})
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": token, "name": "risk-analyzer", "spending_limit": "-3"},
+    )
+    assert r.status_code == 400 and "greater than zero" in r.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": token, "name": "", "spending_limit": "1"},
+    )
+    assert r.status_code == 400 and "Name is required" in r.text
+
+    # Blank clears the limit.
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": token, "name": "risk-analyzer", "spending_limit": "  "},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["spending_limit"] is None
+
+
+async def test_edit_keeps_owner_options_when_an_editor_saves(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """An editor changing a description must not read as flipping memory off."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.patch(
+        f"/v1/agents/{agent_id}", headers=alice, json={"options": {"memory": True}}
+    )
+    assert r.status_code == 200
+
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}")
+    # The checkbox is disabled for editors, so the template round-trips the
+    # owner's setting in a hidden field. Without it the save would read as
+    # flipping memory off and be refused.
+    assert '<input type="hidden" name="memory" value="1">' in page.text
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "risk-analyzer",
+            "description": "Edited by an editor",
+            "spending_limit": "",
+            "memory": "1",  # what the browser sends from the hidden field
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["description"] == "Edited by an editor"
+    assert agent["options"] == {"memory": True}
+
+
+async def test_editor_cannot_flip_governed_options(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "risk-analyzer",
+            "spending_limit": "",
+            "learning": "1",
+        },
+    )
+    assert r.status_code == 400 and "owner-managed" in r.text
+
+
+async def test_edit_hidden_and_refused_for_viewers(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "/settings" not in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": _csrf(page.text), "name": "hijacked", "spending_limit": ""},
+    )
+    assert r.status_code == 400 and "editor role" in r.text
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["name"] == "risk-analyzer"
+
+
+async def test_settings_error_does_not_open_the_version_form(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": _csrf(page.text), "name": "", "spending_limit": ""},
+    )
+    assert r.status_code == 400
+    body = r.text
+    settings_form = body.index("/settings")
+    version_form = body.index("/versions")
+    # Exactly one panel is open, and it is the one that failed.
+    assert body.count('<details class="subpanel" open>') == 1
+    assert body.rindex('<details class="subpanel" open>', 0, settings_form) < settings_form
+    assert '<details class="subpanel" open>' not in body[settings_form:version_form]

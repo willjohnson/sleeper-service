@@ -102,17 +102,24 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
 
-/* Create forms (new agent, new version) */
+/* Create / edit forms */
 details.panel > summary, details.subpanel > summary { cursor: pointer; font-size: 15px; }
 details.subpanel {
-  border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px;
 }
 .form-grid {
-  display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 10px 14px;
-  align-items: start; margin-top: 14px; max-width: 720px;
+  display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px 16px;
+  align-items: start; margin-top: 16px; max-width: 620px;
 }
 .form-grid > label { color: var(--muted); font-size: 12.5px; padding-top: 8px; }
-.inline-fields { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.form-grid > input, .form-grid > select, .form-grid > textarea { width: 100%; }
+/* Fields whose content is short read as broken when stretched to the column. */
+.form-grid .short { max-width: 170px; }
+.form-actions { grid-column: 2; display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+.inline-fields {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13px; min-height: 34px;
+}
 .inline-fields label.check {
   display: inline-flex; align-items: center; gap: 5px; color: var(--ink); padding: 0;
 }
