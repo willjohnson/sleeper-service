@@ -54,4 +54,18 @@
     </div>
   </form>
 </div>
+
+{% if can_archive %}
+<div class="panel">
+  <h2>Archive</h2>
+  <p class="muted" style="margin-top:0">
+    Retires this agent: it leaves the agent list and refuses new work. Jobs, versions and evals
+    are untouched, and an owner can restore it from the agent page afterwards.
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/archive">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <button class="subtle danger">Archive agent</button>
+  </form>
+</div>
+{% endif %}
 {% endblock %}

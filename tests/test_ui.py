@@ -743,10 +743,24 @@ async def test_restore_brings_the_agent_back(client: AsyncClient, risk_agent: di
     assert r.status_code in (201, 202)
 
 
+async def test_owner_is_offered_archive_on_the_edit_page(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")  # owner
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    assert "Archive agent" in page.text
+    # ...and it is no longer duplicated on the detail page.
+    detail = await client.get(f"/ui/agents/{agent_id}")
+    assert "Archive agent" not in detail.text
+
+
 async def test_archive_is_owner_only(client: AsyncClient, risk_agent: dict) -> None:
     agent_id = risk_agent["agent"]["id"]
     await _login(client, "bob@example.com")  # editor
-    page = await client.get(f"/ui/agents/{agent_id}")
+    # Archiving lives on the edit page now, and an editor is offered it there.
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    assert page.status_code == 200
     assert "Archive agent" not in page.text
 
     r = await client.post(

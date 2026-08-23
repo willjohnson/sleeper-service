@@ -30,17 +30,9 @@
   <div class="meter" style="max-width:320px"><div style="width: {{ [spend / spending_limit * 100, 100] | min }}%"></div></div>
   {% endif %}
 
-  {% if can_edit or (can_archive and not agent.archived_at) %}
+  {% if can_edit %}
   <div class="subpanel">
-    {% if can_edit %}<a class="btn subtle" href="/ui/agents/{{ agent.id }}/settings">Edit settings</a>{% endif %}
-    {% if can_archive and not agent.archived_at %}
-    <form method="post" action="/ui/agents/{{ agent.id }}/archive" style="display:inline">
-      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-      <button class="subtle">Archive agent</button>
-    </form>
-    <span class="muted">Archiving retires it from listings and refuses new work. Nothing is
-      deleted, and you can restore it later.</span>
-    {% endif %}
+    <a class="btn subtle" href="/ui/agents/{{ agent.id }}/settings">Edit settings</a>
   </div>
   {% endif %}
 </div>
@@ -51,31 +43,48 @@
     <a class="btn subtle" href="/ui/agents/{{ agent.id }}/versions/new">New version</a>
     {% endif %}
   </h2>
-  <table>
-    <tr><th>Version</th><th>Model</th><th>Prompt</th><th>Guardrails</th><th>Created</th><th></th></tr>
+  <table class="versions">
+    <tr><th>Version</th><th>Model</th><th>Prompt</th><th class="nowrap">Guardrails</th>
+      <th class="nowrap">Created</th><th class="col-actions"></th></tr>
     {% for v in versions %}
     <tr>
-      <td>v{{ v.version_no }} {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
-        {% for a in v.aliases %}<span class="badge opt">{{ a }}{% if can_promote %}<form method="post" action="/ui/agents/{{ agent.id }}/aliases/{{ a }}/delete" style="display:inline"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle" title="Remove alias" style="padding:0 2px">&times;</button></form>{% endif %}</span>{% endfor %}</td>
+      <td>
+        <div class="version-cell">
+          <span>v{{ v.version_no }}</span>
+          {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
+          {% for a in v.aliases %}
+          <span class="badge opt alias">{{ a }}
+            {% if can_promote %}
+            <form method="post" action="/ui/agents/{{ agent.id }}/aliases/{{ a }}/delete">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+              <button title="Remove alias">&times;</button>
+            </form>
+            {% endif %}
+          </span>
+          {% endfor %}
+        </div>
+      </td>
       <td class="mono">{{ v.model_string }}</td>
       <td class="muted">{{ v.prompt|truncate(80) }}</td>
-      <td class="mono">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
-      <td class="muted">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
+      <td class="mono nowrap">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
+      <td class="muted nowrap">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
       <td>
-        {% if v.id != agent.current_version_id and can_promote %}
-        <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}" style="display:inline">
-          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-          <button class="subtle">Promote</button>
-        </form>
-        {% endif %}
-        {% if can_promote %}
-        <form method="post" action="/ui/agents/{{ agent.id }}/aliases" style="display:inline">
-          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="version_no" value="{{ v.version_no }}">
-          <input name="alias" placeholder="alias" size="7" pattern="[a-z0-9][a-z0-9_-]{0,39}">
-          <button class="subtle">Set alias</button>
-        </form>
-        {% endif %}
+        <div class="actions">
+          {% if v.id != agent.current_version_id and can_promote %}
+          <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle">Promote</button>
+          </form>
+          {% endif %}
+          {% if can_promote %}
+          <form method="post" action="/ui/agents/{{ agent.id }}/aliases" class="alias-form">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="version_no" value="{{ v.version_no }}">
+            <input name="alias" placeholder="alias" size="7" pattern="[a-z0-9][a-z0-9_-]{0,39}">
+            <button class="subtle">Set alias</button>
+          </form>
+          {% endif %}
+        </div>
       </td>
     </tr>
     {% endfor %}

@@ -1295,6 +1295,7 @@ async def _render_edit_agent(
             agent=agent,
             team=await db.get(Team, agent.team_id),
             can_govern=role == Role.OWNER,
+            can_archive=role == Role.OWNER,
             error=error,
             form=form or {},
         ),

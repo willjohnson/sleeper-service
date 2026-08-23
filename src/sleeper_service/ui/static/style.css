@@ -102,7 +102,26 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .meter { background: var(--line); border-radius: 999px; height: 8px; overflow: hidden; }
 .meter > div { background: var(--accent); height: 100%; }
-.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+/* Each inline form is one flex item, so an input and its button never wrap
+   apart from each other. */
+.actions > form { display: flex; gap: 6px; align-items: center; }
+.version-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* Wide enough for Promote + the alias form on one line, so the controls line
+   up down the column instead of wrapping on some rows and not others. */
+table.versions th.col-actions { width: 310px; }
+/* Rows differ — the current version has no Promote — so right-align the group
+   and every row's controls end on the same edge. */
+table.versions .actions { justify-content: flex-end; }
+table.versions .nowrap { white-space: nowrap; }
+.badge.alias { display: inline-flex; align-items: center; gap: 6px; padding-right: 5px; }
+.badge.alias form { display: flex; }
+.badge.alias button {
+  background: rgba(255, 255, 255, 0.25); color: #fff; padding: 0; font-size: 11px;
+  width: 15px; height: 15px; border-radius: 999px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.badge.alias button:hover { background: rgba(255, 255, 255, 0.45); filter: none; }
 .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
 
 /* Form pages (new agent, edit agent, new version) */
