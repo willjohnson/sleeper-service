@@ -67,7 +67,7 @@
     <tr>
       <td>
         <div class="version-cell">
-          <span>v{{ v.version_no }}</span>
+          <a href="/ui/agents/{{ agent.id }}/versions/{{ v.version_no }}">v{{ v.version_no }}</a>
           {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
           {% for a in v.aliases %}
           <span class="badge opt alias">{{ a }}
@@ -82,7 +82,7 @@
         </div>
       </td>
       <td class="mono">{{ v.model_string }}</td>
-      <td class="muted">{{ v.prompt|truncate(80) }}</td>
+      <td class="muted"><a href="/ui/agents/{{ agent.id }}/versions/{{ v.version_no }}" class="muted">{{ v.prompt|truncate(80) }}</a></td>
       <td class="mono nowrap">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
       <td class="muted nowrap">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
       <td>
@@ -205,7 +205,7 @@
       {% for r in eval_runs %}
       <tr>
         <td><a class="mono" href="/ui/eval-runs/{{ r.id }}">{{ r.id|string|truncate(8, true, '') }}</a>{% if r.memory_version_id %} <span class="badge pending">memory gate</span>{% endif %}</td>
-        <td>v{{ r.version_no }}</td>
+        <td><a href="/ui/agents/{{ agent.id }}/versions/{{ r.version_no }}">v{{ r.version_no }}</a></td>
         <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
         <td>{% if r.pass_rate is not none %}<strong>{{ '%.0f%%'|format(r.pass_rate * 100) }}</strong>{% else %}—{% endif %}</td>
         <td class="muted">{{ r.created_at.strftime('%m-%d %H:%M') }}</td>

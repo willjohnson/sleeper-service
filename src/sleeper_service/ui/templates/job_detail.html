@@ -9,7 +9,7 @@
     {% endif %}
   </h2>
   <table>
-    <tr><th style="width:140px">Agent</th><td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a> · v{{ version_no }}{% if job.memory_version_id %} · memory pinned{% endif %}{% if job.is_eval %} · <span class="badge opt">eval</span>{% endif %}</td></tr>
+    <tr><th style="width:140px">Agent</th><td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a> · <a href="/ui/agents/{{ agent.id }}/versions/{{ version_no }}">v{{ version_no }}</a>{% if job.memory_version_id %} · memory pinned{% endif %}{% if job.is_eval %} · <span class="badge opt">eval</span>{% endif %}</td></tr>
     <tr><th>Tokens / cost</th><td>{{ job.tokens_in }} in · {{ job.tokens_out }} out · ${{ '%.6f'|format(job.cost) }}</td></tr>
     <tr><th>Timing</th><td class="muted">created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if job.finished_at %} · finished {{ job.finished_at.strftime('%H:%M:%S') }}{% endif %}</td></tr>
     {% if job.error %}<tr><th>Error</th><td><code>{{ job.error }}</code></td></tr>{% endif %}

@@ -1548,6 +1548,69 @@ async def ui_create_version(
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
 
+@router.get("/agents/{agent_id}/versions/{version_no}", response_class=HTMLResponse)
+async def version_detail(
+    request: Request,
+    agent_id: uuid.UUID,
+    version_no: int,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    """The whole of a version: a truncated prompt in a table is enough to tell
+    two versions apart, not enough to know what a job or an eval run ran."""
+    agent = await db.get(Agent, agent_id)
+    if agent is None or await _team_role(db, p, agent.team_id) is None:
+        return RedirectResponse("/ui", status_code=303)
+    version = await db.scalar(
+        select(AgentVersion).where(
+            AgentVersion.agent_id == agent.id, AgentVersion.version_no == version_no
+        )
+    )
+    if version is None:
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+    model_string = (
+        await db.scalar(select(Model.model_string).where(Model.id == version.model_id))
+        if version.model_id
+        else None
+    )
+    author = (
+        await db.scalar(select(User.email).where(User.id == version.created_by))
+        if version.created_by
+        else None
+    )
+    aliases = list(
+        await db.scalars(
+            select(VersionAlias.alias)
+            .where(VersionAlias.agent_version_id == version.id)
+            .order_by(VersionAlias.alias)
+        )
+    )
+    return templates.TemplateResponse(
+        request,
+        "version_detail.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            version=version,
+            model_string=model_string or "?",
+            author=author,
+            aliases=aliases,
+            is_current=version.id == agent.current_version_id,
+            output_schema=json.dumps(version.output_schema, indent=2)
+            if version.output_schema
+            else None,
+            input_schema=json.dumps(version.input_schema, indent=2)
+            if version.input_schema
+            else None,
+        ),
+    )
+
+
 # --- Evals ---
 
 # The grid offers the ops that fit three boxes; a code grader needs its source,

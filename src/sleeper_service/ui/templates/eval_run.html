@@ -4,16 +4,16 @@
 {% block content %}
 <div class="panel">
   <h2>Result</h2>
-  <table class="members">
+  <table>
     <tr>
-      <td class="muted">Agent</td>
+      <th style="width:140px">Agent</th>
       <td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a>
-        {% if version_no %} · v{{ version_no }}{% endif %}
+        {% if version_no %} · <a href="/ui/agents/{{ agent.id }}/versions/{{ version_no }}">v{{ version_no }}</a>{% endif %}
         {% if memory_version %} · <span class="badge pending">memory v{{ memory_version.version_no }} gate</span>{% endif %}
       </td>
     </tr>
     <tr>
-      <td class="muted">Status</td>
+      <th>Status</th>
       <td><span class="badge {{ run.status }}">{{ run.status }}</span>
         {% if pass_rate is not none %}
         <strong style="margin-left:8px">{{ '%.0f%%'|format(pass_rate * 100) }}</strong>
@@ -22,7 +22,7 @@
       </td>
     </tr>
     <tr>
-      <td class="muted">Timing</td>
+      <th>Timing</th>
       <td class="muted">created {{ run.created_at.strftime('%Y-%m-%d %H:%M') }}
         {% if run.finished_at %} · finished {{ run.finished_at.strftime('%H:%M') }}{% endif %}</td>
     </tr>

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ agent.name }} v{{ version.version_no }} — Sleeper Service{% endblock %}
+{% block heading %}{{ agent.name }} <span class="muted" style="font-size:14px">· v{{ version.version_no }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2 class="with-action">Version {{ version.version_no }}
+    <span class="actions">
+      {% if is_current %}<span class="badge current">current</span>{% endif %}
+      {% for a in aliases %}<span class="badge opt">{{ a }}</span>{% endfor %}
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}">Back to agent</a>
+    </span>
+  </h2>
+  <table>
+    <tr><th style="width:140px">Model</th><td class="mono">{{ model_string }}</td></tr>
+    <tr><th>Guardrails</th>
+      <td class="mono">{{ version.max_iterations }} iterations · {{ version.timeout_s }}s timeout</td></tr>
+    <tr><th>Created</th>
+      <td class="muted">{{ version.created_at.strftime('%Y-%m-%d %H:%M') }}{% if author %} by {{ author }}{% endif %}</td></tr>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>Prompt</h2>
+  <pre style="white-space:pre-wrap">{{ version.prompt }}</pre>
+</div>
+
+{% if output_schema or input_schema %}
+<div class="grid2">
+  {% if output_schema %}
+  <div class="panel">
+    <h2>Output schema</h2>
+    <pre>{{ output_schema }}</pre>
+  </div>
+  {% endif %}
+  {% if input_schema %}
+  <div class="panel">
+    <h2>Input schema</h2>
+    <pre>{{ input_schema }}</pre>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if version.data_store_grants or version.tool_grants %}
+<div class="panel">
+  <h2>Grants</h2>
+  {% if version.data_store_grants %}
+  <table>
+    <tr><th>Data store</th><th>Prefix</th><th>Mode</th></tr>
+    {% for g in version.data_store_grants %}
+    <tr>
+      <td class="mono">{{ g.get('store', '?') }}</td>
+      <td class="mono">{{ g.get('prefix') or '/' }}</td>
+      <td><span class="badge opt">{{ g.get('mode', 'ro') }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% if version.tool_grants %}
+  <div class="pill-row" style="margin-top:10px">
+    {% for t in version.tool_grants %}<span class="badge opt">{{ t }}</span>{% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

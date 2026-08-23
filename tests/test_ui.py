@@ -70,6 +70,45 @@ async def test_agents_and_detail_pages(client: AsyncClient, risk_agent: dict) ->
     assert "Promote" not in r.text
 
 
+async def test_version_page_shows_the_whole_prompt(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    long_prompt = "Assess business risk. " + "Weigh staffing, weather and market moves. " * 8
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=bob,
+        json={"prompt": long_prompt, "model": "test/default", "max_iterations": 7},
+    )
+    assert r.status_code == 201
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert f'/ui/agents/{agent_id}/versions/2"' in page.text  # the table links out
+    assert long_prompt not in page.text  # ...because the table only has room for a slice
+
+    r = await client.get(f"/ui/agents/{agent_id}/versions/2")
+    assert r.status_code == 200
+    assert long_prompt in r.text
+    assert "7 iterations" in r.text
+    assert "test:default" in r.text
+    assert "bob@example.com" in r.text  # who wrote it
+
+    # a version that doesn't exist falls back to the agent
+    r = await client.get(f"/ui/agents/{agent_id}/versions/99", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+    # "new" still reaches the create form, not the detail page
+    r = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert r.status_code == 200
+    assert "Create version" in r.text
+
+    # outsiders see nothing
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/agents/{agent_id}/versions/2", follow_redirects=False)
+    assert r.status_code == 303
+
+
 async def test_promote_via_ui_owner_only(client: AsyncClient, risk_agent: dict) -> None:
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     agent_id = risk_agent["agent"]["id"]
