@@ -102,20 +102,22 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
 
-/* Create / edit forms */
-details.panel > summary, details.subpanel > summary { cursor: pointer; font-size: 15px; }
-details.subpanel {
-  border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px;
-}
+/* Form pages (new agent, edit agent, new version) */
 .form-grid {
   display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px 16px;
-  align-items: start; margin-top: 16px; max-width: 620px;
+  align-items: start; margin-top: 16px; max-width: 720px;
 }
 .form-grid > label { color: var(--muted); font-size: 12.5px; padding-top: 8px; }
 .form-grid > input, .form-grid > select, .form-grid > textarea { width: 100%; }
 /* Fields whose content is short read as broken when stretched to the column. */
 .form-grid .short { max-width: 170px; }
-.form-actions { grid-column: 2; display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+.form-grid .form-section {
+  grid-column: 1 / -1; margin: 12px 0 0; padding-top: 16px; font-size: 13px;
+  border-top: 1px solid var(--line); color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.form-actions { grid-column: 2; display: flex; align-items: center; gap: 14px; margin-top: 6px; }
+.form-actions .cancel { color: var(--muted); font-size: 13px; }
 .inline-fields {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font-size: 13px; min-height: 34px;
@@ -123,9 +125,21 @@ details.subpanel {
 .inline-fields label.check {
   display: inline-flex; align-items: center; gap: 5px; color: var(--ink); padding: 0;
 }
+
+.topbar h1 { margin-right: auto; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.btn.subtle {
+  background: var(--line); color: var(--ink); padding: 4px 10px; font-size: 12px;
+  text-decoration: none;
+}
+.panel h2.with-action { display: flex; align-items: center; justify-content: space-between; }
+
+.subpanel { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+div.subpanel { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+details.subpanel > summary { cursor: pointer; }
+
 .notice {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
   background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
   padding: 10px 14px; margin-bottom: 12px; font-size: 13px;
 }
-form.subpanel { display: flex; align-items: center; gap: 12px; }

@@ -563,18 +563,13 @@ async def dashboard(
 # --- Agents ---
 
 
-async def _render_agents_page(
+@router.get("/t/{tenant_id}/agents", response_class=HTMLResponse)
+async def agents_page(
     request: Request,
     tenant_id: uuid.UUID,
-    db: AsyncSession,
-    p: UserPrincipal,
-    *,
-    error: str | None = None,
-    form: dict | None = None,
-    status_code: int = 200,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
 ):
-    """Shared by the GET page and by a failed create, which re-renders here so
-    the operator gets the error next to the prompt they typed."""
     tenant = await _tenant_or_home(db, p, tenant_id)
     if isinstance(tenant, RedirectResponse):
         return tenant
@@ -647,7 +642,52 @@ async def _render_agents_page(
             tenants=tenants,
             section="agents",
             teams=team_views,
-            creatable_teams=creatable_teams,
+            can_create=bool(creatable_teams),
+        ),
+    )
+
+
+async def _render_new_agent(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    """The create form has its own page, so a failed submit re-renders here
+    with the operator's input rather than dropping a long prompt."""
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+
+    teams = list(
+        await db.scalars(
+            select(Team)
+            .where(Team.tenant_id == tenant.id)
+            .order_by(Team.is_org_team.desc(), Team.name)
+        )
+    )
+    creatable = []
+    for team in teams:
+        role = await _team_role(db, p, team.id)
+        if role in (Role.OWNER, Role.EDITOR):
+            creatable.append({"id": team.id, "name": team.name, "can_govern": role == Role.OWNER})
+    if not creatable:
+        return RedirectResponse(f"/ui/t/{tenant.id}/agents", status_code=303)
+
+    return templates.TemplateResponse(
+        request,
+        "agent_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            creatable_teams=creatable,
             models=await _model_strings(db),
             error=error,
             form=form or {},
@@ -656,14 +696,14 @@ async def _render_agents_page(
     )
 
 
-@router.get("/t/{tenant_id}/agents", response_class=HTMLResponse)
-async def agents_page(
+@router.get("/t/{tenant_id}/agents/new", response_class=HTMLResponse)
+async def new_agent_page(
     request: Request,
     tenant_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
 ):
-    return await _render_agents_page(request, tenant_id, db, p)
+    return await _render_new_agent(request, tenant_id, db, p)
 
 
 @router.post("/t/{tenant_id}/agents")
@@ -706,7 +746,7 @@ async def ui_create_agent(
     }
 
     async def fail(message: str):
-        return await _render_agents_page(
+        return await _render_new_agent(
             request, tenant_id, db, p, error=message, form=form, status_code=400
         )
 
@@ -771,16 +811,12 @@ async def ui_create_agent(
     return RedirectResponse(f"/ui/agents/{agent.id}", status_code=303)
 
 
-async def _render_agent_detail(
+@router.get("/agents/{agent_id}", response_class=HTMLResponse)
+async def agent_detail(
     request: Request,
     agent_id: uuid.UUID,
-    db: AsyncSession,
-    p: UserPrincipal,
-    *,
-    error: str | None = None,
-    error_form: str | None = None,
-    form: dict | None = None,
-    status_code: int = 200,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
 ):
     agent = await db.get(Agent, agent_id)
     if agent is None:
@@ -824,10 +860,6 @@ async def _render_agent_detail(
         }
         for v, model_string in versions_rows
     ]
-
-    # The new-version form opens prefilled from the current version, so
-    # iterating on a prompt is an edit rather than a retype.
-    current = next((v for v in versions if v["id"] == agent.current_version_id), None)
 
     current_memory = await latest_memory(db, agent.id)
     pending_rows = list(
@@ -913,27 +945,64 @@ async def _render_agent_detail(
             can_promote=role == Role.OWNER,
             can_edit=role in (Role.OWNER, Role.EDITOR) and agent.archived_at is None,
             can_archive=role == Role.OWNER,
-            models=await _model_strings(db),
-            current_version_model=(current or {}).get("model_string", "").removeprefix("?"),
-            current_version_prompt=(current or {}).get("prompt", ""),
-            current_version_iters=(current or {}).get("max_iterations", 10),
-            current_version_timeout=(current or {}).get("timeout_s", 300),
+        ),
+    )
+
+
+async def _agent_form_page(
+    db: AsyncSession, p: UserPrincipal, agent_id: uuid.UUID
+) -> tuple[Agent | None, Role | None, RedirectResponse | None]:
+    """Shared gate for the two agent-scoped form pages: visible, editor+, and
+    not archived (a retired agent takes no new work, so nothing to fill in)."""
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return None, None, RedirectResponse("/ui", status_code=303)
+    role = await _team_role(db, p, agent.team_id)
+    if role not in (Role.OWNER, Role.EDITOR) or agent.archived_at is not None:
+        return None, None, RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    return agent, role, None
+
+
+async def _render_edit_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    agent, role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    return templates.TemplateResponse(
+        request,
+        "agent_edit.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            team=await db.get(Team, agent.team_id),
+            can_govern=role == Role.OWNER,
             error=error,
-            error_form=error_form,
             form=form or {},
         ),
         status_code=status_code,
     )
 
 
-@router.get("/agents/{agent_id}", response_class=HTMLResponse)
-async def agent_detail(
+@router.get("/agents/{agent_id}/settings", response_class=HTMLResponse)
+async def edit_agent_page(
     request: Request,
     agent_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
 ):
-    return await _render_agent_detail(request, agent_id, db, p)
+    return await _render_edit_agent(request, agent_id, db, p)
 
 
 @router.post("/agents/{agent_id}/settings")
@@ -964,25 +1033,13 @@ async def ui_update_agent(
     }
 
     async def fail(message: str):
-        return await _render_agent_detail(
-            request,
-            agent_id,
-            db,
-            p,
-            error=message,
-            error_form="settings",
-            form={"settings": settings},
-            status_code=400,
+        return await _render_edit_agent(
+            request, agent_id, db, p, error=message, form=settings, status_code=400
         )
 
-    agent = await db.get(Agent, agent_id)
-    if agent is None:
-        return RedirectResponse("/ui", status_code=303)
-    role = await _team_role(db, p, agent.team_id)
-    if role is None:
-        return RedirectResponse("/ui", status_code=303)
-    if role not in (Role.OWNER, Role.EDITOR):
-        return await fail("You need the editor role on this team to change these settings.")
+    agent, role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
 
     options = _options_from_form(delegation, memory, learning, memory_approval)
     if _governed_change(agent.options or {}, options) and role != Role.OWNER:
@@ -1032,6 +1089,63 @@ async def ui_restore_agent(
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
 
+async def _render_new_version(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+
+    # Prefilled from the current version, so iterating on a prompt is an edit
+    # rather than a retype.
+    current = (
+        await db.get(AgentVersion, agent.current_version_id) if agent.current_version_id else None
+    )
+    current_model = (
+        await db.scalar(select(Model.model_string).where(Model.id == current.model_id))
+        if current is not None and current.model_id is not None
+        else None
+    )
+    return templates.TemplateResponse(
+        request,
+        "version_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            models=await _model_strings(db),
+            current_model=current_model or "",
+            current_prompt=current.prompt if current else "",
+            current_iters=current.max_iterations if current else 10,
+            current_timeout=current.timeout_s if current else 300,
+            next_version_no=(current.version_no + 1) if current else 1,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/agents/{agent_id}/versions/new", response_class=HTMLResponse)
+async def new_version_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_new_version(request, agent_id, db, p)
+
+
 @router.post("/agents/{agent_id}/versions")
 async def ui_create_version(
     request: Request,
@@ -1051,25 +1165,13 @@ async def ui_create_version(
     }
 
     async def fail(message: str):
-        return await _render_agent_detail(
-            request,
-            agent_id,
-            db,
-            p,
-            error=message,
-            error_form="version",
-            form=form,
-            status_code=400,
+        return await _render_new_version(
+            request, agent_id, db, p, error=message, form=form, status_code=400
         )
 
-    agent = await db.get(Agent, agent_id)
-    if agent is None:
-        return RedirectResponse("/ui", status_code=303)
-    role = await _team_role(db, p, agent.team_id)
-    if role is None:
-        return RedirectResponse("/ui", status_code=303)
-    if role not in (Role.OWNER, Role.EDITOR):
-        return await fail("You need the editor role on this team to add a version.")
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
 
     prompt = prompt.strip()
     if not prompt:

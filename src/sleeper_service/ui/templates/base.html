@@ -21,6 +21,7 @@
   <main class="main">
     <div class="topbar">
       <h1>{% block heading %}{% endblock %}</h1>
+      <div class="topbar-actions">{% block actions %}{% endblock %}</div>
       {% if tenants and tenants|length > 1 %}
       <form method="get" action="/ui/switch">
         <select name="tenant_id" onchange="this.form.submit()">

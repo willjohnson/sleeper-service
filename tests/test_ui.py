@@ -298,13 +298,17 @@ async def test_create_agent_makes_a_runnable_agent(
     client: AsyncClient, org: dict, seeded_models: None
 ) -> None:
     await _login(client, "alice@example.com")
-    page = await _agents_page(client, org["tenant"]["id"])
-    assert "New agent" in page
+    listing = await _agents_page(client, org["tenant"]["id"])
+    assert f"/ui/t/{org['tenant']['id']}/agents/new" in listing
+
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    assert page.status_code == 200
+    assert "First version" in page.text
 
     r = await client.post(
         f"/ui/t/{org['tenant']['id']}/agents",
         data={
-            "_csrf_token": _csrf(page),
+            "_csrf_token": _csrf(page.text),
             "team_id": org["team"]["id"],
             "name": "credit-memo",
             "description": "Draft credit memos",
@@ -338,13 +342,19 @@ async def test_create_agent_hidden_and_refused_for_viewers(
     client: AsyncClient, org: dict, seeded_models: None
 ) -> None:
     await _login(client, "carol@example.com")  # viewer
-    page = await _agents_page(client, org["tenant"]["id"])
-    assert "New agent" not in page
+    listing = await _agents_page(client, org["tenant"]["id"])
+    assert "/agents/new" not in listing
 
+    # The page itself is not reachable...
+    r = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/agents")
+
+    # ...and neither is the endpoint behind it.
     r = await client.post(
         f"/ui/t/{org['tenant']['id']}/agents",
         data={
-            "_csrf_token": _csrf(page),
+            "_csrf_token": _csrf(listing),
             "team_id": org["team"]["id"],
             "name": "sneaky",
             "model": "test:default",
@@ -352,8 +362,7 @@ async def test_create_agent_hidden_and_refused_for_viewers(
         },
         follow_redirects=False,
     )
-    assert r.status_code == 400
-    assert "editor role" in r.text
+    assert r.status_code == 303
     alice = auth(org["users"]["alice"]["api_key"])
     assert (await client.get("/v1/agents", headers=alice)).json() == []
 
@@ -369,20 +378,20 @@ async def test_governed_options_are_owner_only(
         "learning": "1",
     }
     await _login(client, "bob@example.com")  # editor
-    page = await _agents_page(client, org["tenant"]["id"])
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
     r = await client.post(
         f"/ui/t/{org['tenant']['id']}/agents",
-        data={"_csrf_token": _csrf(page), **base},
+        data={"_csrf_token": _csrf(page.text), **base},
         follow_redirects=False,
     )
     assert r.status_code == 400
     assert "owner-managed" in r.text
 
     await _login(client, "alice@example.com")  # owner
-    page = await _agents_page(client, org["tenant"]["id"])
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
     r = await client.post(
         f"/ui/t/{org['tenant']['id']}/agents",
-        data={"_csrf_token": _csrf(page), **base},
+        data={"_csrf_token": _csrf(page.text), **base},
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -396,11 +405,11 @@ async def test_create_agent_errors_keep_the_typed_prompt(
     client: AsyncClient, risk_agent: dict
 ) -> None:
     await _login(client, "alice@example.com")
-    page = await _agents_page(client, risk_agent["tenant"]["id"])
+    page = await client.get(f"/ui/t/{risk_agent['tenant']['id']}/agents/new")
     r = await client.post(
         f"/ui/t/{risk_agent['tenant']['id']}/agents",
         data={
-            "_csrf_token": _csrf(page),
+            "_csrf_token": _csrf(page.text),
             "team_id": risk_agent["team"]["id"],
             "name": "risk-analyzer",  # already taken
             "model": "test:default",
@@ -417,9 +426,9 @@ async def test_create_agent_validates_prompt_and_model(
     client: AsyncClient, org: dict, seeded_models: None
 ) -> None:
     await _login(client, "alice@example.com")
-    page = await _agents_page(client, org["tenant"]["id"])
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
     common = {
-        "_csrf_token": _csrf(page),
+        "_csrf_token": _csrf(page.text),
         "team_id": org["team"]["id"],
         "name": "nope",
     }
@@ -440,10 +449,15 @@ async def test_create_agent_validates_prompt_and_model(
 async def test_create_version_from_agent_page(client: AsyncClient, risk_agent: dict) -> None:
     agent_id = risk_agent["agent"]["id"]
     await _login(client, "bob@example.com")  # editor
-    page = await client.get(f"/ui/agents/{agent_id}")
-    assert "New version" in page.text
+    detail = await client.get(f"/ui/agents/{agent_id}")
+    assert f"/ui/agents/{agent_id}/versions/new" in detail.text
+
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert page.status_code == 200
+    assert "Saves as <strong>v2</strong>" in page.text
     # Prefilled from the current version so iterating is an edit, not a retype.
-    assert "Assess business risk for the event in the payload." in page.text
+    textarea = page.text.split('id="nv-prompt"')[1].split("</textarea>")[0]
+    assert "Assess business risk for the event in the payload." in textarea
 
     r = await client.post(
         f"/ui/agents/{agent_id}/versions",
@@ -472,14 +486,17 @@ async def test_create_version_refused_for_viewers(client: AsyncClient, risk_agen
     agent_id = risk_agent["agent"]["id"]
     await _login(client, "carol@example.com")  # viewer
     page = await client.get(f"/ui/agents/{agent_id}")
-    assert "New version" not in page.text
+    assert "/versions/new" not in page.text
+
+    r = await client.get(f"/ui/agents/{agent_id}/versions/new", follow_redirects=False)
+    assert r.status_code == 303
 
     r = await client.post(
         f"/ui/agents/{agent_id}/versions",
         data={"_csrf_token": _csrf(page.text), "model": "test:default", "prompt": "hi"},
+        follow_redirects=False,
     )
-    assert r.status_code == 400
-    assert "editor role" in r.text
+    assert r.status_code == 303
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
     assert len(versions) == 1
@@ -488,8 +505,12 @@ async def test_create_version_refused_for_viewers(client: AsyncClient, risk_agen
 async def test_edit_agent_settings(client: AsyncClient, risk_agent: dict) -> None:
     agent_id = risk_agent["agent"]["id"]
     await _login(client, "bob@example.com")  # editor
-    page = await client.get(f"/ui/agents/{agent_id}")
-    assert "Edit" in page.text
+    detail = await client.get(f"/ui/agents/{agent_id}")
+    assert f"/ui/agents/{agent_id}/settings" in detail.text
+
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    assert page.status_code == 200
+    assert 'value="risk-analyzer"' in page.text  # prefilled from the agent
 
     r = await client.post(
         f"/ui/agents/{agent_id}/settings",
@@ -523,7 +544,7 @@ async def test_edit_clears_spending_limit_and_rejects_bad_input(
     await client.patch(f"/v1/agents/{agent_id}", headers=alice, json={"spending_limit": "9"})
 
     await _login(client, "alice@example.com")
-    page = await client.get(f"/ui/agents/{agent_id}")
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
     token = _csrf(page.text)
 
     r = await client.post(
@@ -561,7 +582,7 @@ async def test_edit_keeps_owner_options_when_an_editor_saves(
     assert r.status_code == 200
 
     await _login(client, "bob@example.com")  # editor
-    page = await client.get(f"/ui/agents/{agent_id}")
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
     # The checkbox is disabled for editors, so the template round-trips the
     # owner's setting in a hidden field. Without it the save would read as
     # flipping memory off and be refused.
@@ -586,7 +607,7 @@ async def test_edit_keeps_owner_options_when_an_editor_saves(
 async def test_editor_cannot_flip_governed_options(client: AsyncClient, risk_agent: dict) -> None:
     agent_id = risk_agent["agent"]["id"]
     await _login(client, "bob@example.com")  # editor
-    page = await client.get(f"/ui/agents/{agent_id}")
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
     r = await client.post(
         f"/ui/agents/{agent_id}/settings",
         data={
@@ -605,34 +626,52 @@ async def test_edit_hidden_and_refused_for_viewers(client: AsyncClient, risk_age
     page = await client.get(f"/ui/agents/{agent_id}")
     assert "/settings" not in page.text
 
+    r = await client.get(f"/ui/agents/{agent_id}/settings", follow_redirects=False)
+    assert r.status_code == 303
+
     r = await client.post(
         f"/ui/agents/{agent_id}/settings",
         data={"_csrf_token": _csrf(page.text), "name": "hijacked", "spending_limit": ""},
+        follow_redirects=False,
     )
-    assert r.status_code == 400 and "editor role" in r.text
+    assert r.status_code == 303
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
     assert agent["name"] == "risk-analyzer"
 
 
-async def test_settings_error_does_not_open_the_version_form(
+async def test_settings_error_keeps_the_typed_input(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "",  # invalid
+            "description": "A description worth keeping",
+            "spending_limit": "",
+        },
+    )
+    assert r.status_code == 400
+    assert "Name is required" in r.text
+    # Re-rendered as the edit page, not the detail page, with input intact.
+    assert f'action="/ui/agents/{agent_id}/settings"' in r.text
+    assert "A description worth keeping" in r.text
+
+
+async def test_form_pages_are_closed_for_archived_agents(
     client: AsyncClient, risk_agent: dict
 ) -> None:
     agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    assert (await client.post(f"/v1/agents/{agent_id}/archive", headers=alice)).status_code == 200
+
     await _login(client, "alice@example.com")
-    page = await client.get(f"/ui/agents/{agent_id}")
-    r = await client.post(
-        f"/ui/agents/{agent_id}/settings",
-        data={"_csrf_token": _csrf(page.text), "name": "", "spending_limit": ""},
-    )
-    assert r.status_code == 400
-    body = r.text
-    settings_form = body.index("/settings")
-    version_form = body.index("/versions")
-    # Exactly one panel is open, and it is the one that failed.
-    assert body.count('<details class="subpanel" open>') == 1
-    assert body.rindex('<details class="subpanel" open>', 0, settings_form) < settings_form
-    assert '<details class="subpanel" open>' not in body[settings_form:version_form]
+    for path in (f"/ui/agents/{agent_id}/settings", f"/ui/agents/{agent_id}/versions/new"):
+        r = await client.get(path, follow_redirects=False)
+        assert r.status_code == 303, path
+        assert r.headers["location"] == f"/ui/agents/{agent_id}"
 
 
 # --- Archiving ---

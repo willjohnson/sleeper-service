@@ -30,71 +30,27 @@
   <div class="meter" style="max-width:320px"><div style="width: {{ [spend / spending_limit * 100, 100] | min }}%"></div></div>
   {% endif %}
 
-  {% if can_edit %}
-  {% set s = form.get('settings') or {} %}
-  {% set cur_limit = ('%.2f'|format(spending_limit)) if spending_limit else '' %}
-  <details class="subpanel" {% if error_form == 'settings' %}open{% endif %}>
-    <summary><strong>Edit</strong> <span class="muted">— name, description, spending limit and options</span></summary>
-    <form method="post" action="/ui/agents/{{ agent.id }}/settings" class="form-grid">
+  {% if can_edit or (can_archive and not agent.archived_at) %}
+  <div class="subpanel">
+    {% if can_edit %}<a class="btn subtle" href="/ui/agents/{{ agent.id }}/settings">Edit settings</a>{% endif %}
+    {% if can_archive and not agent.archived_at %}
+    <form method="post" action="/ui/agents/{{ agent.id }}/archive" style="display:inline">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-
-      <label for="ed-name">Name</label>
-      <input id="ed-name" type="text" name="name" required maxlength="200"
-             value="{{ s.get('name', agent.name) }}">
-
-      <label for="ed-desc">Description</label>
-      <input id="ed-desc" type="text" name="description"
-             value="{{ s.get('description', agent.description) }}">
-
-      <label for="ed-limit">Spending limit</label>
-      <input id="ed-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
-             placeholder="no limit" value="{{ s.get('spending_limit', cur_limit) }}">
-
-      <label for="ed-deleg">Delegation</label>
-      <select id="ed-deleg" name="delegation">
-        {% set cur_deleg = agent.options.get('delegation', 'none') %}
-        {% for value, text in [('none', 'none'), ('team', 'team — may call agents on its own team'), ('tenant', 'tenant — may call any agent in the tenant')] %}
-        <option value="{{ value }}" {% if s.get('delegation', cur_deleg) == value %}selected{% endif %}>{{ text }}</option>
-        {% endfor %}
-      </select>
-
-      <label>Options</label>
-      <div class="inline-fields">
-        {% for field, text in [('memory', 'memory'), ('learning', 'learning'), ('memory_approval', 'approval')] %}
-        <label class="check">
-          <input type="checkbox" name="{{ field }}" value="1"
-                 {% if s.get(field, agent.options.get(field)) %}checked{% endif %}
-                 {% if not can_promote %}disabled{% endif %}> {{ text }}
-        </label>
-        {# Disabled inputs do not submit; round-trip the owner's setting so an
-           editor saving a description does not read as flipping it off. #}
-        {% if not can_promote and agent.options.get(field) %}
-        <input type="hidden" name="{{ field }}" value="1">
-        {% endif %}
-        {% endfor %}
-        {% if not can_promote %}<span class="muted">owner-only</span>{% endif %}
-      </div>
-
-      <div class="form-actions">
-        <button type="submit">Save changes</button>
-        <span class="muted">Editing settings does not create a new version.</span>
-      </div>
+      <button class="subtle">Archive agent</button>
     </form>
-  </details>
-  {% endif %}
-
-  {% if can_archive and not agent.archived_at %}
-  <form method="post" action="/ui/agents/{{ agent.id }}/archive" class="subpanel">
-    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-    <button class="subtle">Archive agent</button>
-    <span class="muted">Retires it from listings and refuses new work. Nothing is deleted, and
-      you can restore it later.</span>
-  </form>
+    <span class="muted">Archiving retires it from listings and refuses new work. Nothing is
+      deleted, and you can restore it later.</span>
+    {% endif %}
+  </div>
   {% endif %}
 </div>
 
 <div class="panel">
-  <h2>Versions</h2>
+  <h2 class="with-action">Versions
+    {% if can_edit %}
+    <a class="btn subtle" href="/ui/agents/{{ agent.id }}/versions/new">New version</a>
+    {% endif %}
+  </h2>
   <table>
     <tr><th>Version</th><th>Model</th><th>Prompt</th><th>Guardrails</th><th>Created</th><th></th></tr>
     {% for v in versions %}
@@ -125,34 +81,6 @@
     {% endfor %}
   </table>
 
-  {% if can_edit %}
-  <details class="subpanel" {% if error_form == 'version' %}open{% endif %}>
-    <summary><strong>New version</strong> <span class="muted">— appends a version; promote it when you are ready</span></summary>
-    <form method="post" action="/ui/agents/{{ agent.id }}/versions" class="form-grid">
-      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-
-      <label for="nv-model">Model</label>
-      <select id="nv-model" name="model" required>
-        {% for m in models %}
-        <option value="{{ m }}" {% if (form.model or current_version_model) == m %}selected{% endif %}>{{ m }}</option>
-        {% endfor %}
-      </select>
-
-      <label for="nv-prompt">Prompt</label>
-      <textarea id="nv-prompt" name="prompt" rows="8" required>{{ form.prompt if form.prompt is defined and form.prompt else current_version_prompt }}</textarea>
-
-      <label for="nv-iters">Guardrails</label>
-      <div class="inline-fields">
-        <input id="nv-iters" type="number" name="max_iterations" min="1" max="100"
-               value="{{ form.max_iterations or current_version_iters }}"> <span class="muted">max iterations</span>
-        <input type="number" name="timeout_s" min="1" max="3600"
-               value="{{ form.timeout_s or current_version_timeout }}"> <span class="muted">second timeout</span>
-      </div>
-
-      <div class="form-actions"><button type="submit">Create version</button></div>
-    </form>
-  </details>
-  {% endif %}
 </div>
 
 {% if agent.options.get('memory') %}

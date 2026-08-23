@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}New agent · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}New agent{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Creates the agent and its first version. The version is promoted straight away, so the
+    agent is runnable as soon as you save.
+  </p>
+  <form method="post" action="/ui/t/{{ tenant.id }}/agents" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="na-team">Team</label>
+    <select id="na-team" name="team_id" required>
+      {% for t in creatable_teams %}
+      <option value="{{ t.id }}" {% if form.team_id == t.id|string %}selected{% endif %}>{{ t.name }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="na-name">Name</label>
+    <input id="na-name" type="text" name="name" required maxlength="200" autofocus
+           placeholder="credit-memo" value="{{ form.name or '' }}">
+
+    <label for="na-desc">Description</label>
+    <input id="na-desc" type="text" name="description"
+           placeholder="What this agent is for" value="{{ form.description or '' }}">
+
+    <label for="na-limit">Spending limit</label>
+    <input id="na-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
+           placeholder="no limit" value="{{ form.spending_limit or '' }}">
+
+    <label for="na-deleg">Delegation</label>
+    <select id="na-deleg" name="delegation">
+      {% for value, text in [('none', 'none'), ('team', 'team — may call agents on its own team'), ('tenant', 'tenant — may call any agent in the tenant')] %}
+      <option value="{{ value }}" {% if (form.delegation or 'none') == value %}selected{% endif %}>{{ text }}</option>
+      {% endfor %}
+    </select>
+
+    {% set governable = creatable_teams | selectattr('can_govern') | list %}
+    {% if governable %}
+    <label>Options</label>
+    <div class="inline-fields">
+      <label class="check"><input type="checkbox" name="memory" value="1" {% if form.memory %}checked{% endif %}> memory</label>
+      <label class="check"><input type="checkbox" name="learning" value="1" {% if form.learning %}checked{% endif %}> learning</label>
+      <label class="check"><input type="checkbox" name="memory_approval" value="1" {% if form.memory_approval %}checked{% endif %}> approval</label>
+      <span class="muted">owner-only, on {{ governable | map(attribute='name') | join(', ') }}</span>
+    </div>
+    {% endif %}
+
+    <h3 class="form-section">First version</h3>
+
+    <label for="na-model">Model</label>
+    <select id="na-model" name="model" required>
+      {% for m in models %}
+      <option value="{{ m }}" {% if form.model == m %}selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="na-prompt">Prompt</label>
+    <textarea id="na-prompt" name="prompt" rows="16" required
+              placeholder="You are a credit analyst. Given a borrower summary, ...">{{ form.prompt or '' }}</textarea>
+
+    <label for="na-iters">Guardrails</label>
+    <div class="inline-fields">
+      <input id="na-iters" type="number" name="max_iterations" min="1" max="100"
+             value="{{ form.max_iterations or 10 }}"> <span class="muted">max iterations</span>
+      <input type="number" name="timeout_s" min="1" max="3600"
+             value="{{ form.timeout_s or 300 }}"> <span class="muted">second timeout</span>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create agent</button>
+      <a class="cancel" href="/ui/t/{{ tenant.id }}/agents">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

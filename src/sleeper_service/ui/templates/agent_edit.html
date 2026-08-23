@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}Edit <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Settings apply to the agent itself. Changing them does not create a new version —
+    to change the prompt or model, <a href="/ui/agents/{{ agent.id }}/versions/new">add a version</a>.
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/settings" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="ed-name">Name</label>
+    <input id="ed-name" type="text" name="name" required maxlength="200" autofocus
+           value="{{ form.get('name', agent.name) }}">
+
+    <label for="ed-desc">Description</label>
+    <input id="ed-desc" type="text" name="description"
+           value="{{ form.get('description', agent.description) }}">
+
+    <label for="ed-limit">Spending limit</label>
+    {% set cur_limit = ('%.2f'|format(agent.spending_limit)) if agent.spending_limit else '' %}
+    <input id="ed-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
+           placeholder="no limit" value="{{ form.get('spending_limit', cur_limit) }}">
+
+    <label for="ed-deleg">Delegation</label>
+    <select id="ed-deleg" name="delegation">
+      {% set cur_deleg = agent.options.get('delegation', 'none') %}
+      {% for value, text in [('none', 'none'), ('team', 'team — may call agents on its own team'), ('tenant', 'tenant — may call any agent in the tenant')] %}
+      <option value="{{ value }}" {% if form.get('delegation', cur_deleg) == value %}selected{% endif %}>{{ text }}</option>
+      {% endfor %}
+    </select>
+
+    <label>Options</label>
+    <div class="inline-fields">
+      {% for field, text in [('memory', 'memory'), ('learning', 'learning'), ('memory_approval', 'approval')] %}
+      <label class="check">
+        <input type="checkbox" name="{{ field }}" value="1"
+               {% if form.get(field, agent.options.get(field)) %}checked{% endif %}
+               {% if not can_govern %}disabled{% endif %}> {{ text }}
+      </label>
+      {# Disabled inputs do not submit; round-trip the owner's setting so an
+         editor saving a description does not read as flipping it off. #}
+      {% if not can_govern and agent.options.get(field) %}
+      <input type="hidden" name="{{ field }}" value="1">
+      {% endif %}
+      {% endfor %}
+      {% if not can_govern %}<span class="muted">owner-only</span>{% endif %}
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Save changes</button>
+      <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
