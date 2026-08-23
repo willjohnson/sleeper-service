@@ -1,5 +1,6 @@
 """Admin UI: session auth, page rendering, owner-gated actions."""
 
+import html
 import json
 import re
 import uuid
@@ -247,6 +248,53 @@ async def test_eval_case_form_rejects_bad_input(client: AsyncClient, risk_agent:
     r = await post(check_op=["is_valid"], check_path=[""], check_value=[""])
     assert r.status_code == 400
     assert "already exists" in r.text
+
+
+async def test_eval_run_detail_page(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    # TestModel answers risk_level=low, so the first case passes and the second
+    # fails — a mixed run is what the detail page has to explain.
+    for case in (
+        {
+            "name": "01-low-risk",
+            "input": {"prompt": "calm markets today"},
+            "checks": [{"op": "equals", "path": "risk_level", "value": "low"}],
+        },
+        {
+            "name": "02-expects-high",
+            "input": {"prompt": "storm in STL"},
+            "checks": [{"op": "equals", "path": "risk_level", "value": "high"}],
+        },
+    ):
+        r = await client.post(f"/v1/agents/{agent_id}/eval-cases", headers=bob, json=case)
+        assert r.status_code == 201
+    run_id = (await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={})).json()[
+        "id"
+    ]
+    await run_eval(uuid.UUID(run_id))
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert f'/ui/eval-runs/{run_id}"' in page.text  # the runs table links out
+
+    r = await client.get(f"/ui/eval-runs/{run_id}")
+    assert r.status_code == 200
+    # the labels quote JSON values, so read the page as rendered, not as markup
+    page = html.unescape(r.text)
+    assert "50%" in page
+    assert "1 of 2 case(s) passed" in page
+    assert "01-low-risk" in page and "02-expects-high" in page
+    # the check that failed, spelled out, with the grader's reason
+    assert 'risk_level equals "high"' in page
+    assert "expected 'high'" in page
+    # and each case links to the eval job it graded
+    assert "/ui/jobs/" in page
+
+    # outsiders cannot read another team's run
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/eval-runs/{run_id}", follow_redirects=False)
+    assert r.status_code == 303
 
 
 async def test_eval_actions_are_editor_only(client: AsyncClient, risk_agent: dict) -> None:

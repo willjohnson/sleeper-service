@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Eval run · {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}Eval run <span class="mono" style="font-size:14px">{{ run.id }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Result</h2>
+  <table class="members">
+    <tr>
+      <td class="muted">Agent</td>
+      <td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a>
+        {% if version_no %} · v{{ version_no }}{% endif %}
+        {% if memory_version %} · <span class="badge pending">memory v{{ memory_version.version_no }} gate</span>{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="muted">Status</td>
+      <td><span class="badge {{ run.status }}">{{ run.status }}</span>
+        {% if pass_rate is not none %}
+        <strong style="margin-left:8px">{{ '%.0f%%'|format(pass_rate * 100) }}</strong>
+        <span class="muted">· {{ passed_cases }} of {{ cases|length }} case(s) passed</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="muted">Timing</td>
+      <td class="muted">created {{ run.created_at.strftime('%Y-%m-%d %H:%M') }}
+        {% if run.finished_at %} · finished {{ run.finished_at.strftime('%H:%M') }}{% endif %}</td>
+    </tr>
+  </table>
+</div>
+
+{% for case in cases %}
+<div class="panel">
+  <h2 class="with-action">{{ case.case_name }}
+    <span class="actions">
+      <a class="mono" href="/ui/jobs/{{ case.job_id }}">job {{ case.job_id[:8] }}</a>
+      <span class="badge {{ case.job_status }}">{{ case.job_status }}</span>
+      <span class="badge {{ 'succeeded' if case.passed else 'failed' }}">
+        {{ 'passed' if case.passed else 'failed' }}</span>
+    </span>
+  </h2>
+  <table>
+    <tr><th>Check</th><th class="nowrap">Result</th><th>Detail</th></tr>
+    {% for c in case.checks %}
+    <tr>
+      <td>
+        <span class="mono">{{ c.label }}</span>
+        {% if c.code %}<pre style="white-space:pre-wrap; margin-top:6px">{{ c.code }}</pre>{% endif %}
+      </td>
+      <td><span class="badge {{ 'succeeded' if c.passed else 'failed' }}">
+        {{ 'pass' if c.passed else 'fail' }}</span></td>
+      <td class="muted">{{ c.detail or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% else %}
+<div class="panel">
+  <div class="muted">
+    {% if run.status == 'running' %}This run is still going — no graded cases yet.
+    {% else %}No case results were recorded for this run.{% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

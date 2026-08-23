@@ -204,7 +204,7 @@
       <tr><th>Run</th><th>Version</th><th>Status</th><th>Pass rate</th><th>When</th></tr>
       {% for r in eval_runs %}
       <tr>
-        <td class="mono">{{ r.id|string|truncate(8, true, '') }}{% if r.memory_version_id %} <span class="badge pending">memory gate</span>{% endif %}</td>
+        <td><a class="mono" href="/ui/eval-runs/{{ r.id }}">{{ r.id|string|truncate(8, true, '') }}</a>{% if r.memory_version_id %} <span class="badge pending">memory gate</span>{% endif %}</td>
         <td>v{{ r.version_no }}</td>
         <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
         <td>{% if r.pass_rate is not none %}<strong>{{ '%.0f%%'|format(r.pass_rate * 100) }}</strong>{% else %}—{% endif %}</td>

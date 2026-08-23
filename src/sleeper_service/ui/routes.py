@@ -1776,6 +1776,67 @@ async def ui_start_eval_run(
     return back
 
 
+def _check_label(check: dict) -> str:
+    """One line naming what a check asserts, for the run detail table. A code
+    grader has no path or value to name — its source is shown instead."""
+    op = check.get("op", "?")
+    if op == "code":
+        return f"code grader ({check.get('runner') or 'monty'})"
+    path = check.get("path")
+    if path is None:
+        return op
+    return f"{path} {op} {json.dumps(check.get('value'))}"
+
+
+@router.get("/eval-runs/{run_id}", response_class=HTMLResponse)
+async def eval_run_detail(
+    request: Request,
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    run = await db.get(EvalRun, run_id)
+    if run is None:
+        return RedirectResponse("/ui", status_code=303)
+    agent = await db.get(Agent, run.agent_id)
+    if await _team_role(db, p, agent.team_id) is None:
+        return RedirectResponse("/ui", status_code=303)
+    version = await db.get(AgentVersion, run.agent_version_id)
+    memory_version = (
+        await db.get(MemoryVersion, run.memory_version_id) if run.memory_version_id else None
+    )
+
+    # results are a snapshot taken when the run graded: a case edited or
+    # deleted since does not change what this run saw.
+    def _checks(result: dict) -> list[dict]:
+        out = []
+        for c in result.get("checks", []):
+            check = c.get("check") or {}
+            out.append({**c, "label": _check_label(check), "code": check.get("code")})
+        return out
+
+    cases = [{**r, "checks": _checks(r)} for r in run.results or []]
+
+    return templates.TemplateResponse(
+        request,
+        "eval_run.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            run=run,
+            version_no=version.version_no if version else None,
+            memory_version=memory_version,
+            pass_rate=float(run.pass_rate) if run.pass_rate is not None else None,
+            cases=cases,
+            passed_cases=sum(1 for c in cases if c.get("passed")),
+        ),
+    )
+
+
 # --- Jobs ---
 
 
