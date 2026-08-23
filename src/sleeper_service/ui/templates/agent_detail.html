@@ -106,7 +106,7 @@
         {% if can_promote %}
         <div class="actions">
           <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/approve"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Approve</button></form>
-          <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/reject"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle danger" style="color:#fff">Reject</button></form>
+          <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/reject"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle danger">Reject</button></form>
         </div>
         {% endif %}
       </td>

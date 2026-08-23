@@ -624,6 +624,7 @@ async def agents_page(
             )
         team_views.append(
             {
+                "id": team.id,
                 "name": team.name,
                 "is_org_team": team.is_org_team,
                 "role": role.value if role else None,
@@ -668,6 +669,199 @@ async def _tenant_users(db: AsyncSession, tenant_id: uuid.UUID, me: User) -> lis
     if not any(u.id == me.id for u in users):
         users.insert(0, me)
     return users
+
+
+async def _render_team(
+    request: Request,
+    team_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+):
+    team = await db.get(Team, team_id)
+    if team is None:
+        return RedirectResponse("/ui", status_code=303)
+    role = await _team_role(db, p, team.id)
+    if role is None:
+        return RedirectResponse("/ui", status_code=303)
+
+    rows = (
+        await db.execute(
+            select(TeamMember, User)
+            .join(User, User.id == TeamMember.user_id)
+            .where(TeamMember.team_id == team.id)
+            .order_by(User.email)
+        )
+    ).all()
+    owner_count = sum(1 for m, _ in rows if m.role == Role.OWNER)
+    members = [
+        {
+            "user_id": u.id,
+            "email": u.email,
+            "role": m.role,
+            "is_me": u.id == p.user.id,
+            # Mirrors _forbid_removing_last_owner: the UI must not offer what
+            # the API would refuse.
+            "is_last_owner": m.role == Role.OWNER and owner_count <= 1,
+        }
+        for m, u in rows
+    ]
+    member_ids = {m["user_id"] for m in members}
+    suggestions = [
+        u.email for u in await _tenant_users(db, team.tenant_id, p.user) if u.id not in member_ids
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "team_detail.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, team.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            team=team,
+            members=members,
+            suggestions=suggestions,
+            can_manage=role == Role.OWNER,
+            roles=[r.value for r in Role],
+            error=error,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/teams/{team_id}", response_class=HTMLResponse)
+async def team_page(
+    request: Request,
+    team_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_team(request, team_id, db, p)
+
+
+async def _team_owner_or_redirect(
+    db: AsyncSession, p: UserPrincipal, team_id: uuid.UUID
+) -> tuple[Team | None, RedirectResponse | None]:
+    team = await db.get(Team, team_id)
+    if team is None:
+        return None, RedirectResponse("/ui", status_code=303)
+    if await _team_role(db, p, team.id) != Role.OWNER:
+        return None, RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+    return team, None
+
+
+def _valid_role(raw: str) -> Role | None:
+    try:
+        return Role(raw)
+    except ValueError:
+        return None
+
+
+@router.post("/teams/{team_id}/members")
+async def ui_add_member(
+    request: Request,
+    team_id: uuid.UUID,
+    email: str = Form(""),
+    role: str = Form(Role.VIEWER.value),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+
+    async def fail(message: str):
+        return await _render_team(request, team_id, db, p, error=message, status_code=400)
+
+    new_role = _valid_role(role)
+    if new_role is None:
+        return await fail("Pick a role.")
+    email = email.strip().lower()
+    if not email:
+        return await fail("Email is required.")
+    user = await db.scalar(select(User).where(func.lower(User.email) == email))
+    if user is None:
+        return await fail(
+            f"No user with the email {email!r}. Users are created by an instance "
+            "superuser before they can join a team."
+        )
+
+    member = await db.get(TeamMember, (user.id, team.id))
+    if member is None:
+        db.add(TeamMember(user_id=user.id, team_id=team.id, role=new_role))
+    else:
+        member.role = new_role
+    await db.commit()
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+@router.post("/teams/{team_id}/members/{user_id}/role")
+async def ui_set_member_role(
+    request: Request,
+    team_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+
+    async def fail(message: str):
+        return await _render_team(request, team_id, db, p, error=message, status_code=400)
+
+    new_role = _valid_role(role)
+    member = await db.get(TeamMember, (user_id, team_id))
+    if new_role is None or member is None:
+        return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+    if member.role == Role.OWNER and new_role != Role.OWNER and await _is_last_owner(db, team_id):
+        return await fail("Every team must keep at least one owner.")
+    member.role = new_role
+    await db.commit()
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+@router.post("/teams/{team_id}/members/{user_id}/remove")
+async def ui_remove_member(
+    request: Request,
+    team_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+
+    member = await db.get(TeamMember, (user_id, team_id))
+    if member is None:
+        return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+    if member.role == Role.OWNER and await _is_last_owner(db, team_id):
+        return await _render_team(
+            request,
+            team_id,
+            db,
+            p,
+            error="Every team must keep at least one owner.",
+            status_code=400,
+        )
+    await db.delete(member)
+    await db.commit()
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+async def _is_last_owner(db: AsyncSession, team_id: uuid.UUID) -> bool:
+    owners = await db.scalar(
+        select(func.count())
+        .select_from(TeamMember)
+        .where(TeamMember.team_id == team_id, TeamMember.role == Role.OWNER)
+    )
+    return owners <= 1
 
 
 async def _render_new_team(

@@ -8,7 +8,7 @@
 {% block content %}
 {% for team in teams %}
 <div class="panel">
-  <h2>{{ team.name }}{% if team.is_org_team %} <span class="muted">(org-wide)</span>{% endif %}
+  <h2><a href="/ui/teams/{{ team.id }}">{{ team.name }}</a>{% if team.is_org_team %} <span class="muted">(org-wide)</span>{% endif %}
       <span class="muted" style="font-weight:400"> · your role: {{ team.role or '—' }}</span></h2>
   {% if team.agents %}
   <table>

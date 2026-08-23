@@ -876,3 +876,134 @@ async def test_create_team_is_tenant_admin_only(client: AsyncClient, org: dict) 
         )
     ).json()
     assert "sneaky" not in [t["name"] for t in teams]
+
+
+# --- Team membership ---
+
+
+async def test_team_page_lists_members(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "carol@example.com")  # viewer
+    listing = await _agents_page(client, org["tenant"]["id"])
+    assert f"/ui/teams/{team_id}" in listing
+
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert page.status_code == 200
+    for email in ("alice@example.com", "bob@example.com", "carol@example.com"):
+        assert email in page.text
+    # A viewer sees the roster but is offered no controls.
+    assert "Add a member" not in page.text
+    assert "/remove" not in page.text
+
+
+async def test_owner_adds_member_by_email(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    alice = auth(org["users"]["alice"]["api_key"])
+    await _login(client, "alice@example.com")  # owner
+    page = await client.get(f"/ui/teams/{team_id}")
+    # Tenant colleagues are suggested; dave is in no team here, so he is not.
+    assert "Add a member" in page.text
+    assert "dave@example.com" not in page.text
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "email": "Dave@Example.com",  # matched case-insensitively
+            "role": "editor",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    by_id = {str(m["user_id"]): m["role"] for m in members}
+    assert by_id[org["users"]["dave"]["id"]] == "editor"
+
+
+async def test_adding_an_unknown_email_is_refused(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/teams/{team_id}")
+    r = await client.post(
+        f"/ui/teams/{team_id}/members",
+        data={"_csrf_token": _csrf(page.text), "email": "nobody@example.com", "role": "viewer"},
+    )
+    assert r.status_code == 400
+    assert "No user with the email" in r.text
+
+
+async def test_owner_changes_and_removes_members(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    alice = auth(org["users"]["alice"]["api_key"])
+    bob_id = org["users"]["bob"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/teams/{team_id}")
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members/{bob_id}/role",
+        data={"_csrf_token": token, "role": "owner"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert {str(m["user_id"]): m["role"] for m in members}[bob_id] == "owner"
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members/{org['users']['carol']['id']}/remove",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert org["users"]["carol"]["id"] not in [str(m["user_id"]) for m in members]
+
+
+async def test_the_last_owner_cannot_be_demoted_or_removed(client: AsyncClient, org: dict) -> None:
+    """Mirrors _forbid_removing_last_owner: the UI must not offer it either."""
+    team_id = org["team"]["id"]
+    alice_id = org["users"]["alice"]["id"]
+    await _login(client, "alice@example.com")  # the only owner
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert "last owner" in page.text
+    assert f"/members/{alice_id}/remove" not in page.text
+    assert f"/members/{alice_id}/role" not in page.text
+    token = _csrf(page.text)
+
+    for path in (f"/members/{alice_id}/role", f"/members/{alice_id}/remove"):
+        r = await client.post(
+            f"/ui/teams/{team_id}{path}", data={"_csrf_token": token, "role": "viewer"}
+        )
+        assert r.status_code == 400, path
+        assert "at least one owner" in r.text
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert {str(m["user_id"]): m["role"] for m in members}[alice_id] == "owner"
+
+
+async def test_member_management_is_team_owner_only(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert "Add a member" not in page.text
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members",
+        data={"_csrf_token": _csrf(page.text), "email": "dave@example.com", "role": "owner"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/teams/{team_id}"
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert org["users"]["dave"]["id"] not in [str(m["user_id"]) for m in members]
+
+
+async def test_outsider_cannot_see_a_team(client: AsyncClient, org: dict) -> None:
+    await _login(client, "dave@example.com")  # no membership anywhere
+    r = await client.get(f"/ui/teams/{org['team']['id']}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui"
