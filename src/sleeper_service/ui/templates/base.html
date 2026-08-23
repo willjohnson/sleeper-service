@@ -31,6 +31,7 @@
       </form>
       {% endif %}
     </div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
 </div>

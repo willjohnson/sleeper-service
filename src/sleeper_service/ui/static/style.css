@@ -31,10 +31,13 @@ a:hover { text-decoration: underline; }
 .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .topbar h1 { margin: 0; font-size: 20px; }
 .topbar form { margin: 0; }
-select, input[type=text], input[type=email], input[type=password] {
+select, textarea,
+input[type=text], input[type=email], input[type=password], input[type=number] {
   padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
   font: inherit;
 }
+textarea { width: 100%; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+input[type=number] { width: 84px; }
 button, .btn {
   padding: 7px 14px; border: 0; border-radius: 8px; background: var(--accent);
   color: var(--accent-ink); font: inherit; cursor: pointer; display: inline-block;
@@ -98,3 +101,18 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .meter > div { background: var(--accent); height: 100%; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
+
+/* Create forms (new agent, new version) */
+details.panel > summary, details.subpanel > summary { cursor: pointer; font-size: 15px; }
+details.subpanel {
+  border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px;
+}
+.form-grid {
+  display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 10px 14px;
+  align-items: start; margin-top: 14px; max-width: 720px;
+}
+.form-grid > label { color: var(--muted); font-size: 12.5px; padding-top: 8px; }
+.inline-fields { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.inline-fields label.check {
+  display: inline-flex; align-items: center; gap: 5px; color: var(--ink); padding: 0;
+}

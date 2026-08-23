@@ -17,6 +17,7 @@ import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -26,6 +27,7 @@ from markupsafe import escape
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sleeper_service.api.v1.agents import GOVERNED_OPTION_KEYS
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.auth.rbac import visible_team_ids
@@ -204,6 +206,57 @@ async def _team_role(db: AsyncSession, p: UserPrincipal, team_id: uuid.UUID) -> 
     if p.is_superuser:
         return Role.OWNER
     return p.roles.get(team_id)
+
+
+async def _model_strings(db: AsyncSession) -> list[str]:
+    return list(await db.scalars(select(Model.model_string).order_by(Model.model_string)))
+
+
+# Bounds mirror api.v1.schemas.VersionCreate — the UI must not accept what the
+# API would reject.
+def _form_int(raw: str, default: int, lo: int, hi: int, label: str) -> tuple[int, str | None]:
+    try:
+        value = int(raw)
+    except ValueError:
+        return default, f"{label} must be a whole number."
+    if not lo <= value <= hi:
+        return default, f"{label} must be between {lo} and {hi}."
+    return value, None
+
+
+async def _new_version(
+    db: AsyncSession,
+    agent: Agent,
+    p: UserPrincipal,
+    *,
+    prompt: str,
+    model: Model,
+    max_iterations: int,
+    timeout_s: int,
+) -> AgentVersion:
+    """Append a version, auto-promoting the first one so a freshly created
+    agent is immediately runnable (same rule as POST /v1/agents/{id}/versions)."""
+    next_no = (
+        await db.scalar(
+            select(func.coalesce(func.max(AgentVersion.version_no), 0)).where(
+                AgentVersion.agent_id == agent.id
+            )
+        )
+    ) + 1
+    version = AgentVersion(
+        agent_id=agent.id,
+        version_no=next_no,
+        prompt=prompt,
+        model_id=model.id,
+        max_iterations=max_iterations,
+        timeout_s=timeout_s,
+        created_by=p.user.id,
+    )
+    db.add(version)
+    await db.flush()
+    if agent.current_version_id is None:
+        agent.current_version_id = version.id
+    return version
 
 
 # --- Auth ---
@@ -458,13 +511,18 @@ async def dashboard(
 # --- Agents ---
 
 
-@router.get("/t/{tenant_id}/agents", response_class=HTMLResponse)
-async def agents_page(
+async def _render_agents_page(
     request: Request,
     tenant_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    p: UserPrincipal = Depends(ui_user),
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
 ):
+    """Shared by the GET page and by a failed create, which re-renders here so
+    the operator gets the error next to the prompt they typed."""
     tenant = await _tenant_or_home(db, p, tenant_id)
     if isinstance(tenant, RedirectResponse):
         return tenant
@@ -479,10 +537,15 @@ async def agents_page(
         )
     )
     team_views = []
+    creatable_teams = []
     for team in teams:
         role = await _team_role(db, p, team.id)
         if role is None:
             continue
+        if role in (Role.OWNER, Role.EDITOR):
+            creatable_teams.append(
+                {"id": team.id, "name": team.name, "can_govern": role == Role.OWNER}
+            )
         agents = list(
             await db.scalars(select(Agent).where(Agent.team_id == team.id).order_by(Agent.name))
         )
@@ -520,16 +583,168 @@ async def agents_page(
     return templates.TemplateResponse(
         request,
         "agents.html",
-        _ctx(request, p, tenant=tenant, tenants=tenants, section="agents", teams=team_views),
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=tenants,
+            section="agents",
+            teams=team_views,
+            creatable_teams=creatable_teams,
+            models=await _model_strings(db),
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
     )
 
 
-@router.get("/agents/{agent_id}", response_class=HTMLResponse)
-async def agent_detail(
+@router.get("/t/{tenant_id}/agents", response_class=HTMLResponse)
+async def agents_page(
     request: Request,
-    agent_id: uuid.UUID,
+    tenant_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_agents_page(request, tenant_id, db, p)
+
+
+@router.post("/t/{tenant_id}/agents")
+async def ui_create_agent(
+    request: Request,
+    tenant_id: uuid.UUID,
+    team_id: str = Form(""),
+    name: str = Form(""),
+    model: str = Form(""),
+    prompt: str = Form(""),
+    description: str = Form(""),
+    spending_limit: str = Form(""),
+    max_iterations: str = Form("10"),
+    timeout_s: str = Form("300"),
+    delegation: str = Form("none"),
+    memory: bool = Form(False),
+    learning: bool = Form(False),
+    memory_approval: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    """Create an agent and its first version in one step.
+
+    The API splits these across two calls, but an agent with no version cannot
+    run a job, so the UI only ever produces runnable agents.
+    """
+    form = {
+        "team_id": team_id,
+        "name": name,
+        "model": model,
+        "prompt": prompt,
+        "description": description,
+        "spending_limit": spending_limit,
+        "max_iterations": max_iterations,
+        "timeout_s": timeout_s,
+        "delegation": delegation,
+        "memory": memory,
+        "learning": learning,
+        "memory_approval": memory_approval,
+    }
+
+    async def fail(message: str):
+        return await _render_agents_page(
+            request, tenant_id, db, p, error=message, form=form, status_code=400
+        )
+
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+
+    try:
+        team = await db.get(Team, uuid.UUID(team_id))
+    except ValueError:
+        team = None
+    if team is None or team.tenant_id != tenant.id:
+        return await fail("Pick a team to own this agent.")
+    role = await _team_role(db, p, team.id)
+    if role not in (Role.OWNER, Role.EDITOR):
+        return await fail(f"You need the editor role on {team.name} to create an agent there.")
+
+    options: dict = {}
+    if delegation in ("team", "tenant"):
+        options["delegation"] = delegation
+    for key, value in (
+        ("memory", memory),
+        ("learning", learning),
+        ("memory_approval", memory_approval),
+    ):
+        if value:
+            options[key] = True
+    if options.keys() & set(GOVERNED_OPTION_KEYS) and role != Role.OWNER:
+        return await fail(
+            "Memory, learning and approval are owner-managed — ask an owner of "
+            f"{team.name}, or create the agent without them."
+        )
+
+    name = name.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    if await db.scalar(select(Agent).where(Agent.tenant_id == tenant.id, Agent.name == name)):
+        return await fail(f"An agent named {name!r} already exists in this tenant.")
+
+    limit = None
+    if spending_limit.strip():
+        try:
+            limit = Decimal(spending_limit.strip())
+        except InvalidOperation:
+            return await fail("Spending limit must be a number, or blank for no limit.")
+        if limit <= 0:
+            return await fail("Spending limit must be greater than zero.")
+
+    prompt = prompt.strip()
+    if not prompt:
+        return await fail("The first version needs a prompt.")
+    iterations, err = _form_int(max_iterations, 10, 1, 100, "Max iterations")
+    if err:
+        return await fail(err)
+    timeout, err = _form_int(timeout_s, 300, 1, 3600, "Timeout")
+    if err:
+        return await fail(err)
+    model_row = await db.scalar(select(Model).where(Model.model_string == model))
+    if model_row is None:
+        return await fail(f"Unknown model {model!r} — register it in the models registry first.")
+
+    agent = Agent(
+        tenant_id=tenant.id,
+        team_id=team.id,
+        name=name,
+        description=description.strip(),
+        spending_limit=limit,
+        options=options,
+    )
+    db.add(agent)
+    await db.flush()
+    await _new_version(
+        db,
+        agent,
+        p,
+        prompt=prompt,
+        model=model_row,
+        max_iterations=iterations,
+        timeout_s=timeout,
+    )
+    await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent.id}", status_code=303)
+
+
+async def _render_agent_detail(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
 ):
     agent = await db.get(Agent, agent_id)
     if agent is None:
@@ -573,6 +788,10 @@ async def agent_detail(
         }
         for v, model_string in versions_rows
     ]
+
+    # The new-version form opens prefilled from the current version, so
+    # iterating on a prompt is an edit rather than a retype.
+    current = next((v for v in versions if v["id"] == agent.current_version_id), None)
 
     current_memory = await latest_memory(db, agent.id)
     pending_rows = list(
@@ -656,8 +875,85 @@ async def agent_detail(
             eval_case_count=eval_case_count,
             recent_jobs=recent_jobs,
             can_promote=role == Role.OWNER,
+            can_edit=role in (Role.OWNER, Role.EDITOR),
+            models=await _model_strings(db),
+            current_version_model=(current or {}).get("model_string", "").removeprefix("?"),
+            current_version_prompt=(current or {}).get("prompt", ""),
+            current_version_iters=(current or {}).get("max_iterations", 10),
+            current_version_timeout=(current or {}).get("timeout_s", 300),
+            error=error,
+            form=form or {},
         ),
+        status_code=status_code,
     )
+
+
+@router.get("/agents/{agent_id}", response_class=HTMLResponse)
+async def agent_detail(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_agent_detail(request, agent_id, db, p)
+
+
+@router.post("/agents/{agent_id}/versions")
+async def ui_create_version(
+    request: Request,
+    agent_id: uuid.UUID,
+    model: str = Form(""),
+    prompt: str = Form(""),
+    max_iterations: str = Form("10"),
+    timeout_s: str = Form("300"),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {
+        "model": model,
+        "prompt": prompt,
+        "max_iterations": max_iterations,
+        "timeout_s": timeout_s,
+    }
+
+    async def fail(message: str):
+        return await _render_agent_detail(
+            request, agent_id, db, p, error=message, form=form, status_code=400
+        )
+
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return RedirectResponse("/ui", status_code=303)
+    role = await _team_role(db, p, agent.team_id)
+    if role is None:
+        return RedirectResponse("/ui", status_code=303)
+    if role not in (Role.OWNER, Role.EDITOR):
+        return await fail("You need the editor role on this team to add a version.")
+
+    prompt = prompt.strip()
+    if not prompt:
+        return await fail("Prompt is required.")
+    iterations, err = _form_int(max_iterations, 10, 1, 100, "Max iterations")
+    if err:
+        return await fail(err)
+    timeout, err = _form_int(timeout_s, 300, 1, 3600, "Timeout")
+    if err:
+        return await fail(err)
+    model_row = await db.scalar(select(Model).where(Model.model_string == model))
+    if model_row is None:
+        return await fail(f"Unknown model {model!r} — register it in the models registry first.")
+
+    await _new_version(
+        db,
+        agent,
+        p,
+        prompt=prompt,
+        model=model_row,
+        max_iterations=iterations,
+        timeout_s=timeout,
+    )
+    await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
 
 # --- Jobs ---

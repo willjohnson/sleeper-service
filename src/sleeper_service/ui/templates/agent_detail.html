@@ -48,6 +48,36 @@
     </tr>
     {% endfor %}
   </table>
+
+  {% if can_edit %}
+  <details class="subpanel" {% if error %}open{% endif %}>
+    <summary><strong>New version</strong> <span class="muted">— appends a version; promote it when you are ready</span></summary>
+    <form method="post" action="/ui/agents/{{ agent.id }}/versions" class="form-grid">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+      <label for="nv-model">Model</label>
+      <select id="nv-model" name="model" required>
+        {% for m in models %}
+        <option value="{{ m }}" {% if (form.model or current_version_model) == m %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+
+      <label for="nv-prompt">Prompt</label>
+      <textarea id="nv-prompt" name="prompt" rows="8" required>{{ form.prompt if form.prompt is defined and form.prompt else current_version_prompt }}</textarea>
+
+      <label for="nv-iters">Guardrails</label>
+      <div class="inline-fields">
+        <input id="nv-iters" type="number" name="max_iterations" min="1" max="100"
+               value="{{ form.max_iterations or current_version_iters }}"> <span class="muted">max iterations</span>
+        <input type="number" name="timeout_s" min="1" max="3600"
+               value="{{ form.timeout_s or current_version_timeout }}"> <span class="muted">second timeout</span>
+      </div>
+
+      <div></div>
+      <div><button type="submit">Create version</button></div>
+    </form>
+  </details>
+  {% endif %}
 </div>
 
 {% if agent.options.get('memory') %}

@@ -283,3 +283,203 @@ async def test_login_rate_limit_is_per_client_not_per_proxy(
         headers={"X-Forwarded-For": "198.51.100.4"},
     )
     assert r.status_code == 401, "one address must not lock the account for others"
+
+
+# --- Creating agents and versions from the UI ---
+
+
+async def _agents_page(client: AsyncClient, tenant_id: str) -> str:
+    r = await client.get(f"/ui/t/{tenant_id}/agents")
+    assert r.status_code == 200
+    return r.text
+
+
+async def test_create_agent_makes_a_runnable_agent(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    await _login(client, "alice@example.com")
+    page = await _agents_page(client, org["tenant"]["id"])
+    assert "New agent" in page
+
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={
+            "_csrf_token": _csrf(page),
+            "team_id": org["team"]["id"],
+            "name": "credit-memo",
+            "description": "Draft credit memos",
+            "spending_limit": "12.50",
+            "model": "test:default",
+            "prompt": "You are a credit analyst.",
+            "max_iterations": "7",
+            "timeout_s": "120",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent_id = r.headers["location"].rsplit("/", 1)[-1]
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["name"] == "credit-memo"
+    assert agent["spending_limit"] == "12.5000"
+    # The first version exists and was auto-promoted, so the agent can run.
+    assert agent["current_version_id"] is not None
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    assert len(versions) == 1
+    assert versions[0]["version_no"] == 1
+    assert versions[0]["prompt"] == "You are a credit analyst."
+    assert versions[0]["max_iterations"] == 7
+    assert versions[0]["timeout_s"] == 120
+    assert versions[0]["id"] == agent["current_version_id"]
+
+
+async def test_create_agent_hidden_and_refused_for_viewers(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    await _login(client, "carol@example.com")  # viewer
+    page = await _agents_page(client, org["tenant"]["id"])
+    assert "New agent" not in page
+
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={
+            "_csrf_token": _csrf(page),
+            "team_id": org["team"]["id"],
+            "name": "sneaky",
+            "model": "test:default",
+            "prompt": "hello",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "editor role" in r.text
+    alice = auth(org["users"]["alice"]["api_key"])
+    assert (await client.get("/v1/agents", headers=alice)).json() == []
+
+
+async def test_governed_options_are_owner_only(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    base = {
+        "team_id": org["team"]["id"],
+        "name": "learner",
+        "model": "test:default",
+        "prompt": "hello",
+        "learning": "1",
+    }
+    await _login(client, "bob@example.com")  # editor
+    page = await _agents_page(client, org["tenant"]["id"])
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={"_csrf_token": _csrf(page), **base},
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "owner-managed" in r.text
+
+    await _login(client, "alice@example.com")  # owner
+    page = await _agents_page(client, org["tenant"]["id"])
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={"_csrf_token": _csrf(page), **base},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent_id = r.headers["location"].rsplit("/", 1)[-1]
+    alice = auth(org["users"]["alice"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["options"] == {"learning": True}
+
+
+async def test_create_agent_errors_keep_the_typed_prompt(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    await _login(client, "alice@example.com")
+    page = await _agents_page(client, risk_agent["tenant"]["id"])
+    r = await client.post(
+        f"/ui/t/{risk_agent['tenant']['id']}/agents",
+        data={
+            "_csrf_token": _csrf(page),
+            "team_id": risk_agent["team"]["id"],
+            "name": "risk-analyzer",  # already taken
+            "model": "test:default",
+            "prompt": "A prompt that took a while to write.",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "already exists" in r.text
+    assert "A prompt that took a while to write." in r.text
+
+
+async def test_create_agent_validates_prompt_and_model(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    await _login(client, "alice@example.com")
+    page = await _agents_page(client, org["tenant"]["id"])
+    common = {
+        "_csrf_token": _csrf(page),
+        "team_id": org["team"]["id"],
+        "name": "nope",
+    }
+    url = f"/ui/t/{org['tenant']['id']}/agents"
+
+    r = await client.post(url, data={**common, "model": "test:default", "prompt": "   "})
+    assert r.status_code == 400 and "needs a prompt" in r.text
+
+    r = await client.post(url, data={**common, "model": "nonesuch:v1", "prompt": "hi"})
+    assert r.status_code == 400 and "Unknown model" in r.text
+
+    r = await client.post(
+        url, data={**common, "model": "test:default", "prompt": "hi", "max_iterations": "999"}
+    )
+    assert r.status_code == 400 and "between 1 and 100" in r.text
+
+
+async def test_create_version_from_agent_page(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "New version" in page.text
+    # Prefilled from the current version so iterating is an edit, not a retype.
+    assert "Assess business risk for the event in the payload." in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "model": "anthropic:claude-sonnet-5",
+            "prompt": "Assess business risk, and cite the payload fields you used.",
+            "max_iterations": "12",
+            "timeout_s": "90",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert [v["version_no"] for v in versions] == [1, 2]
+    assert versions[1]["max_iterations"] == 12
+    # A later version does not auto-promote — that stays an owner action.
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["current_version_id"] == versions[0]["id"]
+
+
+async def test_create_version_refused_for_viewers(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "New version" not in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={"_csrf_token": _csrf(page.text), "model": "test:default", "prompt": "hi"},
+    )
+    assert r.status_code == 400
+    assert "editor role" in r.text
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert len(versions) == 1
