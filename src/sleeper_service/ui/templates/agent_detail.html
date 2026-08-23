@@ -173,14 +173,10 @@
     <tr><th>Case</th><th>Prompt</th><th>Checks</th><th class="col-actions"></th></tr>
     {% for c in eval_cases %}
     <tr>
-      <td><strong>{{ c.name }}</strong></td>
-      <td class="muted">{{ c.input.get('prompt', '')|truncate(70) }}</td>
-      <td>
-        <div class="pill-row">
-          {% for check in c.checks %}
-          <span class="badge opt">{{ check.op }}{% if check.path %} {{ check.path }}{% endif %}</span>
-          {% endfor %}
-        </div>
+      <td><a href="/ui/agents/{{ agent.id }}/eval-cases/{{ c.id }}"><strong>{{ c.name }}</strong></a></td>
+      <td class="muted">{{ c.prompt|truncate(70) }}</td>
+      <td class="mono" style="font-size:12px">
+        {% for label in c.checks %}<div>{{ label|truncate(60) }}</div>{% endfor %}
       </td>
       <td>
         {% if can_edit %}

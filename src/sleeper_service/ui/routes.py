@@ -1250,11 +1250,22 @@ async def agent_detail(
         }
         for r, vno in runs_rows
     ]
-    eval_cases = list(
+    case_rows = list(
         await db.scalars(
             select(EvalCase).where(EvalCase.agent_id == agent.id).order_by(EvalCase.name)
         )
     )
+    # Spell the checks out in the list: "equals risk_level" says a check exists,
+    # not what it wants, and a case that has never run has no results to read.
+    eval_cases = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "prompt": (c.input or {}).get("prompt", ""),
+            "checks": [_check_label(check) for check in c.checks],
+        }
+        for c in case_rows
+    ]
     recent_jobs = list(
         await db.scalars(
             select(Job).where(Job.agent_id == agent.id).order_by(Job.created_at.desc()).limit(10)
@@ -1779,6 +1790,46 @@ async def ui_create_eval_case(
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.get("/agents/{agent_id}/eval-cases/{case_id}", response_class=HTMLResponse)
+async def eval_case_detail(
+    request: Request,
+    agent_id: uuid.UUID,
+    case_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent = await db.get(Agent, agent_id)
+    if agent is None or await _team_role(db, p, agent.team_id) is None:
+        return RedirectResponse("/ui", status_code=303)
+    case = await db.get(EvalCase, case_id)
+    if case is None or case.agent_id != agent_id:
+        # a run's results outlive the case they graded, so its link can dangle
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+    author = (
+        await db.scalar(select(User.email).where(User.id == case.created_by))
+        if case.created_by
+        else None
+    )
+    checks = [{"label": _check_label(check), "code": check.get("code")} for check in case.checks]
+    return templates.TemplateResponse(
+        request,
+        "eval_case.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            case=case,
+            prompt=(case.input or {}).get("prompt", ""),
+            checks=checks,
+            author=author,
+        ),
+    )
 
 
 @router.post("/agents/{agent_id}/eval-cases/{case_id}/delete")

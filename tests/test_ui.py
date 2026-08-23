@@ -289,6 +289,51 @@ async def test_eval_case_form_rejects_bad_input(client: AsyncClient, risk_agent:
     assert "already exists" in r.text
 
 
+async def test_eval_case_page_spells_out_the_checks(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    grader = "def grade(output):\n    return bool(output.get('factors'))\n"
+    long_prompt = "Assess this event. " + "Consider staffing, weather and market moves. " * 4
+    r = await client.post(
+        f"/v1/agents/{agent_id}/eval-cases",
+        headers=bob,
+        json={
+            "name": "01-low-risk",
+            "input": {"prompt": long_prompt},
+            "checks": [
+                {"op": "equals", "path": "risk_level", "value": "low"},
+                {"op": "code", "code": grader},
+            ],
+        },
+    )
+    case_id = r.json()["id"]
+
+    await _login(client, "bob@example.com")
+    page = html.unescape((await client.get(f"/ui/agents/{agent_id}")).text)
+    # the list says what each check wants, without needing a run to have happened
+    assert 'risk_level equals "low"' in page
+    assert "code grader (monty)" in page
+    assert f"/ui/agents/{agent_id}/eval-cases/{case_id}" in page
+    assert long_prompt not in page  # the table only has room for a slice of it
+
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/{case_id}")
+    assert r.status_code == 200
+    detail = html.unescape(r.text)
+    assert long_prompt in detail
+    assert 'risk_level equals "low"' in detail
+    assert "def grade(output):" in detail  # the grader's source, not just its name
+
+    # a case that no longer exists falls back to the agent, so a run's stale
+    # link degrades instead of 404ing
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/{uuid.uuid4()}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/{case_id}", follow_redirects=False)
+    assert r.status_code == 303
+
+
 async def test_eval_run_detail_page(client: AsyncClient, risk_agent: dict) -> None:
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     agent_id = risk_agent["agent"]["id"]

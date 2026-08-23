@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ case.name }} · {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}Eval case <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2 class="with-action">{{ case.name }}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}">Back to agent</a>
+    </span>
+  </h2>
+  <table>
+    <tr><th style="width:140px">Created</th>
+      <td class="muted">{{ case.created_at.strftime('%Y-%m-%d %H:%M') }}{% if author %} by {{ author }}{% endif %}</td></tr>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>Prompt</h2>
+  <pre style="white-space:pre-wrap">{{ prompt }}</pre>
+  <p class="muted" style="margin-bottom:0">The job input a run replays against the agent's current version.</p>
+</div>
+
+<div class="panel">
+  <h2>Checks</h2>
+  <p class="muted" style="margin-top:0">Every one of these must pass for the case to count as passed.</p>
+  <table>
+    {% for c in checks %}
+    <tr>
+      <td>
+        <span class="mono">{{ c.label }}</span>
+        {% if c.code %}<pre style="white-space:pre-wrap; margin-top:6px">{{ c.code }}</pre>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

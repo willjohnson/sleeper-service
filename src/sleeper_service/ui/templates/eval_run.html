@@ -31,7 +31,7 @@
 
 {% for case in cases %}
 <div class="panel">
-  <h2 class="with-action">{{ case.case_name }}
+  <h2 class="with-action"><a href="/ui/agents/{{ agent.id }}/eval-cases/{{ case.case_id }}">{{ case.case_name }}</a>
     <span class="actions">
       <a class="mono" href="/ui/jobs/{{ case.job_id }}">job {{ case.job_id[:8] }}</a>
       <span class="badge {{ case.job_status }}">{{ case.job_status }}</span>
