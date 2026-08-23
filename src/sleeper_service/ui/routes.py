@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sleeper_service.api.v1.agents import GOVERNED_OPTION_KEYS
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
-from sleeper_service.auth.rbac import visible_team_ids
+from sleeper_service.auth.rbac import is_tenant_admin, visible_team_ids
 from sleeper_service.config import get_settings
 from sleeper_service.constants import Role
 from sleeper_service.db.models import (
@@ -643,8 +643,121 @@ async def agents_page(
             section="agents",
             teams=team_views,
             can_create=bool(creatable_teams),
+            can_create_team=await is_tenant_admin(db, p, tenant.id),
         ),
     )
+
+
+async def _tenant_users(db: AsyncSession, tenant_id: uuid.UUID, me: User) -> list[User]:
+    """Users who already belong to a team in this tenant.
+
+    Users are global, so offering every user in the instance would disclose
+    who exists in other tenants. A superuser creating a team in a tenant they
+    are not a member of still needs to be able to pick themselves.
+    """
+    users = list(
+        await db.scalars(
+            select(User)
+            .join(TeamMember, TeamMember.user_id == User.id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(Team.tenant_id == tenant_id)
+            .distinct()
+            .order_by(User.email)
+        )
+    )
+    if not any(u.id == me.id for u in users):
+        users.insert(0, me)
+    return users
+
+
+async def _render_new_team(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+    if not await is_tenant_admin(db, p, tenant.id):
+        return RedirectResponse(f"/ui/t/{tenant.id}/agents", status_code=303)
+
+    return templates.TemplateResponse(
+        request,
+        "team_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            candidates=await _tenant_users(db, tenant.id, p.user),
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/t/{tenant_id}/teams/new", response_class=HTMLResponse)
+async def new_team_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_new_team(request, tenant_id, db, p)
+
+
+@router.post("/t/{tenant_id}/teams")
+async def ui_create_team(
+    request: Request,
+    tenant_id: uuid.UUID,
+    name: str = Form(""),
+    owner_user_id: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    """Mirrors POST /v1/tenants/{id}/teams: tenant admin only, and the team
+    gets an owner from birth."""
+    form = {"name": name, "owner_user_id": owner_user_id}
+
+    async def fail(message: str):
+        return await _render_new_team(
+            request, tenant_id, db, p, error=message, form=form, status_code=400
+        )
+
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+    if not await is_tenant_admin(db, p, tenant.id):
+        return RedirectResponse(f"/ui/t/{tenant.id}/agents", status_code=303)
+
+    name = name.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    if await db.scalar(select(Team).where(Team.tenant_id == tenant.id, Team.name == name)):
+        return await fail(f"A team named {name!r} already exists in this tenant.")
+
+    owner = p.user
+    if owner_user_id and owner_user_id != str(p.user.id):
+        candidates = await _tenant_users(db, tenant.id, p.user)
+        owner = next((u for u in candidates if str(u.id) == owner_user_id), None)
+        if owner is None:
+            return await fail("Pick an owner from this tenant.")
+
+    team = Team(tenant_id=tenant.id, name=name)
+    db.add(team)
+    await db.flush()
+    db.add(TeamMember(user_id=owner.id, team_id=team.id, role=Role.OWNER))
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant.id}/agents", status_code=303)
 
 
 async def _render_new_agent(

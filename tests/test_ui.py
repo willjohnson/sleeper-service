@@ -6,7 +6,7 @@ import uuid
 from httpx import AsyncClient
 
 from sleeper_service.runtime import runner
-from tests.conftest import auth
+from tests.conftest import Bootstrap, auth
 
 
 async def _login(client: AsyncClient, email: str, password: str = "password-123"):
@@ -758,3 +758,123 @@ async def test_archive_is_owner_only(client: AsyncClient, risk_agent: dict) -> N
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
     assert agent["archived_at"] is None
+
+
+# --- Creating teams ---
+
+# A tenant's org-wide team is created without an owner (see create_tenant), so
+# in these fixtures the instance superuser is the tenant admin for "acme".
+ROOT = ("root@example.com", "root-password")
+
+
+async def test_create_team_via_ui(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    listing = await _agents_page(client, tenant_id)
+    assert f"/ui/t/{tenant_id}/teams/new" in listing
+
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    assert page.status_code == 200
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={"_csrf_token": _csrf(page.text), "name": "compliance"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/t/{tenant_id}/agents"
+
+    # Verified as the superuser: a team's creator is its only member, so the
+    # other users in the tenant cannot see it yet.
+    root = auth(bootstrap.superuser_key)
+    teams = (await client.get(f"/v1/tenants/{tenant_id}/teams", headers=root)).json()
+    team = next(t for t in teams if t["name"] == "compliance")
+    members = (await client.get(f"/v1/teams/{team['id']}/members", headers=root)).json()
+    assert [m["role"] for m in members] == ["owner"]
+    # ...and it shows up straight away on the agents page.
+    assert "compliance" in await _agents_page(client, tenant_id)
+
+
+async def test_create_team_can_name_another_tenant_user_as_owner(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    # Only people already in the tenant are offered; dave is in no team.
+    assert "bob@example.com" in page.text
+    assert "dave@example.com" not in page.text
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "platform",
+            "owner_user_id": org["users"]["bob"]["id"],
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    root = auth(bootstrap.superuser_key)
+    teams = (await client.get(f"/v1/tenants/{tenant_id}/teams", headers=root)).json()
+    team = next(t for t in teams if t["name"] == "platform")
+    members = (await client.get(f"/v1/teams/{team['id']}/members", headers=root)).json()
+    assert [(str(m["user_id"]), m["role"]) for m in members] == [
+        (org["users"]["bob"]["id"], "owner")
+    ]
+
+
+async def test_create_team_rejects_outsider_as_owner(client: AsyncClient, org: dict) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "smuggled",
+            "owner_user_id": org["users"]["dave"]["id"],  # not in this tenant
+        },
+    )
+    assert r.status_code == 400
+    assert "Pick an owner from this tenant" in r.text
+
+
+async def test_create_team_validates_name(client: AsyncClient, org: dict) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    token = _csrf(page.text)
+
+    r = await client.post(f"/ui/t/{tenant_id}/teams", data={"_csrf_token": token, "name": "  "})
+    assert r.status_code == 400 and "Name is required" in r.text
+
+    r = await client.post(f"/ui/t/{tenant_id}/teams", data={"_csrf_token": token, "name": "risk"})
+    assert r.status_code == 400 and "already exists" in r.text
+
+
+async def test_create_team_is_tenant_admin_only(client: AsyncClient, org: dict) -> None:
+    """Owning a team is not enough — it takes the org-wide team's owner."""
+    tenant_id = org["tenant"]["id"]
+    await _login(client, "alice@example.com")  # owner of "risk", not of the org team
+    listing = await _agents_page(client, tenant_id)
+    assert "/teams/new" not in listing
+
+    r = await client.get(f"/ui/t/{tenant_id}/teams/new", follow_redirects=False)
+    assert r.status_code == 303
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={"_csrf_token": _csrf(listing), "name": "sneaky"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    teams = (
+        await client.get(
+            f"/v1/tenants/{tenant_id}/teams", headers=auth(org["users"]["alice"]["api_key"])
+        )
+    ).json()
+    assert "sneaky" not in [t["name"] for t in teams]

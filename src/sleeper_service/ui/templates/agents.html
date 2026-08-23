@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Agents · {{ tenant.name }} — Sleeper Service{% endblock %}
 {% block heading %}Agents · {{ tenant.name }}{% endblock %}
-{% block actions %}{% if can_create %}<a class="btn" href="/ui/t/{{ tenant.id }}/agents/new">New agent</a>{% endif %}{% endblock %}
+{% block actions %}
+{% if can_create_team %}<a class="btn subtle" href="/ui/t/{{ tenant.id }}/teams/new">New team</a>{% endif %}
+{% if can_create %}<a class="btn" href="/ui/t/{{ tenant.id }}/agents/new">New agent</a>{% endif %}
+{% endblock %}
 {% block content %}
 {% for team in teams %}
 <div class="panel">
