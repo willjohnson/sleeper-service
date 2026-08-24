@@ -29,6 +29,79 @@ Since then the security follow-up list below has been worked down: as of
    `runtime/runners.py` REGISTRY if an operator ever wants VM-grade
    isolation without local infra. No planned work.
 
+## Admin UI parity with the API
+
+Surveyed 2026-08-24, after v0.1.1: 79 API routes against 36 UI routes. The CLI
+is not an alternative — it has only `init`, `seed-models` and `demo-setup` — so
+everything below is genuinely curl-or-nothing today.
+
+The organising goal is that one person can build, ship and operate an agent
+without leaving the pages, because that is what most people will actually want.
+Ordering follows that arc rather than the size of each surface.
+
+- [x] ~~**Invoke keys** — issue, list, revoke, scoped to one agent~~ — done
+  2026-08-24. Was the sharpest hole: an agent built entirely in the UI could
+  not be *called*, because minting its data-plane credential was only ever
+  `POST /v1/api-keys/invoke`. Owner-only, matching
+  `api_keys._require_scope_admin` at agent scope. The secret renders into the
+  response that created it rather than being flashed through a redirect — the
+  session cookie is signed but not encrypted, so a flash would park a live
+  credential in the browser's cookie jar and every `Set-Cookie` along the way.
+  Tenant- and team-scoped keys deliberately stayed on the API.
+
+1. **The version form is weaker than `VersionCreate`.** The API accepts
+   `params`, `input_schema`, `output_schema`, `tool_grants` and
+   `data_store_grants`; `version_new.html` collects model, prompt,
+   `max_iterations` and `timeout_s`. Every version created in the UI is
+   therefore schema-less, tool-less and storage-less, and because versions are
+   immutable there is no way to add any of it afterwards —
+   `version_detail.html` will happily *display* grants the UI gave you no way
+   to set. Structured output is a headline feature and is currently
+   unreachable from the pages, so schemas and params are the part to do first;
+   the two grant lists are blocked on items 3 and 4 below, since granting
+   against an empty registry is meaningless.
+
+2. **Model registry** (`/models`, superuser-only). Small, and it removes a dead
+   end: the version form already errors with "register it in the models
+   registry first", naming a place the UI does not have.
+
+3. **Data stores** (`/tenants/{id}/data-stores`) — a tenant-level registry
+   page for the S3/Azure/GCS/Box/local backends, plus a grant editor on the
+   version form (store / prefix / ro-rw). Note the two superuser gates in
+   `data_stores.py` are not decoration: `local` stores and credential-less
+   cloud stores run on the platform's own identity, so the UI must reproduce
+   the gate rather than the form.
+
+4. **MCP servers** (`/tenants/{id}/mcp-servers`) — structurally identical to
+   item 3 (registry plus per-version grants), so much cheaper done right after
+   it than before it. Registration must keep the audit-5 endpoint validation.
+
+5. **Submit a job.** No "test run this agent" anywhere in the UI, which is an
+   odd gap given the pages already render job trees and results in detail.
+
+6. **Feedback** (`POST /v1/feedback/{job_id}`). Asymmetric today: the learning
+   loop's *output* (memory approval) is in the UI, its *input* is not, so a
+   reviewer reading a bad result in the job page has no way to say so from
+   there.
+
+Admin-console tail — better as one `/ui/t/{id}/settings` section than scattered
+across existing pages:
+
+- **Users** — create, rotate key, revoke key. Currently *adding* a user to a
+  team is in the UI while *creating* that user is not, so people can only be
+  invited if they were made by curl first.
+- **Provider credentials** — nine endpoints across tenant/team/agent scope.
+- **Tenant settings** — `system_prompt` plus the `settings` blob, which is
+  where injection-screening tuning, hooks and learning/fold config live.
+- **Notification channels** — Apprise alerting, per team.
+- **OIDC config** — the login page renders the SSO block, but nothing in the
+  UI configures it.
+- **Event sources** — registry and ingest.
+- **Files** — upload and read; job inputs can reference files the UI cannot
+  put there.
+- **Agent memory read** (`GET /v1/agents/{id}/memory`) — the UI does pending
+  approval and rollback but cannot show what the memory currently says.
+
 ## Security follow-ups (low severity, from audit-2 review)
 
 Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)) and GPT-5.6 Sol ([SECURITY_AUDIT_REPORT_2.md](SECURITY_AUDIT_REPORT_2.md)); all findings are remediated with regression tests. A third audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_3.md](SECURITY_AUDIT_REPORT_3.md)); its critical and high findings (#1 `local` data store, #2 OIDC issuer SSRF, #3 event-source file isolation) are remediated with regression tests. Review of those fixes found #2's incomplete — the endpoints the discovery document advertises were still unvalidated — and closed it; see the report's Post-Audit Review.
