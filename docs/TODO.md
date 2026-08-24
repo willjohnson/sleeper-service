@@ -188,7 +188,7 @@ Ordering follows that arc rather than the size of each surface.
 
   </details>
 
-**Deliberately still curl-only**, and both stay that way:
+**Deliberately still curl-only**, and these stay that way:
 
 - **Event ingest** (`POST /v1/events/{source_id}`) — the webhook itself. A
   page that posted an event would be testing the sender, not the platform;
@@ -197,6 +197,23 @@ Ordering follows that arc rather than the size of each surface.
   the decision recorded above stands. Each carries its own policy, and a test
   run is a prompt. Uploading a file is now possible; referencing one from a
   test run still is not.
+
+**Two smaller things the parity claim above does not cover.** Both are field-
+or shape-level rather than a missing route, and neither is worth a form on its
+own, but "every route has a UI path" should not be read as more than it says:
+
+- **`EventSourceCreate.config`** is not on the event-source form. The column is
+  written by `POST /v1/tenants/{id}/event-sources` and then read by nothing —
+  `grep` finds no consumer anywhere in `src/` — so it is a reserved field, and
+  offering a JSON box for a value that cannot affect a run would be inviting
+  people to fill in something inert. Worth a form field if and when something
+  starts reading it; worth deleting the column if nothing ever does.
+- **Revoking one specific key of *another* user.** `/ui/users` shows a count
+  and a Revoke-keys button that revokes all of them, because from that page
+  the question is "cut this person off" and a list showing only a count would
+  make picking the right row guesswork. `DELETE /v1/users/{id}/keys/{key_id}`
+  is still the only way to revoke exactly one of someone else's. Your own keys
+  are listed individually on `/ui/account` and revoked one at a time.
 
 ## Security follow-ups (low severity, from audit-2 review)
 
