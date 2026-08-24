@@ -61,16 +61,79 @@
       </div>
     </div>
 
-    {% if carried_grants %}
-    <label>Grants</label>
-    <div class="inline-fields">
-      {% for g in carried_grants %}<span class="badge opt">{{ g }}</span>{% endfor %}
-      <span class="muted" style="font-size:12px">
-        carried over from the current version — tool and data store grants are still
-        API-only to change.
-      </span>
+    <div class="form-section">Grants</div>
+
+    <label>Data stores</label>
+    <div>
+      {% if show_store_grid %}
+      <div class="check-row check-head"><span>Store</span><span>Prefix</span><span>Mode</span></div>
+      {% for store, prefix, mode in store_rows %}
+      <div class="check-row">
+        <select name="grant_store">
+          <option value="">—</option>
+          {% for s in stores %}
+          <option value="{{ s }}" {% if store == s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+          {# A grant the registry no longer has still needs an option, or the
+             select would silently drop it on save. Kept selectable so the
+             submit-time check can name it. #}
+          {% if store and store not in stores %}
+          <option value="{{ store }}" selected>{{ store }} — not registered</option>
+          {% endif %}
+        </select>
+        <input type="text" name="grant_prefix" value="{{ prefix }}"
+               placeholder="{{ 'reports/2026' if loop.first else '' }}">
+        <select name="grant_mode">
+          {% for m in store_modes %}
+          <option value="{{ m }}" {% if mode == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        The version gets <code>list_files</code> and <code>read_file</code> beneath the
+        prefix, plus <code>write_file</code> at <code>rw</code>. Nothing outside it is
+        reachable; a blank prefix grants the whole store.
+      </div>
+      {% else %}
+      <div class="muted" style="font-size:12px">
+        No data stores registered in this tenant —
+        <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
+      </div>
+      {% endif %}
     </div>
-    {% endif %}
+
+    <label>MCP servers</label>
+    <div>
+      {% if show_tool_grid %}
+      <div class="check-row check-head"><span>Server</span><span>Tools</span><span></span></div>
+      {% for server, tools in tool_rows %}
+      <div class="check-row">
+        <select name="grant_server">
+          <option value="">—</option>
+          {% for m in servers %}
+          <option value="{{ m }}" {% if server == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+          {% if server and server not in servers %}
+          <option value="{{ server }}" selected>{{ server }} — not registered</option>
+          {% endif %}
+        </select>
+        <input type="text" name="grant_tools" value="{{ tools }}"
+               placeholder="{{ 'lookup, search — blank for all' if loop.first else '' }}">
+        <span></span>
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        Comma-separated tool names to allowlist, or blank to take everything the server
+        offers.
+      </div>
+      {% else %}
+      <div class="muted" style="font-size:12px">
+        No MCP servers registered in this tenant —
+        <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
+      </div>
+      {% endif %}
+    </div>
 
     <div class="form-actions">
       <button type="submit">Create version</button>

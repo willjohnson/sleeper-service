@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}New MCP server · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}New MCP server <span class="muted" style="font-size:14px">· {{ tenant.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Registers a tool server for this tenant. Nothing connects to it until an agent
+    version is granted it.
+  </p>
+  <form method="post" action="/ui/t/{{ tenant.id }}/mcp-servers" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="ms-name">Name</label>
+    <div>
+      <input id="ms-name" type="text" name="name" required autofocus maxlength="200"
+             value="{{ form.name or '' }}" placeholder="crm-lookup">
+      <div class="muted" style="font-size:12px">
+        How grants refer to it. Unique within the tenant.
+      </div>
+    </div>
+
+    <label for="ms-transport">Transport</label>
+    <div>
+      <select id="ms-transport" name="transport" required>
+        <option value="">—</option>
+        {% for t in transports %}
+        <option value="{{ t }}" {% if form.transport == t %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+      {% if not is_superuser %}
+      <div class="muted" style="font-size:12px">
+        <code>stdio</code> is superuser-only — it runs a command inside the worker.
+      </div>
+      {% endif %}
+    </div>
+
+    <label for="ms-endpoint">Endpoint</label>
+    <div>
+      <input id="ms-endpoint" type="text" name="endpoint" required
+             value="{{ form.endpoint or '' }}" placeholder="https://mcp.example.com/sse">
+      <div class="muted" style="font-size:12px">
+        The URL for <code>streamable_http</code> and <code>sse</code>, or the command
+        line for <code>stdio</code>. URLs are resolved and refused if they are not
+        publicly routable — the worker dials this on every granted job — and checked
+        again at connect time.
+      </div>
+    </div>
+
+    <label for="ms-creds">Credentials</label>
+    <div>
+      <textarea id="ms-creds" name="credentials" rows="5" class="mono"
+                placeholder='{"headers": {"Authorization": "Bearer ..."}}'>{{ form.credentials or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        JSON, encrypted at rest and never shown again. <code>headers</code> are sent on
+        every request; <code>user_ctx_signing_secret</code> is required before jobs
+        carrying <code>user_ctx</code> may use this server.
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Register server</button>
+      <a class="cancel" href="/ui/t/{{ tenant.id }}/connections">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

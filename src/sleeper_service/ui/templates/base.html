@@ -13,6 +13,7 @@
     {% if tenant %}
     <a class="nav {% if section == 'dashboard' %}active{% endif %}" href="/ui/t/{{ tenant.id }}">Dashboard</a>
     <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
+    <a class="nav {% if section == 'connections' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/connections">Connections</a>
     {% endif %}
     <div class="spacer"></div>
     <div class="whoami">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</div>

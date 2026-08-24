@@ -49,37 +49,50 @@ Ordering follows that arc rather than the size of each surface.
   credential in the browser's cookie jar and every `Set-Cookie` along the way.
   Tenant- and team-scoped keys deliberately stayed on the API.
 
-- [x] ~~**The version form is weaker than `VersionCreate`**~~ — schemas and
-  params done 2026-08-24; the two grant lists remain, blocked on items 2 and 3
-  below since granting against an empty registry is meaningless. Output
-  schema, input schema and `params` are now edited on the version form and
-  prefilled from the outgoing version, output schema is also on the new-agent
-  form, and both are validated as JSON Schema — stricter than the API, which
-  takes any dict and lets the runner discover the problem one failed job at a
-  time. The worse half of this was silent: publishing v2 from the UI over an
-  API-created v1 dropped that agent's schema and grants entirely, since the
-  new row took the column defaults. Grants are carried forward now and shown
-  read-only on the form.
+- [x] ~~**The version form is weaker than `VersionCreate`**~~ — closed
+  2026-08-24 in two passes. All five missing fields are now on the form,
+  prefilled from the outgoing version: `output_schema`, `input_schema` and
+  `params` as JSON, `tool_grants` and `data_store_grants` as grid rows picked
+  from the tenant's registries. Output schema is on the new-agent form too, so
+  an agent can be born as a workflow node rather than a chat box.
 
-1. **Model registry** (`/models`, superuser-only). Small, and it removes a dead
+  Schemas are validated with `Draft202012Validator.check_schema` — stricter
+  than the API, which takes any dict and lets the runner discover the problem
+  one failed job at a time. Grants are validated against the registries, since
+  a grant naming something absent is a `GrantError` on every job the version
+  runs.
+
+  The bug underneath this was silent, and it bit twice. Publishing v2 from the
+  UI over an API-created v1 dropped that agent's schema and grants entirely,
+  because the new row simply took the column defaults. Then the fix nearly
+  reintroduced it: a `<select>` cannot represent a value absent from its
+  options, so a grant naming a store since deleted would have been swallowed
+  on save. Such a grant renders as a selectable "not registered" option and is
+  refused by name at submit.
+
+- [x] ~~**Data stores** and **MCP servers** registries~~ — done 2026-08-24, as
+  one **Connections** page (`/ui/t/{id}/connections`) rather than two, since
+  they are the same shape: register a thing, grant it to a version. Listing is
+  open to anyone with a team in the tenant, matching `_gate(admin=False)` on
+  both API routers — an editor picking grants has to see what exists — while
+  adding and removing is tenant-admin. Both superuser gates are restated in the
+  UI rather than inherited (`local` stores, credential-less cloud stores,
+  `stdio` servers), as is the audit-5 endpoint validation.
+
+  Deleting a registry entry that the *current* version of a live agent still
+  grants is refused, naming the agents. Only current versions count: old ones
+  keep their grants forever, so checking every version would make an entry
+  undeletable after one job, and a dangling grant on a version nothing
+  dispatches to cannot break a run.
+
+2. **Model registry** (`/models`, superuser-only). Small, and it removes a dead
    end: the version form already errors with "register it in the models
    registry first", naming a place the UI does not have.
 
-2. **Data stores** (`/tenants/{id}/data-stores`) — a tenant-level registry
-   page for the S3/Azure/GCS/Box/local backends, plus a grant editor on the
-   version form (store / prefix / ro-rw). Note the two superuser gates in
-   `data_stores.py` are not decoration: `local` stores and credential-less
-   cloud stores run on the platform's own identity, so the UI must reproduce
-   the gate rather than the form.
-
-3. **MCP servers** (`/tenants/{id}/mcp-servers`) — structurally identical to
-   item 2 (registry plus per-version grants), so much cheaper done right after
-   it than before it. Registration must keep the audit-5 endpoint validation.
-
-4. **Submit a job.** No "test run this agent" anywhere in the UI, which is an
+3. **Submit a job.** No "test run this agent" anywhere in the UI, which is an
    odd gap given the pages already render job trees and results in detail.
 
-5. **Feedback** (`POST /v1/feedback/{job_id}`). Asymmetric today: the learning
+4. **Feedback** (`POST /v1/feedback/{job_id}`). Asymmetric today: the learning
    loop's *output* (memory approval) is in the UI, its *input* is not, so a
    reviewer reading a bad result in the job page has no way to say so from
    there.

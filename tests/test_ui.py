@@ -1557,29 +1557,125 @@ async def test_version_form_rejects_bad_schemas(client: AsyncClient, risk_agent:
     assert [v["version_no"] for v in versions] == [1]
 
 
-async def test_ui_version_carries_grants_forward(client: AsyncClient, risk_agent: dict) -> None:
-    """Grants have no UI editor yet, so a version published from the pages must
-    inherit them — otherwise publishing v2 quietly strips the agent's tools."""
+async def test_version_form_edits_grants(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    """Grants are picked from the tenant's registries and round-trip through the
+    form, so republishing does not quietly strip an agent's tools."""
+    tenant_id = risk_agent["tenant"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    root = auth(bootstrap.superuser_key)  # data stores are tenant-admin work
+    for path, body in [
+        (
+            "data-stores",
+            {
+                "name": "reference",
+                "type": "s3",
+                "config": {"bucket": "b"},
+                "credentials": {"access_key": "a", "secret_key": "s"},
+            },
+        ),
+        (
+            "data-stores",
+            {
+                "name": "scratch",
+                "type": "s3",
+                "config": {"bucket": "c"},
+                "credentials": {"access_key": "a", "secret_key": "s"},
+            },
+        ),
+    ]:
+        r = await client.post(f"/v1/tenants/{tenant_id}/{path}", headers=root, json=body)
+        assert r.status_code == 201
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert 'name="grant_store"' in page.text
+    assert "reference" in page.text and "scratch" in page.text
+
+    base = {
+        "_csrf_token": _csrf(page.text),
+        "model": "test:default",
+        "prompt": "v2",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            **base,
+            "grant_store": ["reference", "", ""],
+            "grant_prefix": ["docs/2026/", "", ""],
+            "grant_mode": ["rw", "ro", "ro"],
+            "grant_server": ["", "", ""],
+            "grant_tools": ["", "", ""],
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    v2 = next(v for v in versions if v["version_no"] == 2)
+    # blank rows are dropped, and the prefix is normalised
+    assert v2["data_store_grants"] == [{"store": "reference", "prefix": "docs/2026", "mode": "rw"}]
+
+    # ...and the grant comes back as a filled row on the next version's form
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert 'value="docs/2026"' in page.text
+    assert '<option value="rw" selected>rw</option>' in page.text
+
+
+async def test_version_form_refuses_unknown_grants(client: AsyncClient, risk_agent: dict) -> None:
     agent_id = risk_agent["agent"]["id"]
     bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    base = {
+        "_csrf_token": _csrf(page.text),
+        "model": "test:default",
+        "prompt": "v2",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    r = await client.post(f"/ui/agents/{agent_id}/versions", data={**base, "grant_store": ["nope"]})
+    assert r.status_code == 400
+    assert "No data store named 'nope'" in html.unescape(r.text)
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions", data={**base, "grant_server": ["nope"]}
+    )
+    assert r.status_code == 400
+    assert "No MCP server named 'nope'" in html.unescape(r.text)
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert [v["version_no"] for v in versions] == [1]
+
+
+async def test_grant_to_a_deleted_store_survives_the_form(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """A version granting a store the registry no longer has must not have that
+    grant silently swallowed by a <select> with no matching option."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
     r = await client.post(
         f"/v1/agents/{agent_id}/versions",
-        headers=bob,
+        headers=alice,
         json={
-            "prompt": "v2 with grants",
+            "prompt": "v2",
             "model": "test/default",
-            "tool_grants": ["search"],
-            "data_store_grants": [{"store": "reference", "prefix": "docs/", "mode": "ro"}],
+            "data_store_grants": [{"store": "ghost", "prefix": "", "mode": "ro"}],
         },
     )
     assert r.status_code == 201
-    alice = auth(risk_agent["users"]["alice"]["api_key"])
     await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
 
     await _login(client, "bob@example.com")
     page = await client.get(f"/ui/agents/{agent_id}/versions/new")
-    assert "carried over from the current version" in page.text
-    assert "search" in page.text
+    assert "ghost" in page.text
+    assert "not registered" in page.text
 
     r = await client.post(
         f"/ui/agents/{agent_id}/versions",
@@ -1589,14 +1685,13 @@ async def test_ui_version_carries_grants_forward(client: AsyncClient, risk_agent
             "prompt": "v3",
             "max_iterations": "10",
             "timeout_s": "300",
+            "grant_store": ["ghost"],
+            "grant_prefix": [""],
+            "grant_mode": ["ro"],
         },
-        follow_redirects=False,
     )
-    assert r.status_code == 303
-    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
-    v3 = next(v for v in versions if v["version_no"] == 3)
-    assert v3["tool_grants"] == ["search"]
-    assert v3["data_store_grants"] == [{"store": "reference", "prefix": "docs/", "mode": "ro"}]
+    assert r.status_code == 400
+    assert "No data store named 'ghost'" in html.unescape(r.text)
 
 
 async def test_new_agent_form_takes_an_output_schema(
@@ -1634,3 +1729,270 @@ async def test_new_agent_form_takes_an_output_schema(
     agent_id = next(a["id"] for a in agents if a["name"] == "structured-agent")
     versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
     assert versions[0]["output_schema"] == RISK_OUT_SCHEMA
+
+
+async def test_connections_registry_round_trip(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    await _login(client, "root@example.com", "root-password")
+
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert page.status_code == 200
+    assert "No data stores yet" in page.text
+    assert "No MCP servers yet" in page.text
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={
+            "_csrf_token": token,
+            "name": "reference",
+            "type": "s3",
+            "config": '{"bucket": "acme-reference"}',
+            "credentials": '{"access_key": "a", "secret_key": "s"}',
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    r = await client.post(
+        f"/ui/t/{tenant_id}/mcp-servers",
+        data={
+            "_csrf_token": token,
+            "name": "crm",
+            "transport": "streamable_http",
+            "endpoint": "https://mcp.example.com/mcp",
+            "credentials": "",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
+    assert [(s["name"], s["type"], s["config"]) for s in stores] == [
+        ("reference", "s3", {"bucket": "acme-reference"})
+    ]
+    servers = (await client.get(f"/v1/tenants/{tenant_id}/mcp-servers", headers=root)).json()
+    assert [(m["name"], m["transport"]) for m in servers] == [("crm", "streamable_http")]
+
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert "reference" in page.text and "crm" in page.text
+    assert "acme-reference" in page.text
+    assert "access_key" not in page.text, "credentials must never be echoed back"
+    assert "stored" in page.text  # ...only that they exist
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{stores[0]['id']}/delete",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+
+
+async def test_connection_forms_reject_bad_input(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    await _login(client, "root@example.com", "root-password")
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    token = _csrf(page.text)
+
+    store = {"_csrf_token": token, "name": "s", "type": "s3", "credentials": '{"access_key": "a"}'}
+    for data, expected in [
+        ({**store, "config": "{"}, "not valid JSON"),
+        ({**store, "config": "{}"}, "needs 'bucket'"),
+        ({**store, "type": "", "config": '{"bucket": "b"}'}, "Pick a store type"),
+        ({**store, "name": "", "config": '{"bucket": "b"}'}, "Name is required"),
+    ]:
+        r = await client.post(f"/ui/t/{tenant_id}/data-stores", data=data)
+        assert r.status_code == 400, expected
+        assert expected in html.unescape(r.text), expected
+
+    server = {"_csrf_token": token, "name": "m", "transport": "streamable_http"}
+    for data, expected in [
+        ({**server, "endpoint": ""}, "Endpoint URL is required"),
+        # audit-5: the worker dials this on every granted job, so it clears the
+        # same address policy as a callback URL.
+        ({**server, "endpoint": "http://localhost:9000/mcp"}, "resolve"),
+        ({**server, "transport": "", "endpoint": "https://a.example.com"}, "Pick a transport"),
+    ]:
+        r = await client.post(f"/ui/t/{tenant_id}/mcp-servers", data=data)
+        assert r.status_code == 400, expected
+        assert expected in html.unescape(r.text).lower() or expected in html.unescape(r.text)
+
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+    assert (await client.get(f"/v1/tenants/{tenant_id}/mcp-servers", headers=root)).json() == []
+
+
+async def test_connection_superuser_gates_hold_in_the_ui(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    """The two gates that exist because these run on the platform's identity
+    rather than the tenant's, not merely because they are unusual."""
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    # Owning the tenant's org team makes alice a tenant admin but not a superuser
+    teams = (await client.get(f"/v1/tenants/{tenant_id}/teams", headers=root)).json()
+    org_team_id = next(t["id"] for t in teams if t["is_org_team"])
+    r = await client.put(
+        f"/v1/teams/{org_team_id}/members/{org['users']['alice']['id']}",
+        headers=root,
+        json={"role": "owner"},
+    )
+    assert r.status_code == 200
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert "New data store" in page.text  # tenant admin, so she may register
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={
+            "_csrf_token": token,
+            "name": "host-disk",
+            "type": "local",
+            "config": '{"base_path": "/"}',
+        },
+    )
+    assert r.status_code == 400
+    assert "superusers" in r.text
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={
+            "_csrf_token": token,
+            "name": "ambient",
+            "type": "s3",
+            "config": '{"bucket": "b"}',
+            "credentials": "",
+        },
+    )
+    assert r.status_code == 400
+    assert "platform's own cloud identity" in html.unescape(r.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/mcp-servers",
+        data={
+            "_csrf_token": token,
+            "name": "shell",
+            "transport": "stdio",
+            "endpoint": "/bin/sh -c 'mcp'",
+        },
+    )
+    assert r.status_code == 400
+    assert "superusers" in r.text
+
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+    assert (await client.get(f"/v1/tenants/{tenant_id}/mcp-servers", headers=root)).json() == []
+
+
+async def test_connections_are_readable_but_not_writable_by_members(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "b"},
+            "credentials": {"access_key": "a"},
+        },
+    )
+    store_id = r.json()["id"]
+
+    await _login(client, "bob@example.com")  # editor, not tenant admin
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert page.status_code == 200
+    assert "reference" in page.text, "an editor must see what they can grant"
+    assert "New data store" not in page.text
+    assert "tenant-admin work" in page.text
+
+    token = _csrf(page.text)
+    r = await client.get(f"/ui/t/{tenant_id}/data-stores/new", follow_redirects=False)
+    assert r.status_code == 303
+    await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={"_csrf_token": token, "name": "x", "type": "s3", "config": '{"bucket": "b"}'},
+    )
+    await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{store_id}/delete", data={"_csrf_token": token}
+    )
+    stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
+    assert [s["name"] for s in stores] == ["reference"]
+
+    # an outsider gets no page at all
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/t/{tenant_id}/connections", follow_redirects=False)
+    assert r.status_code == 303
+
+
+async def test_deleting_a_granted_store_is_refused(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    """Grants resolve by name at run time, so removing a store still granted
+    would turn every job on that version into a GrantError."""
+    tenant_id = risk_agent["tenant"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "b"},
+            "credentials": {"access_key": "a"},
+        },
+    )
+    store_id = r.json()["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=alice,
+        json={
+            "prompt": "v2",
+            "model": "test/default",
+            "data_store_grants": [{"store": "reference", "prefix": "", "mode": "ro"}],
+        },
+    )
+    assert r.status_code == 201
+
+    await _login(client, "root@example.com", "root-password")
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{store_id}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    # v2 is not promoted yet, so nothing dispatches to it and the delete stands
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+
+    # ...but once it is current, the store is pinned
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "b"},
+            "credentials": {"access_key": "a"},
+        },
+    )
+    store_id = r.json()["id"]
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{store_id}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    assert "still granted to risk-analyzer" in r.text
+    stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
+    assert [s["name"] for s in stores] == ["reference"]
