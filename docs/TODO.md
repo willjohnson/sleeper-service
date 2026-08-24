@@ -29,6 +29,107 @@ Since then the security follow-up list below has been worked down: as of
    `runtime/runners.py` REGISTRY if an operator ever wants VM-grade
    isolation without local infra. No planned work.
 
+## Admin UI parity with the API
+
+Surveyed 2026-08-24, after v0.1.1: 79 API routes against 36 UI routes. The CLI
+is not an alternative — it has only `init`, `seed-models` and `demo-setup` — so
+everything below is genuinely curl-or-nothing today.
+
+The organising goal is that one person can build, ship and operate an agent
+without leaving the pages, because that is what most people will actually want.
+Ordering follows that arc rather than the size of each surface.
+
+- [x] ~~**Invoke keys** — issue, list, revoke, scoped to one agent~~ — done
+  2026-08-24. Was the sharpest hole: an agent built entirely in the UI could
+  not be *called*, because minting its data-plane credential was only ever
+  `POST /v1/api-keys/invoke`. Owner-only, matching
+  `api_keys._require_scope_admin` at agent scope. The secret renders into the
+  response that created it rather than being flashed through a redirect — the
+  session cookie is signed but not encrypted, so a flash would park a live
+  credential in the browser's cookie jar and every `Set-Cookie` along the way.
+  Tenant- and team-scoped keys deliberately stayed on the API.
+
+- [x] ~~**The version form is weaker than `VersionCreate`**~~ — closed
+  2026-08-24 in two passes. All five missing fields are now on the form,
+  prefilled from the outgoing version: `output_schema`, `input_schema` and
+  `params` as JSON, `tool_grants` and `data_store_grants` as grid rows picked
+  from the tenant's registries. Output schema is on the new-agent form too, so
+  an agent can be born as a workflow node rather than a chat box.
+
+  Schemas are validated with `Draft202012Validator.check_schema` — stricter
+  than the API, which takes any dict and lets the runner discover the problem
+  one failed job at a time. Grants are validated against the registries, since
+  a grant naming something absent is a `GrantError` on every job the version
+  runs.
+
+  The bug underneath this was silent, and it bit twice. Publishing v2 from the
+  UI over an API-created v1 dropped that agent's schema and grants entirely,
+  because the new row simply took the column defaults. Then the fix nearly
+  reintroduced it: a `<select>` cannot represent a value absent from its
+  options, so a grant naming a store since deleted would have been swallowed
+  on save. Such a grant renders as a selectable "not registered" option and is
+  refused by name at submit.
+
+- [x] ~~**Data stores** and **MCP servers** registries~~ — done 2026-08-24, as
+  one **Connections** page (`/ui/t/{id}/connections`) rather than two, since
+  they are the same shape: register a thing, grant it to a version. Listing is
+  open to anyone with a team in the tenant, matching `_gate(admin=False)` on
+  both API routers — an editor picking grants has to see what exists — while
+  adding and removing is tenant-admin. Both superuser gates are restated in the
+  UI rather than inherited (`local` stores, credential-less cloud stores,
+  `stdio` servers), as is the audit-5 endpoint validation.
+
+  Deleting a registry entry that the *current* version of a live agent still
+  grants is refused, naming the agents. Only current versions count: old ones
+  keep their grants forever, so checking every version would make an entry
+  undeletable after one job, and a dangling grant on a version nothing
+  dispatches to cannot break a run.
+
+- [x] ~~**Model registry**~~ — done 2026-08-24 at `/ui/models`. Instance-wide
+  rather than per-tenant, so it hangs off `/ui` rather than a tenant path;
+  readable by any signed-in user like `GET /v1/models`, superuser-managed like
+  the writes. The version form's error now names it. Deleting a model that any
+  version references is refused by name, since `agent_versions.model_id` is a
+  plain FK and the delete would otherwise surface as an IntegrityError.
+
+- [x] ~~**Submit a job**~~ — done 2026-08-24: a Test run form on the agent
+  page, with a version/alias pin so a change can be compared against what is
+  current. It goes through `api.v1.jobs.create_job` rather than building a Job
+  row, so the archived refusal, idempotency, budget pre-flight and enqueue are
+  the same code the API runs, and it records the same `auth_ctx` shape so a job
+  submitted from the pages is not a different kind of row in the trail. A run
+  refused at the budget pre-flight still lands on its job page, which is where
+  the reason is.
+
+  Deliberately not offered: `callback_url`, `files`, `links` and `user_ctx`.
+  Each carries its own policy, and a test run is a prompt.
+
+- [x] ~~**Feedback**~~ — done 2026-08-24 on the job page, shown once a job has
+  output and the agent has learning on — the same gate the API applies, since a
+  vote with nowhere to fold is a vote thrown away. No signed token here: that
+  token exists so a party holding a callback URL can reply without a platform
+  key, and a signed-in editor on the agent's team is a stronger claim than
+  holding it, so the session is the credential and the role is the gate. One
+  vote per job, and the recorded vote replaces the form.
+
+Admin-console tail — better as one `/ui/t/{id}/settings` section than scattered
+across existing pages:
+
+- **Users** — create, rotate key, revoke key. Currently *adding* a user to a
+  team is in the UI while *creating* that user is not, so people can only be
+  invited if they were made by curl first.
+- **Provider credentials** — nine endpoints across tenant/team/agent scope.
+- **Tenant settings** — `system_prompt` plus the `settings` blob, which is
+  where injection-screening tuning, hooks and learning/fold config live.
+- **Notification channels** — Apprise alerting, per team.
+- **OIDC config** — the login page renders the SSO block, but nothing in the
+  UI configures it.
+- **Event sources** — registry and ingest.
+- **Files** — upload and read; job inputs can reference files the UI cannot
+  put there.
+- **Agent memory read** (`GET /v1/agents/{id}/memory`) — the UI does pending
+  approval and rollback but cannot show what the memory currently says.
+
 ## Security follow-ups (low severity, from audit-2 review)
 
 Two security audits ran 2026-08-03 — Gemini 3.6 Flash ([SECURITY_AUDIT_REPORT.md](SECURITY_AUDIT_REPORT.md)) and GPT-5.6 Sol ([SECURITY_AUDIT_REPORT_2.md](SECURITY_AUDIT_REPORT_2.md)); all findings are remediated with regression tests. A third audit ran 2026-08-04 ([SECURITY_AUDIT_REPORT_3.md](SECURITY_AUDIT_REPORT_3.md)); its critical and high findings (#1 `local` data store, #2 OIDC issuer SSRF, #3 event-source file isolation) are remediated with regression tests. Review of those fixes found #2's incomplete — the endpoints the discovery document advertises were still unvalidated — and closed it; see the report's Post-Audit Review.

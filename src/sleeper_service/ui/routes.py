@@ -21,6 +21,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import anyio
+import jsonschema
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -30,18 +31,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.api.v1.agents import GOVERNED_OPTION_KEYS
 from sleeper_service.api.v1.schemas import JobContext
+from sleeper_service.auth.keys import generate_key
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.auth.rbac import is_tenant_admin, visible_team_ids
 from sleeper_service.config import get_settings
-from sleeper_service.constants import Role
+from sleeper_service.constants import KeyKind, KeyScope, Role
+from sleeper_service.crypto import encrypt
 from sleeper_service.db.models import (
     Agent,
     AgentVersion,
+    ApiKey,
+    DataStore,
     EvalCase,
     EvalRun,
+    Feedback,
     Job,
     JobEvent,
+    McpServer,
     MemoryVersion,
     Model,
     OidcConfig,
@@ -54,7 +61,8 @@ from sleeper_service.db.models import (
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
 from sleeper_service.runtime.evals import PATH_OPS, validate_checks
-from sleeper_service.runtime.memory import latest_memory
+from sleeper_service.runtime.memory import latest_memory, learning_enabled
+from sleeper_service.runtime.outbound import OutboundUrlError, validate_mcp_url
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -241,6 +249,102 @@ def _form_int(raw: str, default: int, lo: int, hi: int, label: str) -> tuple[int
     return value, None
 
 
+def _row_at(values: list[str], i: int, default: str = "") -> str:
+    """The i-th value of a repeated form field. The parallel lists are only as
+    long as the browser made them, and zipping them would drop a whole grant
+    when one arm is shorter — the row's identity (the picked store or server)
+    decides how many rows there are, never the fields beside it."""
+    return values[i] if i < len(values) else default
+
+
+def _store_grants_from_form(stores: list[str], prefixes: list[str], modes: list[str]) -> list:
+    """Grant rows -> data_store_grants, shaped as runtime/toolsets reads them:
+    {"store", "prefix", "mode"}. A row with no store picked is a blank row, not
+    an error — the form always offers more rows than most versions use."""
+    grants = []
+    for i, store in enumerate(stores):
+        store = store.strip()
+        if not store:
+            continue
+        mode = _row_at(modes, i, "ro")
+        grants.append(
+            {
+                "store": store,
+                "prefix": _row_at(prefixes, i).strip().strip("/"),
+                "mode": mode if mode in STORE_MODES else "ro",
+            }
+        )
+    return grants
+
+
+def _tool_grants_from_form(servers: list[str], tools: list[str]) -> list:
+    """Grant rows -> tool_grants: {"server", "tools"}. An empty tool list means
+    every tool the server offers, so it is omitted rather than sent as []."""
+    grants = []
+    for i, server in enumerate(servers):
+        server = server.strip()
+        if not server:
+            continue
+        names = [t.strip() for t in _row_at(tools, i).split(",") if t.strip()]
+        grant = {"server": server}
+        if names:
+            grant["tools"] = names
+        grants.append(grant)
+    return grants
+
+
+def _grant_rows(grants: list | None, keys: tuple[str, ...], blanks: int) -> list[tuple]:
+    """Existing grants as form rows, padded with blanks. Values are read back
+    out of whatever the version stored, so a grant written by the API with
+    fields the form does not offer still round-trips its recognised parts."""
+    rows = []
+    for g in grants or []:
+        if not isinstance(g, dict):
+            continue
+        row = []
+        for key in keys:
+            value = g.get(key, "")
+            row.append(", ".join(value) if isinstance(value, list) else str(value or ""))
+        rows.append(tuple(row))
+    rows += [("",) * len(keys)] * max(0, blanks - len(rows))
+    return rows
+
+
+def _pretty_json(value: dict | list | None) -> str:
+    """Indented JSON for a form field or a <pre>; empty for nothing to show,
+    so a blank textarea and an unset column render the same way."""
+    if not value:
+        return ""
+    return json.dumps(value, indent=2)
+
+
+def _form_json_object(
+    raw: str, label: str, *, as_schema: bool = False
+) -> tuple[dict | None, str | None]:
+    """Parse an optional JSON-object field. Blank means unset, which is not the
+    same as `{}` — an empty output schema would still force structured output.
+
+    Schemas are additionally checked as JSON Schema. The API takes any dict
+    here, but a malformed schema is not caught until the runner builds an
+    output type from it, by which point every job on the version fails; the
+    form is the last place it can be a correction rather than an outage."""
+    raw = raw.strip()
+    if not raw:
+        return None, None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"{label} is not valid JSON: {exc.msg} (line {exc.lineno})."
+    if not isinstance(value, dict):
+        return None, f"{label} must be a JSON object, not {type(value).__name__}."
+    if as_schema:
+        try:
+            jsonschema.Draft202012Validator.check_schema(value)
+        except jsonschema.SchemaError as exc:
+            return None, f"{label} is not a valid JSON Schema: {exc.message}"
+    return value, None
+
+
 async def _clean_agent_fields(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -302,9 +406,19 @@ async def _new_version(
     model: Model,
     max_iterations: int,
     timeout_s: int,
+    params: dict | None = None,
+    input_schema: dict | None = None,
+    output_schema: dict | None = None,
+    tool_grants: list | None = None,
+    data_store_grants: list | None = None,
 ) -> AgentVersion:
     """Append a version, auto-promoting the first one so a freshly created
-    agent is immediately runnable (same rule as POST /v1/agents/{id}/versions)."""
+    agent is immediately runnable (same rule as POST /v1/agents/{id}/versions).
+
+    Grants default to empty rather than to the outgoing version's: the version
+    form now collects them, and a caller that omits them means none. The
+    create-agent path relies on that — a brand new agent has nothing to
+    inherit."""
     next_no = (
         await db.scalar(
             select(func.coalesce(func.max(AgentVersion.version_no), 0)).where(
@@ -317,8 +431,13 @@ async def _new_version(
         version_no=next_no,
         prompt=prompt,
         model_id=model.id,
+        params=params or {},
         max_iterations=max_iterations,
         timeout_s=timeout_s,
+        tool_grants=tool_grants or [],
+        data_store_grants=data_store_grants or [],
+        input_schema=input_schema,
+        output_schema=output_schema,
         created_by=p.user.id,
     )
     db.add(version)
@@ -1054,6 +1173,7 @@ async def ui_create_agent(
     spending_limit: str = Form(""),
     max_iterations: str = Form("10"),
     timeout_s: str = Form("300"),
+    output_schema: str = Form(""),
     delegation: str = Form("none"),
     memory: bool = Form(False),
     learning: bool = Form(False),
@@ -1075,6 +1195,7 @@ async def ui_create_agent(
         "spending_limit": spending_limit,
         "max_iterations": max_iterations,
         "timeout_s": timeout_s,
+        "output_schema": output_schema,
         "delegation": delegation,
         "memory": memory,
         "learning": learning,
@@ -1120,9 +1241,12 @@ async def ui_create_agent(
     timeout, err = _form_int(timeout_s, 300, 1, 3600, "Timeout")
     if err:
         return await fail(err)
+    out_schema, err = _form_json_object(output_schema, "Output schema", as_schema=True)
+    if err:
+        return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
-        return await fail(f"Unknown model {model!r} — register it in the models registry first.")
+        return await fail(f"Unknown model {model!r} — register it under Models first.")
 
     agent = Agent(
         tenant_id=tenant.id,
@@ -1142,6 +1266,7 @@ async def ui_create_agent(
         model=model_row,
         max_iterations=iterations,
         timeout_s=timeout,
+        output_schema=out_schema,
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent.id}", status_code=303)
@@ -1272,6 +1397,11 @@ async def agent_detail(
         )
     )
     charts = await _activity_charts(db, Job.agent_id == agent.id, datetime.now(UTC))
+    # Owner-only, matching who the API lets issue an agent-scoped key. Nothing
+    # secret is on show — the plaintext exists only in the response that
+    # created it — but the panel is all owner actions, so it hides whole.
+    can_manage_keys = role == Role.OWNER
+    invoke_keys = await _invoke_keys(db, agent.id) if can_manage_keys else []
 
     return templates.TemplateResponse(
         request,
@@ -1300,6 +1430,8 @@ async def agent_detail(
             chart_days=CHART_DAYS,
             jobs_total=charts["jobs_total"],
             avg_tokens_per_job=charts["avg_tokens_per_job"],
+            invoke_keys=invoke_keys,
+            can_manage_keys=can_manage_keys,
             can_promote=role == Role.OWNER,
             can_edit=role in (Role.OWNER, Role.EDITOR) and agent.archived_at is None,
             can_archive=role == Role.OWNER,
@@ -1449,6 +1581,849 @@ async def ui_restore_agent(
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
 
+# --- Test runs ---
+#
+# Submission goes through api.v1.jobs.create_job rather than building a Job
+# here: archived-agent refusal, idempotency, the budget pre-flight and the
+# enqueue all live in it, and a second implementation would drift from them.
+# What the form deliberately does not offer is callback_url, files, links and
+# user_ctx — each carries its own policy, and a test run is a prompt.
+
+
+def _version_choices(versions: list[dict], current_version_no: int | None) -> list[dict]:
+    """Pin targets for the run form: current, then each version, then aliases."""
+    choices = [{"value": "current", "label": f"current (v{current_version_no})"}]
+    for v in versions:
+        choices.append({"value": f"v:{v['version_no']}", "label": f"v{v['version_no']}"})
+        for alias in v["aliases"]:
+            choices.append({"value": f"a:{alias}", "label": f"{alias} → v{v['version_no']}"})
+    return choices
+
+
+async def _agent_versions(db: AsyncSession, agent: Agent) -> list[dict]:
+    rows = list(
+        await db.scalars(
+            select(AgentVersion)
+            .where(AgentVersion.agent_id == agent.id)
+            .order_by(AgentVersion.version_no.desc())
+        )
+    )
+    aliases: dict[uuid.UUID, list[str]] = {}
+    for a in await db.scalars(
+        select(VersionAlias).where(VersionAlias.agent_id == agent.id).order_by(VersionAlias.alias)
+    ):
+        aliases.setdefault(a.agent_version_id, []).append(a.alias)
+    return [{"version_no": v.version_no, "aliases": aliases.get(v.id, [])} for v in rows]
+
+
+async def _render_run_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.current_version_id is None:
+        _flash(request, "This agent has no versions yet — create one before running it.")
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    versions = await _agent_versions(db, agent)
+    current = await db.get(AgentVersion, agent.current_version_id)
+    return templates.TemplateResponse(
+        request,
+        "job_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            choices=_version_choices(versions, current.version_no),
+            input_schema=_pretty_json(current.input_schema),
+            spend=float(await spending.month_spend(db, agent.id)),
+            spending_limit=float(agent.spending_limit) if agent.spending_limit else None,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/agents/{agent_id}/run", response_class=HTMLResponse)
+async def run_agent_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_run_agent(request, agent_id, db, p)
+
+
+@router.post("/agents/{agent_id}/run")
+async def ui_run_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    prompt: str = Form(""),
+    pin: str = Form("current"),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    from sleeper_service.api.v1.jobs import create_job
+
+    form = {"prompt": prompt, "pin": pin}
+
+    async def fail(message: str):
+        return await _render_run_agent(
+            request, agent_id, db, p, error=message, form=form, status_code=400
+        )
+
+    agent, role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+
+    prompt = prompt.strip()
+    if not prompt:
+        return await fail("A prompt is required — it is the job's payload.")
+
+    version = await _pinned_version(db, agent, pin)
+    if version is None:
+        return await fail("That version is no longer available — pick another.")
+
+    job, _existed = await create_job(
+        db,
+        agent,
+        version,
+        context=JobContext(prompt=prompt).model_dump(mode="json"),
+        # Same shape the API records for a user principal, so a job submitted
+        # from the pages is not a different kind of row in the trail.
+        auth_ctx={
+            "type": "user",
+            "user_id": str(p.user.id),
+            "team_role": role,
+            "tenant_id": str(agent.tenant_id),
+            "team_id": str(agent.team_id),
+            "agent_id": str(agent.id),
+        },
+    )
+    # A job refused at the budget pre-flight still has a row and a reason, so
+    # the job page is the right place to land either way.
+    return RedirectResponse(f"/ui/jobs/{job.id}", status_code=303)
+
+
+async def _pinned_version(db: AsyncSession, agent: Agent, pin: str) -> AgentVersion | None:
+    """Resolve the run form's pin, mirroring api.v1.jobs._resolve_version."""
+    if pin.startswith("v:"):
+        return await db.scalar(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == agent.id,
+                AgentVersion.version_no == _safe_int(pin[2:]),
+            )
+        )
+    if pin.startswith("a:"):
+        row = await db.get(VersionAlias, (agent.id, pin[2:]))
+        return await db.get(AgentVersion, row.agent_version_id) if row else None
+    return await db.get(AgentVersion, agent.current_version_id)
+
+
+def _safe_int(raw: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
+# --- Models registry ---
+#
+# Instance-level rather than per-tenant, and superuser-managed, so it hangs off
+# /ui/models rather than a tenant path. Readable by any signed-in user, matching
+# GET /v1/models: the version form's "register it under Models first" has to
+# name somewhere its reader can actually look.
+
+
+async def _render_models(
+    request: Request,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    tenants = await _visible_tenants(db, p)
+    return templates.TemplateResponse(
+        request,
+        "models.html",
+        _ctx(
+            request,
+            p,
+            tenant=next(iter(tenants), None),
+            tenants=tenants,
+            section="models",
+            models=list(await db.scalars(select(Model).order_by(Model.provider, Model.name))),
+            can_manage=p.user.is_superuser,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/models", response_class=HTMLResponse)
+async def models_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_models(request, db, p)
+
+
+@router.post("/models")
+async def ui_create_model(
+    request: Request,
+    provider: str = Form(""),
+    name: str = Form(""),
+    model_string: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {"provider": provider, "name": name, "model_string": model_string}
+
+    async def fail(message: str):
+        return await _render_models(request, db, p, error=message, form=form, status_code=400)
+
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/models", status_code=303)
+    provider, name, model_string = provider.strip(), name.strip(), model_string.strip()
+    if not provider or not name or not model_string:
+        return await fail("Provider, name and model string are all required.")
+    dup = await db.scalar(select(Model).where(Model.provider == provider, Model.name == name))
+    if dup is not None:
+        return await fail(f"{provider}/{name} is already registered.")
+    # model_string is what a version stores and what the version form matches
+    # on, so two rows sharing one would make the dropdown ambiguous.
+    dup = await db.scalar(select(Model).where(Model.model_string == model_string))
+    if dup is not None:
+        return await fail(f"{model_string!r} is already registered as {dup.provider}/{dup.name}.")
+    db.add(Model(provider=provider, name=name, model_string=model_string))
+    await db.commit()
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/models/{model_id}/delete")
+async def ui_delete_model(
+    request: Request,
+    model_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    back = RedirectResponse("/ui/models", status_code=303)
+    if not p.user.is_superuser:
+        return back
+    model = await db.get(Model, model_id)
+    if model is None:
+        return back
+    # agent_versions.model_id is a plain FK, so the delete would otherwise come
+    # back as an IntegrityError rather than something a person can act on.
+    users = list(
+        await db.scalars(
+            select(Agent.name)
+            .join(AgentVersion, AgentVersion.agent_id == Agent.id)
+            .where(AgentVersion.model_id == model.id)
+            .distinct()
+            .order_by(Agent.name)
+            .limit(4)
+        )
+    )
+    if users:
+        named = ", ".join(users[:3]) + (" and more" if len(users) > 3 else "")
+        _flash(request, f"{model.model_string} is used by versions of {named}.")
+        return back
+    await db.delete(model)
+    await db.commit()
+    return back
+
+
+# --- Connections: the data stores and MCP servers a version can be granted ---
+#
+# Both registries are tenant-level and tenant-admin managed, so they share one
+# page. Listing is open to anyone with a team in the tenant, matching
+# `_gate(admin=False)` on both API routers — an editor picking grants on the
+# version form has to be able to see what exists.
+
+# Blank grant rows offered on the version form.
+GRANT_ROWS = 3
+STORE_MODES = ("ro", "rw")
+# Config key each store type cannot work without, mirroring
+# api.v1.data_stores.REQUIRED_CONFIG.
+STORE_REQUIRED_CONFIG = {
+    "s3": "bucket",
+    "azure_blob": "container",
+    "gcs": "bucket",
+    "box": "folder_id",
+    "local": "base_path",
+}
+STORE_TYPES = tuple(sorted(STORE_REQUIRED_CONFIG))
+MCP_TRANSPORTS = ("streamable_http", "sse", "stdio")
+# Types whose SDK falls back to the host process's ambient cloud identity when
+# no credential is given — see api.v1.data_stores.AMBIENT_CREDENTIAL_TYPES for
+# why that is superuser-only.
+AMBIENT_STORE_TYPES = {"s3", "azure_blob", "gcs"}
+
+
+async def _tenant_admin_page(
+    db: AsyncSession, p: UserPrincipal, tenant_id: uuid.UUID
+) -> tuple[Tenant | None, bool, RedirectResponse | None]:
+    """Visible tenant plus whether this user administers it. Non-admins still
+    get the page — they need to read the registries to grant against them."""
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return None, False, tenant
+    return tenant, await is_tenant_admin(db, p, tenant_id), None
+
+
+async def _tenant_stores(db: AsyncSession, tenant_id: uuid.UUID) -> list[DataStore]:
+    return list(
+        await db.scalars(
+            select(DataStore).where(DataStore.tenant_id == tenant_id).order_by(DataStore.name)
+        )
+    )
+
+
+async def _tenant_mcp_servers(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpServer]:
+    return list(
+        await db.scalars(
+            select(McpServer).where(McpServer.tenant_id == tenant_id).order_by(McpServer.name)
+        )
+    )
+
+
+@router.get("/t/{tenant_id}/connections", response_class=HTMLResponse)
+async def connections_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    return templates.TemplateResponse(
+        request,
+        "connections.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="connections",
+            stores=await _tenant_stores(db, tenant.id),
+            servers=await _tenant_mcp_servers(db, tenant.id),
+            can_manage=is_admin,
+        ),
+    )
+
+
+async def _render_new_store(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    if not is_admin:
+        return RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "data_store_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="connections",
+            store_types=STORE_TYPES,
+            required_config=STORE_REQUIRED_CONFIG,
+            is_superuser=p.user.is_superuser,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/t/{tenant_id}/data-stores/new", response_class=HTMLResponse)
+async def new_data_store_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_new_store(request, tenant_id, db, p)
+
+
+@router.post("/t/{tenant_id}/data-stores")
+async def ui_create_data_store(
+    request: Request,
+    tenant_id: uuid.UUID,
+    name: str = Form(""),
+    type: str = Form(""),
+    config: str = Form(""),
+    credentials: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {"name": name, "type": type, "config": config, "credentials": credentials}
+
+    async def fail(message: str):
+        return await _render_new_store(
+            request, tenant_id, db, p, error=message, form=form, status_code=400
+        )
+
+    tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    if not is_admin:
+        return RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+
+    name = name.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    if type not in STORE_REQUIRED_CONFIG:
+        return await fail(f"Pick a store type — one of {', '.join(STORE_TYPES)}.")
+    store_config, err = _form_json_object(config, "Config")
+    if err:
+        return await fail(err)
+    store_config = store_config or {}
+    required = STORE_REQUIRED_CONFIG[type]
+    if required not in store_config:
+        return await fail(f"A {type} store needs {required!r} in its config.")
+    store_creds, err = _form_json_object(credentials, "Credentials")
+    if err:
+        return await fail(err)
+
+    # Both gates are api.v1.data_stores', restated because the UI must not be
+    # a way around them: a `local` store or a credential-less cloud store runs
+    # on the platform's own identity rather than the tenant's.
+    if type == "local" and not p.user.is_superuser:
+        return await fail("Only instance superusers may register local data stores.")
+    if type in AMBIENT_STORE_TYPES and not store_creds and not p.user.is_superuser:
+        return await fail(
+            f"A {type} store needs explicit credentials — without them it runs on the "
+            "platform's own cloud identity, which only instance superusers may configure."
+        )
+
+    dup = await db.scalar(
+        select(DataStore).where(DataStore.tenant_id == tenant.id, DataStore.name == name)
+    )
+    if dup is not None:
+        return await fail(f"A data store named {name!r} already exists in this tenant.")
+
+    db.add(
+        DataStore(
+            tenant_id=tenant.id,
+            name=name,
+            type=type,
+            config=store_config,
+            credentials_enc=encrypt(json.dumps(store_creds)) if store_creds else None,
+        )
+    )
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+
+
+@router.post("/t/{tenant_id}/data-stores/{store_id}/delete")
+async def ui_delete_data_store(
+    request: Request,
+    tenant_id: uuid.UUID,
+    store_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    back = RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+    if not is_admin:
+        return back
+    store = await db.get(DataStore, store_id)
+    if store is None or store.tenant_id != tenant_id:
+        return back
+    # Grants name a store by name or id and resolve at run time, so deleting
+    # one still granted turns every job on that version into a GrantError.
+    holders = await _versions_granting(db, tenant_id, "data_store_grants", "store", store)
+    if holders:
+        _flash(
+            request,
+            f"{store.name} is still granted to {holders} — publish versions without it first.",
+        )
+        return back
+    await db.delete(store)
+    await db.commit()
+    return back
+
+
+async def _render_new_mcp_server(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    if not is_admin:
+        return RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "mcp_server_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="connections",
+            transports=MCP_TRANSPORTS,
+            is_superuser=p.user.is_superuser,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/t/{tenant_id}/mcp-servers/new", response_class=HTMLResponse)
+async def new_mcp_server_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_new_mcp_server(request, tenant_id, db, p)
+
+
+@router.post("/t/{tenant_id}/mcp-servers")
+async def ui_create_mcp_server(
+    request: Request,
+    tenant_id: uuid.UUID,
+    name: str = Form(""),
+    transport: str = Form(""),
+    endpoint: str = Form(""),
+    credentials: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {
+        "name": name,
+        "transport": transport,
+        "endpoint": endpoint,
+        "credentials": credentials,
+    }
+
+    async def fail(message: str):
+        return await _render_new_mcp_server(
+            request, tenant_id, db, p, error=message, form=form, status_code=400
+        )
+
+    tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    if not is_admin:
+        return RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+
+    name = name.strip()
+    endpoint = endpoint.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    if transport not in MCP_TRANSPORTS:
+        return await fail(f"Pick a transport — one of {', '.join(MCP_TRANSPORTS)}.")
+    if not endpoint:
+        return await fail(
+            "Command line is required." if transport == "stdio" else "Endpoint URL is required."
+        )
+    if transport == "stdio" and not p.user.is_superuser:
+        return await fail("Only instance superusers may register stdio MCP servers.")
+    if transport != "stdio":
+        # The worker connects to this on every granted job, so it clears the
+        # same address policy as a callback URL (audit 5). Checked again at
+        # connect time in runtime/toolsets.
+        try:
+            validate_mcp_url(endpoint)
+        except OutboundUrlError as e:
+            return await fail(str(e))
+    server_creds, err = _form_json_object(credentials, "Credentials")
+    if err:
+        return await fail(err)
+
+    dup = await db.scalar(
+        select(McpServer).where(McpServer.tenant_id == tenant.id, McpServer.name == name)
+    )
+    if dup is not None:
+        return await fail(f"An MCP server named {name!r} already exists in this tenant.")
+
+    db.add(
+        McpServer(
+            tenant_id=tenant.id,
+            name=name,
+            endpoint=endpoint,
+            transport=transport,
+            credentials_enc=encrypt(json.dumps(server_creds)) if server_creds else None,
+        )
+    )
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+
+
+@router.post("/t/{tenant_id}/mcp-servers/{server_id}/delete")
+async def ui_delete_mcp_server(
+    request: Request,
+    tenant_id: uuid.UUID,
+    server_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _tenant, is_admin, redirect = await _tenant_admin_page(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    back = RedirectResponse(f"/ui/t/{tenant_id}/connections", status_code=303)
+    if not is_admin:
+        return back
+    server = await db.get(McpServer, server_id)
+    if server is None or server.tenant_id != tenant_id:
+        return back
+    holders = await _versions_granting(db, tenant_id, "tool_grants", "server", server)
+    if holders:
+        _flash(
+            request,
+            f"{server.name} is still granted to {holders} — publish versions without it first.",
+        )
+        return back
+    await db.delete(server)
+    await db.commit()
+    return back
+
+
+async def _versions_granting(
+    db: AsyncSession, tenant_id: uuid.UUID, column: str, key: str, row
+) -> str:
+    """Agents whose *current* version still grants this store/server, named for
+    an error message; empty string if none.
+
+    Only current versions count. Old versions keep their grants forever — they
+    are immutable — so checking every version would make a registry entry
+    undeletable after one job, while a dangling grant on a version nothing
+    dispatches to cannot break a run.
+    """
+    stmt = (
+        select(Agent.name, getattr(AgentVersion, column))
+        .join(AgentVersion, Agent.current_version_id == AgentVersion.id)
+        .where(Agent.tenant_id == tenant_id, Agent.archived_at.is_(None))
+        .order_by(Agent.name)
+    )
+    names = [
+        agent_name
+        for agent_name, grants in (await db.execute(stmt)).all()
+        for g in (grants or [])
+        if isinstance(g, dict) and str(g.get(key, "")) in (row.name, str(row.id))
+    ]
+    unique = list(dict.fromkeys(names))
+    if not unique:
+        return ""
+    if len(unique) > 3:
+        return f"{', '.join(unique[:3])} and {len(unique) - 3} more"
+    return ", ".join(unique)
+
+
+# --- Invoke keys ---
+#
+# Agent-scoped data-plane keys only: those are what make an agent built in the
+# UI actually callable. Tenant- and team-scoped keys stay on the API until
+# there is a settings section with somewhere to put them.
+
+
+async def _key_admin_page(
+    db: AsyncSession, p: UserPrincipal, agent_id: uuid.UUID
+) -> tuple[Agent | None, RedirectResponse | None]:
+    """Gate for the invoke-key pages, mirroring api_keys._require_scope_admin
+    at agent scope: owner of the agent's team, where editor is not enough — a
+    key outlives the session that made it and carries spend.
+
+    Unlike the other agent-scoped forms this stays open on an archived agent:
+    retiring one is exactly when its keys want revoking. Issuing is blocked
+    separately.
+    """
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return None, RedirectResponse("/ui", status_code=303)
+    if await _team_role(db, p, agent.team_id) != Role.OWNER:
+        return None, RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    return agent, None
+
+
+async def _invoke_keys(db: AsyncSession, agent_id: uuid.UUID) -> list[ApiKey]:
+    return list(
+        await db.scalars(
+            select(ApiKey)
+            .where(
+                ApiKey.kind == KeyKind.INVOKE,
+                ApiKey.scope == KeyScope.AGENT,
+                ApiKey.scope_id == agent_id,
+            )
+            .order_by(ApiKey.created_at.desc())
+        )
+    )
+
+
+@router.get("/agents/{agent_id}/invoke-keys/new", response_class=HTMLResponse)
+async def new_invoke_key_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.archived_at is not None:
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "invoke_key_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            form={},
+        ),
+    )
+
+
+@router.post("/agents/{agent_id}/invoke-keys")
+async def ui_create_invoke_key(
+    request: Request,
+    agent_id: uuid.UUID,
+    name: str = Form(""),
+    rate_limit: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.archived_at is not None:
+        _flash(request, "This agent is archived — restore it before issuing a key.")
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+    async def fail(message: str):
+        return templates.TemplateResponse(
+            request,
+            "invoke_key_new.html",
+            _ctx(
+                request,
+                p,
+                tenant=await db.get(Tenant, agent.tenant_id),
+                tenants=await _visible_tenants(db, p),
+                section="agents",
+                agent=agent,
+                error=message,
+                form={"name": name, "rate_limit": rate_limit},
+            ),
+            status_code=400,
+        )
+
+    name = name.strip()
+    if not name:
+        return await fail("Give the key a name — it is the only way to tell keys apart later.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    limit: int | None = None
+    if rate_limit.strip():
+        # Mirrors InvokeKeyCreate.rate_limit (ge=1); the upper bound is the UI's
+        # own, since a limit past it is indistinguishable from no limit.
+        limit, err = _form_int(rate_limit.strip(), 0, 1, 100000, "Rate limit")
+        if err:
+            return await fail(err)
+
+    plaintext, key_hash = generate_key(KeyKind.INVOKE)
+    key = ApiKey(
+        kind=KeyKind.INVOKE,
+        scope=KeyScope.AGENT,
+        scope_id=agent.id,
+        key_hash=key_hash,
+        name=name,
+        rate_limit=limit,
+    )
+    db.add(key)
+    await db.commit()
+    await db.refresh(key)
+
+    # Rendered straight into this response rather than redirected through the
+    # session: the session cookie is signed, not encrypted, so flashing the
+    # secret would park a live data-plane credential in the browser's cookie
+    # jar and every Set-Cookie header along the way.
+    return templates.TemplateResponse(
+        request,
+        "invoke_key_created.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            key=key,
+            plaintext=plaintext,
+            base_url=get_settings().public_base_url.rstrip("/"),
+        ),
+        status_code=201,
+    )
+
+
+@router.post("/agents/{agent_id}/invoke-keys/{key_id}/revoke")
+async def ui_revoke_invoke_key(
+    agent_id: uuid.UUID,
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    key = await db.get(ApiKey, key_id)
+    if (
+        key is not None
+        and key.kind == KeyKind.INVOKE
+        and key.scope == KeyScope.AGENT
+        and key.scope_id == agent_id
+        and key.revoked_at is None
+    ):
+        key.revoked_at = datetime.now(UTC)
+        await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
 async def _render_new_version(
     request: Request,
     agent_id: uuid.UUID,
@@ -1463,6 +2438,7 @@ async def _render_new_version(
     if redirect is not None:
         return redirect
 
+    form = form or {}
     # Prefilled from the current version, so iterating on a prompt is an edit
     # rather than a retype.
     current = (
@@ -1472,6 +2448,18 @@ async def _render_new_version(
         await db.scalar(select(Model.model_string).where(Model.id == current.model_id))
         if current is not None and current.model_id is not None
         else None
+    )
+    stores = [row.name for row in await _tenant_stores(db, agent.tenant_id)]
+    servers = [row.name for row in await _tenant_mcp_servers(db, agent.tenant_id)]
+    store_rows = _grant_rows(
+        form.get("store_grant_rows") or (current.data_store_grants if current else None),
+        ("store", "prefix", "mode"),
+        GRANT_ROWS,
+    )
+    tool_rows = _grant_rows(
+        form.get("tool_grant_rows") or (current.tool_grants if current else None),
+        ("server", "tools"),
+        GRANT_ROWS,
     )
     return templates.TemplateResponse(
         request,
@@ -1488,9 +2476,22 @@ async def _render_new_version(
             current_prompt=current.prompt if current else "",
             current_iters=current.max_iterations if current else 10,
             current_timeout=current.timeout_s if current else 300,
+            current_output_schema=_pretty_json(current.output_schema if current else None),
+            current_input_schema=_pretty_json(current.input_schema if current else None),
+            current_params=_pretty_json(current.params if current else None),
+            stores=stores,
+            servers=servers,
+            store_modes=STORE_MODES,
+            store_rows=store_rows,
+            tool_rows=tool_rows,
+            # An empty registry normally means "nothing to grant", but a grant
+            # left over from the API — or from a store since deleted — still
+            # has to be editable, or saving would drop it without saying so.
+            show_store_grid=bool(stores) or any(row[0] for row in store_rows),
+            show_tool_grid=bool(servers) or any(row[0] for row in tool_rows),
             next_version_no=(current.version_no + 1) if current else 1,
             error=error,
-            form=form or {},
+            form=form,
         ),
         status_code=status_code,
     )
@@ -1514,14 +2515,31 @@ async def ui_create_version(
     prompt: str = Form(""),
     max_iterations: str = Form("10"),
     timeout_s: str = Form("300"),
+    output_schema: str = Form(""),
+    input_schema: str = Form(""),
+    params: str = Form(""),
+    grant_store: list[str] = Form(default_factory=list),
+    grant_prefix: list[str] = Form(default_factory=list),
+    grant_mode: list[str] = Form(default_factory=list),
+    grant_server: list[str] = Form(default_factory=list),
+    grant_tools: list[str] = Form(default_factory=list),
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
 ):
+    store_grants = _store_grants_from_form(grant_store, grant_prefix, grant_mode)
+    tool_grants = _tool_grants_from_form(grant_server, grant_tools)
     form = {
         "model": model,
         "prompt": prompt,
         "max_iterations": max_iterations,
         "timeout_s": timeout_s,
+        "output_schema": output_schema,
+        "input_schema": input_schema,
+        "params": params,
+        # Re-rendered as rows rather than raw fields, so a rejected submission
+        # comes back with the grants the user picked still in place.
+        "store_grant_rows": store_grants,
+        "tool_grant_rows": tool_grants,
     }
 
     async def fail(message: str):
@@ -1542,9 +2560,33 @@ async def ui_create_version(
     timeout, err = _form_int(timeout_s, 300, 1, 3600, "Timeout")
     if err:
         return await fail(err)
+    out_schema, err = _form_json_object(output_schema, "Output schema", as_schema=True)
+    if err:
+        return await fail(err)
+    in_schema, err = _form_json_object(input_schema, "Input schema", as_schema=True)
+    if err:
+        return await fail(err)
+    model_params, err = _form_json_object(params, "Model params")
+    if err:
+        return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
-        return await fail(f"Unknown model {model!r} — register it in the models registry first.")
+        return await fail(f"Unknown model {model!r} — register it under Models first.")
+
+    # A grant naming something the tenant does not have is a GrantError on
+    # every job the version runs, so it is refused here rather than at dispatch.
+    known_stores = {s.name for s in await _tenant_stores(db, agent.tenant_id)}
+    for g in store_grants:
+        if g["store"] not in known_stores:
+            return await fail(f"No data store named {g['store']!r} in this tenant.")
+    known_servers = {m.name for m in await _tenant_mcp_servers(db, agent.tenant_id)}
+    for g in tool_grants:
+        if g["server"] not in known_servers:
+            return await fail(f"No MCP server named {g['server']!r} in this tenant.")
+    if len({g["store"] for g in store_grants}) != len(store_grants):
+        return await fail("Each data store may be granted once — merge the duplicate rows.")
+    if len({g["server"] for g in tool_grants}) != len(tool_grants):
+        return await fail("Each MCP server may be granted once — merge the duplicate rows.")
 
     await _new_version(
         db,
@@ -1554,6 +2596,11 @@ async def ui_create_version(
         model=model_row,
         max_iterations=iterations,
         timeout_s=timeout,
+        params=model_params,
+        input_schema=in_schema,
+        output_schema=out_schema,
+        tool_grants=tool_grants,
+        data_store_grants=store_grants,
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
@@ -1612,12 +2659,9 @@ async def version_detail(
             author=author,
             aliases=aliases,
             is_current=version.id == agent.current_version_id,
-            output_schema=json.dumps(version.output_schema, indent=2)
-            if version.output_schema
-            else None,
-            input_schema=json.dumps(version.input_schema, indent=2)
-            if version.input_schema
-            else None,
+            output_schema=_pretty_json(version.output_schema),
+            input_schema=_pretty_json(version.input_schema),
+            params=_pretty_json(version.params),
         ),
     )
 
@@ -2028,8 +3072,57 @@ async def job_detail(
             tree_children=bool(tree_html),
             tree_html=tree_html,
             can_submit=role in (Role.OWNER, Role.EDITOR),
+            feedback=await db.scalar(select(Feedback).where(Feedback.job_id == job.id)),
+            # The API gates feedback on learning being on, since a vote with
+            # nowhere to fold into is a vote thrown away.
+            takes_feedback=learning_enabled(agent.options or {}),
         ),
     )
+
+
+@router.post("/jobs/{job_id}/feedback")
+async def ui_submit_feedback(
+    request: Request,
+    job_id: uuid.UUID,
+    vote: str = Form(""),
+    comment: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    """Record a vote on a result, feeding runtime/learning the same way the
+    signed feedback URL does.
+
+    No token here: that token exists so the party holding a callback URL can
+    reply without a platform key. A signed-in user with an editor role on the
+    agent's team is a stronger claim than holding it, so the session is the
+    credential and the role is the gate.
+    """
+    from sleeper_service.queue import get_pool
+
+    job = await db.get(Job, job_id)
+    if job is None:
+        return RedirectResponse("/ui", status_code=303)
+    back = RedirectResponse(f"/ui/jobs/{job_id}", status_code=303)
+    agent = await db.get(Agent, job.agent_id)
+    if await _team_role(db, p, agent.team_id) not in (Role.OWNER, Role.EDITOR):
+        return back
+    if not learning_enabled(agent.options or {}):
+        _flash(request, f"{agent.name} does not have learning switched on.")
+        return back
+    if vote not in ("1", "-1"):
+        _flash(request, "Pick helpful or unhelpful.")
+        return back
+    if await db.scalar(select(Feedback).where(Feedback.job_id == job.id)) is not None:
+        _flash(request, "This job already has feedback — one vote per job.")
+        return back
+
+    fb = Feedback(job_id=job.id, vote=int(vote), comment=comment.strip()[:2000] or None)
+    db.add(fb)
+    await db.commit()
+    await db.refresh(fb)
+    pool = await get_pool()
+    await pool.enqueue_job("fold_feedback", str(fb.id))
+    return back
 
 
 # --- Actions (owner/editor gated, mirroring the API) ---

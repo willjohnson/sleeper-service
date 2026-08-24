@@ -29,6 +29,112 @@
              value="{{ form.timeout_s or current_timeout }}"> <span class="muted">second timeout</span>
     </div>
 
+    <div class="form-section">Output and input</div>
+
+    <label for="nv-out">Output schema</label>
+    <div>
+      <textarea id="nv-out" name="output_schema" rows="10" class="mono"
+                placeholder='{"type": "object", "properties": {"risk_level": {"type": "string"}}, "required": ["risk_level"]}'>{{ form.output_schema if form.output_schema is defined else current_output_schema }}</textarea>
+      <div class="muted" style="font-size:12px">
+        JSON Schema. Set one and the model must return JSON matching it — that is what
+        makes the agent callable as a workflow node rather than a chat box, and what
+        <code>is_valid</code> eval checks grade against. Leave blank for free text.
+      </div>
+    </div>
+
+    <label for="nv-in">Input schema</label>
+    <div>
+      <textarea id="nv-in" name="input_schema" rows="6" class="mono"
+                placeholder="optional">{{ form.input_schema if form.input_schema is defined else current_input_schema }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Validates the job payload before the run, so a malformed caller fails fast
+        instead of paying for a confused one.
+      </div>
+    </div>
+
+    <label for="nv-params">Model params</label>
+    <div>
+      <textarea id="nv-params" name="params" rows="4" class="mono"
+                placeholder='{"temperature": 0.2}'>{{ form.params if form.params is defined else current_params }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Passed through to the provider for this version.
+      </div>
+    </div>
+
+    <div class="form-section">Grants</div>
+
+    <label>Data stores</label>
+    <div>
+      {% if show_store_grid %}
+      <div class="check-row check-head"><span>Store</span><span>Prefix</span><span>Mode</span></div>
+      {% for store, prefix, mode in store_rows %}
+      <div class="check-row">
+        <select name="grant_store">
+          <option value="">—</option>
+          {% for s in stores %}
+          <option value="{{ s }}" {% if store == s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+          {# A grant the registry no longer has still needs an option, or the
+             select would silently drop it on save. Kept selectable so the
+             submit-time check can name it. #}
+          {% if store and store not in stores %}
+          <option value="{{ store }}" selected>{{ store }} — not registered</option>
+          {% endif %}
+        </select>
+        <input type="text" name="grant_prefix" value="{{ prefix }}"
+               placeholder="{{ 'reports/2026' if loop.first else '' }}">
+        <select name="grant_mode">
+          {% for m in store_modes %}
+          <option value="{{ m }}" {% if mode == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        The version gets <code>list_files</code> and <code>read_file</code> beneath the
+        prefix, plus <code>write_file</code> at <code>rw</code>. Nothing outside it is
+        reachable; a blank prefix grants the whole store.
+      </div>
+      {% else %}
+      <div class="muted" style="font-size:12px">
+        No data stores registered in this tenant —
+        <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
+      </div>
+      {% endif %}
+    </div>
+
+    <label>MCP servers</label>
+    <div>
+      {% if show_tool_grid %}
+      <div class="check-row check-head"><span>Server</span><span>Tools</span><span></span></div>
+      {% for server, tools in tool_rows %}
+      <div class="check-row">
+        <select name="grant_server">
+          <option value="">—</option>
+          {% for m in servers %}
+          <option value="{{ m }}" {% if server == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+          {% if server and server not in servers %}
+          <option value="{{ server }}" selected>{{ server }} — not registered</option>
+          {% endif %}
+        </select>
+        <input type="text" name="grant_tools" value="{{ tools }}"
+               placeholder="{{ 'lookup, search — blank for all' if loop.first else '' }}">
+        <span></span>
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        Comma-separated tool names to allowlist, or blank to take everything the server
+        offers.
+      </div>
+      {% else %}
+      <div class="muted" style="font-size:12px">
+        No MCP servers registered in this tenant —
+        <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
+      </div>
+      {% endif %}
+    </div>
+
     <div class="form-actions">
       <button type="submit">Create version</button>
       <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>

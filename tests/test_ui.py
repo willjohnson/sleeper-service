@@ -6,7 +6,10 @@ import re
 import uuid
 
 from httpx import AsyncClient
+from sqlalchemy import select
 
+from sleeper_service.db.models import Feedback, Job
+from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.runtime import runner
 from sleeper_service.runtime.evals import run_eval
 from tests.conftest import Bootstrap, auth
@@ -1315,3 +1318,1012 @@ async def test_outsider_cannot_see_a_team(client: AsyncClient, org: dict) -> Non
     r = await client.get(f"/ui/teams/{org['team']['id']}", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/ui"
+
+
+async def test_create_and_revoke_an_invoke_key_from_the_ui(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """The whole point of the panel: an agent built in the UI becomes callable
+    without ever touching /v1/api-keys."""
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")  # owner
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "New key" in page.text
+    assert "No keys yet" in page.text
+
+    assert (await client.get(f"/ui/agents/{agent_id}/invoke-keys/new")).status_code == 200
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": _csrf(page.text), "name": "n8n production", "rate_limit": "60"},
+    )
+    assert r.status_code == 201
+    secret = re.search(r"(ss_invoke_[A-Za-z0-9_-]+)", r.text).group(1)
+    assert "shown once" in r.text or "one and only time" in r.text
+    assert agent_id in r.text  # the curl example targets this agent
+
+    # The secret authenticates: 403 is the invoke key being refused a management
+    # endpoint, which it only reaches once the credential itself has passed.
+    assert (await client.get("/v1/agents", headers=auth(secret))).status_code == 403
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "n8n production" in page.text
+    assert "60/min" in page.text
+    assert secret not in page.text, "the plaintext key must never render again"
+
+    key_id = re.search(rf"/ui/agents/{agent_id}/invoke-keys/([0-9a-f-]+)/revoke", page.text).group(
+        1
+    )
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys/{key_id}/revoke",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get("/v1/agents", headers=auth(secret))).status_code == 401
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "revoked" in page.text
+    assert "/revoke" not in page.text, "a revoked key keeps no revoke button"
+
+
+async def test_invoke_key_form_rejects_bad_input(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/invoke-keys/new")
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys", data={"_csrf_token": token, "name": "  "}
+    )
+    assert r.status_code == 400
+    assert "name" in r.text.lower()
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "ok", "rate_limit": "nope"},
+    )
+    assert r.status_code == 400
+    assert "whole number" in r.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "ok", "rate_limit": "0"},
+    )
+    assert r.status_code == 400
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    assert (await client.get("/v1/api-keys", headers=alice)).json() == []
+
+    # Blank rate limit is the no-limit case, not an error.
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "unlimited", "rate_limit": ""},
+    )
+    assert r.status_code == 201
+    keys = (await client.get("/v1/api-keys", headers=alice)).json()
+    assert [(k["name"], k["rate_limit"], k["scope"]) for k in keys] == [
+        ("unlimited", None, "agent")
+    ]
+
+
+async def test_invoke_keys_are_owner_only(client: AsyncClient, risk_agent: dict) -> None:
+    """Editor is enough to publish a version but not to mint a credential that
+    outlives the session and spends the agent's budget — matching the API."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        "/v1/api-keys/invoke",
+        headers=alice,
+        json={"scope": "agent", "scope_id": agent_id, "name": "alices-key"},
+    )
+    assert r.status_code == 201
+    key_id = r.json()["id"]
+
+    for email in ("bob@example.com", "carol@example.com"):  # editor, viewer
+        await _login(client, email)
+        page = await client.get(f"/ui/agents/{agent_id}")
+        assert "Invoke keys" not in page.text, email
+        assert "alices-key" not in page.text, email
+
+        token = _csrf(page.text)
+        r = await client.get(f"/ui/agents/{agent_id}/invoke-keys/new", follow_redirects=False)
+        assert r.status_code == 303, email
+        await client.post(
+            f"/ui/agents/{agent_id}/invoke-keys",
+            data={"_csrf_token": token, "name": "sneaky"},
+        )
+        await client.post(
+            f"/ui/agents/{agent_id}/invoke-keys/{key_id}/revoke", data={"_csrf_token": token}
+        )
+
+    keys = (await client.get("/v1/api-keys", headers=alice)).json()
+    assert [(k["name"], k["revoked_at"]) for k in keys] == [("alices-key", None)]
+
+
+async def test_archived_agent_issues_no_keys_but_still_revokes(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    token = _csrf(page.text)
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys", data={"_csrf_token": token, "name": "live-key"}
+    )
+    assert r.status_code == 201
+    await client.post(f"/ui/agents/{agent_id}/archive", data={"_csrf_token": token})
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "live-key" in page.text  # still listed, still revocable
+    assert "New key" not in page.text
+    r = await client.get(f"/ui/agents/{agent_id}/invoke-keys/new", follow_redirects=False)
+    assert r.status_code == 303
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "posthumous"},
+        follow_redirects=True,
+    )
+    assert "restore it before issuing a key" in r.text
+
+    key_id = re.search(rf"/ui/agents/{agent_id}/invoke-keys/([0-9a-f-]+)/revoke", page.text).group(
+        1
+    )
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys/{key_id}/revoke",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    keys = (await client.get("/v1/api-keys", headers=alice)).json()
+    assert [k["name"] for k in keys] == ["live-key"]
+    assert keys[0]["revoked_at"] is not None
+
+
+RISK_OUT_SCHEMA = {
+    "type": "object",
+    "properties": {"risk_level": {"type": "string", "enum": ["low", "high"]}},
+    "required": ["risk_level"],
+}
+
+
+async def test_version_form_sets_schemas_and_params(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+
+    # The form arrives prefilled from the current version, so publishing v2
+    # does not silently drop the schema v1 declared.
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert "risk_level" in page.text
+    assert "Output schema" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "model": "test:default",
+            "prompt": "v2 prompt",
+            "max_iterations": "5",
+            "timeout_s": "60",
+            "output_schema": json.dumps(RISK_OUT_SCHEMA),
+            "input_schema": '{"type": "object"}',
+            "params": '{"temperature": 0.2}',
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    v2 = next(v for v in versions if v["version_no"] == 2)
+    assert v2["output_schema"] == RISK_OUT_SCHEMA
+    assert v2["input_schema"] == {"type": "object"}
+    assert v2["params"] == {"temperature": 0.2}
+
+    page = await client.get(f"/ui/agents/{agent_id}/versions/2")
+    assert "temperature" in page.text
+    assert "risk_level" in page.text
+
+
+async def test_version_form_rejects_bad_schemas(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    token = _csrf(page.text)
+
+    base = {
+        "_csrf_token": token,
+        "model": "test:default",
+        "prompt": "v2",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    for field, value, expected in [
+        ("output_schema", "{not json", "not valid JSON"),
+        ("output_schema", "[1, 2]", "must be a JSON object"),
+        # Valid JSON and a valid object, but not a usable schema: the runner
+        # builds an output type from this and every job would fail.
+        ("output_schema", '{"type": "nonesuch"}', "not a valid JSON Schema"),
+        ("input_schema", '{"required": "risk_level"}', "not a valid JSON Schema"),
+        ("params", "12", "must be a JSON object"),
+    ]:
+        r = await client.post(f"/ui/agents/{agent_id}/versions", data={**base, field: value})
+        assert r.status_code == 400, (field, value)
+        assert expected in html.unescape(r.text), (field, value)
+        # the bad input comes back in the form rather than being thrown away
+        assert value.split()[0][:6] in html.unescape(r.text), (field, value)
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert [v["version_no"] for v in versions] == [1]
+
+
+async def test_version_form_edits_grants(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    """Grants are picked from the tenant's registries and round-trip through the
+    form, so republishing does not quietly strip an agent's tools."""
+    tenant_id = risk_agent["tenant"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    root = auth(bootstrap.superuser_key)  # data stores are tenant-admin work
+    for path, body in [
+        (
+            "data-stores",
+            {
+                "name": "reference",
+                "type": "s3",
+                "config": {"bucket": "b"},
+                "credentials": {"access_key": "a", "secret_key": "s"},
+            },
+        ),
+        (
+            "data-stores",
+            {
+                "name": "scratch",
+                "type": "s3",
+                "config": {"bucket": "c"},
+                "credentials": {"access_key": "a", "secret_key": "s"},
+            },
+        ),
+    ]:
+        r = await client.post(f"/v1/tenants/{tenant_id}/{path}", headers=root, json=body)
+        assert r.status_code == 201
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert 'name="grant_store"' in page.text
+    assert "reference" in page.text and "scratch" in page.text
+
+    base = {
+        "_csrf_token": _csrf(page.text),
+        "model": "test:default",
+        "prompt": "v2",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            **base,
+            "grant_store": ["reference", "", ""],
+            "grant_prefix": ["docs/2026/", "", ""],
+            "grant_mode": ["rw", "ro", "ro"],
+            "grant_server": ["", "", ""],
+            "grant_tools": ["", "", ""],
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    v2 = next(v for v in versions if v["version_no"] == 2)
+    # blank rows are dropped, and the prefix is normalised
+    assert v2["data_store_grants"] == [{"store": "reference", "prefix": "docs/2026", "mode": "rw"}]
+
+    # ...and the grant comes back as a filled row on the next version's form
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert 'value="docs/2026"' in page.text
+    assert '<option value="rw" selected>rw</option>' in page.text
+
+
+async def test_version_form_refuses_unknown_grants(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    base = {
+        "_csrf_token": _csrf(page.text),
+        "model": "test:default",
+        "prompt": "v2",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    r = await client.post(f"/ui/agents/{agent_id}/versions", data={**base, "grant_store": ["nope"]})
+    assert r.status_code == 400
+    assert "No data store named 'nope'" in html.unescape(r.text)
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions", data={**base, "grant_server": ["nope"]}
+    )
+    assert r.status_code == 400
+    assert "No MCP server named 'nope'" in html.unescape(r.text)
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert [v["version_no"] for v in versions] == [1]
+
+
+async def test_grant_to_a_deleted_store_survives_the_form(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """A version granting a store the registry no longer has must not have that
+    grant silently swallowed by a <select> with no matching option."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=alice,
+        json={
+            "prompt": "v2",
+            "model": "test/default",
+            "data_store_grants": [{"store": "ghost", "prefix": "", "mode": "ro"}],
+        },
+    )
+    assert r.status_code == 201
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert "ghost" in page.text
+    assert "not registered" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "model": "test:default",
+            "prompt": "v3",
+            "max_iterations": "10",
+            "timeout_s": "300",
+            "grant_store": ["ghost"],
+            "grant_prefix": [""],
+            "grant_mode": ["ro"],
+        },
+    )
+    assert r.status_code == 400
+    assert "No data store named 'ghost'" in html.unescape(r.text)
+
+
+async def test_new_agent_form_takes_an_output_schema(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{tenant_id}/agents/new")
+    assert "Output schema" in page.text
+
+    base = {
+        "_csrf_token": _csrf(page.text),
+        "team_id": org["team"]["id"],
+        "name": "structured-agent",
+        "model": "test:default",
+        "prompt": "Return a risk level.",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    r = await client.post(
+        f"/ui/t/{tenant_id}/agents", data={**base, "output_schema": '{"type": "bogus"}'}
+    )
+    assert r.status_code == 400
+    assert "not a valid JSON Schema" in html.unescape(r.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/agents",
+        data={**base, "output_schema": json.dumps(RISK_OUT_SCHEMA)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    agents = (await client.get("/v1/agents", headers=alice)).json()
+    agent_id = next(a["id"] for a in agents if a["name"] == "structured-agent")
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    assert versions[0]["output_schema"] == RISK_OUT_SCHEMA
+
+
+async def test_connections_registry_round_trip(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    await _login(client, "root@example.com", "root-password")
+
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert page.status_code == 200
+    assert "No data stores yet" in page.text
+    assert "No MCP servers yet" in page.text
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={
+            "_csrf_token": token,
+            "name": "reference",
+            "type": "s3",
+            "config": '{"bucket": "acme-reference"}',
+            "credentials": '{"access_key": "a", "secret_key": "s"}',
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    r = await client.post(
+        f"/ui/t/{tenant_id}/mcp-servers",
+        data={
+            "_csrf_token": token,
+            "name": "crm",
+            "transport": "streamable_http",
+            "endpoint": "https://mcp.example.com/mcp",
+            "credentials": "",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
+    assert [(s["name"], s["type"], s["config"]) for s in stores] == [
+        ("reference", "s3", {"bucket": "acme-reference"})
+    ]
+    servers = (await client.get(f"/v1/tenants/{tenant_id}/mcp-servers", headers=root)).json()
+    assert [(m["name"], m["transport"]) for m in servers] == [("crm", "streamable_http")]
+
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert "reference" in page.text and "crm" in page.text
+    assert "acme-reference" in page.text
+    assert "access_key" not in page.text, "credentials must never be echoed back"
+    assert "stored" in page.text  # ...only that they exist
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{stores[0]['id']}/delete",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+
+
+async def test_connection_forms_reject_bad_input(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    await _login(client, "root@example.com", "root-password")
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    token = _csrf(page.text)
+
+    store = {"_csrf_token": token, "name": "s", "type": "s3", "credentials": '{"access_key": "a"}'}
+    for data, expected in [
+        ({**store, "config": "{"}, "not valid JSON"),
+        ({**store, "config": "{}"}, "needs 'bucket'"),
+        ({**store, "type": "", "config": '{"bucket": "b"}'}, "Pick a store type"),
+        ({**store, "name": "", "config": '{"bucket": "b"}'}, "Name is required"),
+    ]:
+        r = await client.post(f"/ui/t/{tenant_id}/data-stores", data=data)
+        assert r.status_code == 400, expected
+        assert expected in html.unescape(r.text), expected
+
+    server = {"_csrf_token": token, "name": "m", "transport": "streamable_http"}
+    for data, expected in [
+        ({**server, "endpoint": ""}, "Endpoint URL is required"),
+        # audit-5: the worker dials this on every granted job, so it clears the
+        # same address policy as a callback URL.
+        ({**server, "endpoint": "http://localhost:9000/mcp"}, "resolve"),
+        ({**server, "transport": "", "endpoint": "https://a.example.com"}, "Pick a transport"),
+    ]:
+        r = await client.post(f"/ui/t/{tenant_id}/mcp-servers", data=data)
+        assert r.status_code == 400, expected
+        assert expected in html.unescape(r.text).lower() or expected in html.unescape(r.text)
+
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+    assert (await client.get(f"/v1/tenants/{tenant_id}/mcp-servers", headers=root)).json() == []
+
+
+async def test_connection_superuser_gates_hold_in_the_ui(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    """The two gates that exist because these run on the platform's identity
+    rather than the tenant's, not merely because they are unusual."""
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    # Owning the tenant's org team makes alice a tenant admin but not a superuser
+    teams = (await client.get(f"/v1/tenants/{tenant_id}/teams", headers=root)).json()
+    org_team_id = next(t["id"] for t in teams if t["is_org_team"])
+    r = await client.put(
+        f"/v1/teams/{org_team_id}/members/{org['users']['alice']['id']}",
+        headers=root,
+        json={"role": "owner"},
+    )
+    assert r.status_code == 200
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert "New data store" in page.text  # tenant admin, so she may register
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={
+            "_csrf_token": token,
+            "name": "host-disk",
+            "type": "local",
+            "config": '{"base_path": "/"}',
+        },
+    )
+    assert r.status_code == 400
+    assert "superusers" in r.text
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={
+            "_csrf_token": token,
+            "name": "ambient",
+            "type": "s3",
+            "config": '{"bucket": "b"}',
+            "credentials": "",
+        },
+    )
+    assert r.status_code == 400
+    assert "platform's own cloud identity" in html.unescape(r.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/mcp-servers",
+        data={
+            "_csrf_token": token,
+            "name": "shell",
+            "transport": "stdio",
+            "endpoint": "/bin/sh -c 'mcp'",
+        },
+    )
+    assert r.status_code == 400
+    assert "superusers" in r.text
+
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+    assert (await client.get(f"/v1/tenants/{tenant_id}/mcp-servers", headers=root)).json() == []
+
+
+async def test_connections_are_readable_but_not_writable_by_members(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "b"},
+            "credentials": {"access_key": "a"},
+        },
+    )
+    store_id = r.json()["id"]
+
+    await _login(client, "bob@example.com")  # editor, not tenant admin
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    assert page.status_code == 200
+    assert "reference" in page.text, "an editor must see what they can grant"
+    assert "New data store" not in page.text
+    assert "tenant-admin work" in page.text
+
+    token = _csrf(page.text)
+    r = await client.get(f"/ui/t/{tenant_id}/data-stores/new", follow_redirects=False)
+    assert r.status_code == 303
+    await client.post(
+        f"/ui/t/{tenant_id}/data-stores",
+        data={"_csrf_token": token, "name": "x", "type": "s3", "config": '{"bucket": "b"}'},
+    )
+    await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{store_id}/delete", data={"_csrf_token": token}
+    )
+    stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
+    assert [s["name"] for s in stores] == ["reference"]
+
+    # an outsider gets no page at all
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/t/{tenant_id}/connections", follow_redirects=False)
+    assert r.status_code == 303
+
+
+async def test_deleting_a_granted_store_is_refused(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    """Grants resolve by name at run time, so removing a store still granted
+    would turn every job on that version into a GrantError."""
+    tenant_id = risk_agent["tenant"]["id"]
+    agent_id = risk_agent["agent"]["id"]
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "b"},
+            "credentials": {"access_key": "a"},
+        },
+    )
+    store_id = r.json()["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=alice,
+        json={
+            "prompt": "v2",
+            "model": "test/default",
+            "data_store_grants": [{"store": "reference", "prefix": "", "mode": "ro"}],
+        },
+    )
+    assert r.status_code == 201
+
+    await _login(client, "root@example.com", "root-password")
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{store_id}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    # v2 is not promoted yet, so nothing dispatches to it and the delete stands
+    assert (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json() == []
+
+    # ...but once it is current, the store is pinned
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "b"},
+            "credentials": {"access_key": "a"},
+        },
+    )
+    store_id = r.json()["id"]
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+    page = await client.get(f"/ui/t/{tenant_id}/connections")
+    r = await client.post(
+        f"/ui/t/{tenant_id}/data-stores/{store_id}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    assert "still granted to risk-analyzer" in r.text
+    stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
+    assert [s["name"] for s in stores] == ["reference"]
+
+
+async def test_models_registry_page(client: AsyncClient, org: dict, bootstrap: Bootstrap) -> None:
+    root = auth(bootstrap.superuser_key)
+    await _login(client, "root@example.com", "root-password")
+
+    page = await client.get("/ui/models")
+    assert page.status_code == 200
+    assert "Register a model" in page.text
+    token = _csrf(page.text)
+
+    r = await client.post(
+        "/ui/models",
+        data={
+            "_csrf_token": token,
+            "provider": "anthropic",
+            "name": "claude-sonnet-5",
+            "model_string": "anthropic:claude-sonnet-5",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    models = (await client.get("/v1/models", headers=root)).json()
+    assert [(m["provider"], m["name"]) for m in models] == [("anthropic", "claude-sonnet-5")]
+
+    # provider/name and model_string are both unique; a duplicate of either
+    # would make the version form's dropdown ambiguous
+    for data, expected in [
+        (
+            {"provider": "anthropic", "name": "claude-sonnet-5", "model_string": "x:y"},
+            "already registered",
+        ),
+        (
+            {
+                "provider": "anthropic",
+                "name": "other",
+                "model_string": "anthropic:claude-sonnet-5",
+            },
+            "already registered as anthropic/claude-sonnet-5",
+        ),
+        ({"provider": "", "name": "n", "model_string": "s"}, "all required"),
+    ]:
+        r = await client.post("/ui/models", data={"_csrf_token": token, **data})
+        assert r.status_code == 400, expected
+        assert expected in html.unescape(r.text), expected
+    assert len((await client.get("/v1/models", headers=root)).json()) == 1
+
+    # ...and the new model is pickable on the version form
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    assert "anthropic:claude-sonnet-5" in page.text
+
+    r = await client.post(
+        f"/ui/models/{models[0]['id']}/delete",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get("/v1/models", headers=root)).json() == []
+
+
+async def test_deleting_a_model_in_use_is_refused(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    """agent_versions.model_id is a plain FK, so the delete would otherwise
+    surface as an IntegrityError rather than something a person can act on."""
+    root = auth(bootstrap.superuser_key)
+    models = (await client.get("/v1/models", headers=root)).json()
+    in_use = next(m for m in models if m["model_string"] == "test:default")
+
+    await _login(client, "root@example.com", "root-password")
+    page = await client.get("/ui/models")
+    r = await client.post(
+        f"/ui/models/{in_use['id']}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    assert "used by versions of risk-analyzer" in r.text
+    assert [m["id"] for m in (await client.get("/v1/models", headers=root)).json()] == [
+        m["id"] for m in models
+    ]
+
+
+async def test_models_registry_is_superuser_managed(client: AsyncClient, org: dict) -> None:
+    await _login(client, "alice@example.com")  # team owner, not a superuser
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents")
+    assert 'href="/ui/models"' not in page.text
+
+    page = await client.get("/ui/models")
+    assert page.status_code == 200, "readable, matching GET /v1/models"
+    assert "Register a model" not in page.text
+    assert "superuser work" in page.text
+
+    r = await client.post(
+        "/ui/models",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "provider": "p",
+            "name": "n",
+            "model_string": "p:n",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    alice = auth(org["users"]["alice"]["api_key"])
+    assert (await client.get("/v1/models", headers=alice)).json() == []
+
+
+async def test_test_run_submits_a_real_job(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Test run" in page.text
+
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    assert page.status_code == 200
+    assert "current (v1)" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "Assess this event", "pin": "current"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    job_id = r.headers["location"].removeprefix("/ui/jobs/")
+
+    jobs = (await client.get(f"/v1/agents/{agent_id}/jobs", headers=bob)).json()
+    assert [j["id"] for j in jobs] == [job_id]
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["payload"]["prompt"] == "Assess this event"
+    assert job["agent_version_id"] == risk_agent["version"]["id"]
+
+    # the trail records who ran it, in the same shape the API writes
+    async with get_sessionmaker()() as db:
+        row = await db.get(Job, uuid.UUID(job_id))
+        assert row.auth_ctx["type"] == "user"
+        assert row.auth_ctx["user_id"] == risk_agent["users"]["bob"]["id"]
+        assert row.auth_ctx["team_role"] == "editor"
+
+    # and it is a real job: the runner takes it and the page shows the result
+    await runner.execute_job(uuid.UUID(job_id))
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "succeeded" in page.text
+
+
+async def test_test_run_pins_a_version(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=bob,
+        json={"prompt": "v2", "model": "test/default"},
+    )
+    v2_id = r.json()["id"]
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+    await client.put(f"/v1/agents/{agent_id}/aliases/prod", headers=alice, json={"version_no": 1})
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    assert "current (v2)" in page.text
+    assert "prod → v1" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "on v1", "pin": "v:1"},
+        follow_redirects=False,
+    )
+    job = (await client.get(r.headers["location"].replace("/ui/", "/v1/"), headers=bob)).json()
+    assert job["agent_version_id"] == risk_agent["version"]["id"]
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "on prod", "pin": "a:prod"},
+        follow_redirects=False,
+    )
+    job = (await client.get(r.headers["location"].replace("/ui/", "/v1/"), headers=bob)).json()
+    assert job["agent_version_id"] == risk_agent["version"]["id"]
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "current", "pin": "current"},
+        follow_redirects=False,
+    )
+    job = (await client.get(r.headers["location"].replace("/ui/", "/v1/"), headers=bob)).json()
+    assert job["agent_version_id"] == v2_id
+
+
+async def test_test_run_is_editor_only_and_needs_a_prompt(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "   ", "pin": "current"},
+    )
+    assert r.status_code == 400
+    assert "prompt is required" in r.text
+
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Test run" not in page.text
+    r = await client.get(f"/ui/agents/{agent_id}/run", follow_redirects=False)
+    assert r.status_code == 303
+    await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "sneaky", "pin": "current"},
+    )
+    assert (await client.get(f"/v1/agents/{agent_id}/jobs", headers=bob)).json() == []
+
+
+async def test_test_run_refuses_when_the_budget_is_spent(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """create_job's pre-flight still writes an auditable row, so the job page
+    is the honest place to land — the run just never reaches the queue."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.patch(f"/v1/agents/{agent_id}", headers=alice, json={"spending_limit": "0.00"})
+    assert r.status_code == 200
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "too expensive", "pin": "current"},
+        follow_redirects=True,
+    )
+    assert "budget_exceeded" in r.text
+
+
+async def _learning_agent(client: AsyncClient, risk_agent: dict) -> str:
+    """The risk agent with memory + learning on, so it accepts feedback."""
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    r = await client.patch(
+        f"/v1/agents/{agent_id}",
+        headers=alice,
+        json={"options": {"memory": True, "learning": True}},
+    )
+    assert r.status_code == 200
+    return agent_id
+
+
+async def _finished_job(client: AsyncClient, agent_id: str, key: str) -> str:
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=auth(key), json={"context": {"prompt": "hi"}}
+    )
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+    return job_id
+
+
+async def test_feedback_from_the_job_page(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = await _learning_agent(client, risk_agent)
+    bob_key = risk_agent["users"]["bob"]["api_key"]
+    job_id = await _finished_job(client, agent_id, bob_key)
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "Feedback" in page.text
+    assert "Helpful" in page.text
+
+    r = await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "vote": "-1",
+            "comment": "Staffing should be listed first.",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    async with get_sessionmaker()() as db:
+        fb = await db.scalar(select(Feedback).where(Feedback.job_id == uuid.UUID(job_id)))
+        assert fb.vote == -1
+        assert fb.comment == "Staffing should be listed first."
+
+    # the vote replaces the form, and one job takes one vote
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "unhelpful" in page.text
+    assert "Staffing should be listed first." in page.text
+    assert "Helpful</button>" not in page.text
+
+    r = await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={"_csrf_token": _csrf(page.text), "vote": "1"},
+        follow_redirects=True,
+    )
+    assert "one vote per job" in r.text
+    async with get_sessionmaker()() as db:
+        votes = list(
+            await db.scalars(select(Feedback.vote).where(Feedback.job_id == uuid.UUID(job_id)))
+        )
+    assert votes == [-1]
+
+
+async def test_feedback_needs_learning_and_an_editor(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]  # learning off
+    bob_key = risk_agent["users"]["bob"]["api_key"]
+    job_id = await _finished_job(client, agent_id, bob_key)
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "Feedback" not in page.text, "a vote with nowhere to fold is a vote thrown away"
+    r = await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={"_csrf_token": _csrf(page.text), "vote": "1"},
+        follow_redirects=True,
+    )
+    assert "does not have learning switched on" in r.text
+
+    await _learning_agent(client, risk_agent)
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "Helpful</button>" not in page.text
+    await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={"_csrf_token": _csrf(page.text), "vote": "1"},
+    )
+    async with get_sessionmaker()() as db:
+        assert await db.scalar(select(Feedback).where(Feedback.job_id == uuid.UUID(job_id))) is None

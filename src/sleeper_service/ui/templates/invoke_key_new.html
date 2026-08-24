@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}New key for {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}New invoke key <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    An invoke key is a data-plane credential: it may submit jobs to this agent, read
+    their results, and leave feedback — nothing else. It cannot edit the agent, publish
+    a version, or see anything in another team. Give each caller its own key so one can
+    be revoked without taking the rest down.
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/invoke-keys" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="ik-name">Name</label>
+    <div>
+      <input id="ik-name" type="text" name="name" required autofocus maxlength="200"
+             value="{{ form.name or '' }}" placeholder="n8n production workflow">
+      <div class="muted" style="font-size:12px">
+        Who or what holds this key. The secret is shown once and never again, so the
+        name is all you will have to go on when deciding what to revoke.
+      </div>
+    </div>
+
+    <label for="ik-rate">Rate limit</label>
+    <div>
+      <input id="ik-rate" class="short" type="text" name="rate_limit" inputmode="numeric"
+             value="{{ form.rate_limit or '' }}" placeholder="optional">
+      <div class="muted" style="font-size:12px">
+        Requests per minute for this key. Leave blank for no limit.
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create key</button>
+      <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

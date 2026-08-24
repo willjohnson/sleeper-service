@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}New data store · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}New data store <span class="muted" style="font-size:14px">· {{ tenant.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Registers a bucket or folder for this tenant. Nothing reaches it until an agent
+    version is granted a prefix inside it — registering is not granting.
+  </p>
+  <form method="post" action="/ui/t/{{ tenant.id }}/data-stores" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="ds-name">Name</label>
+    <div>
+      <input id="ds-name" type="text" name="name" required autofocus maxlength="200"
+             value="{{ form.name or '' }}" placeholder="reference">
+      <div class="muted" style="font-size:12px">
+        How grants refer to it. Unique within the tenant.
+      </div>
+    </div>
+
+    <label for="ds-type">Type</label>
+    <div>
+      <select id="ds-type" name="type" required>
+        <option value="">—</option>
+        {% for t in store_types %}
+        <option value="{{ t }}" {% if form.type == t %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+      <div class="muted" style="font-size:12px">
+        {% for t, key in required_config.items() %}<code>{{ t }}</code> needs
+        <code>{{ key }}</code>{% if not loop.last %} · {% endif %}{% endfor %}.
+        {% if not is_superuser %}
+        <br><code>local</code> stores are superuser-only: they would read the worker's
+        own filesystem rather than anything of yours.
+        {% endif %}
+      </div>
+    </div>
+
+    <label for="ds-config">Config</label>
+    <div>
+      <textarea id="ds-config" name="config" rows="5" class="mono"
+                placeholder='{"bucket": "acme-reference", "endpoint_url": "https://s3.example.com"}'>{{ form.config or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        JSON. Non-secret settings — bucket, container, folder id, base path, and any
+        endpoint override.
+      </div>
+    </div>
+
+    <label for="ds-creds">Credentials</label>
+    <div>
+      <textarea id="ds-creds" name="credentials" rows="5" class="mono"
+                placeholder='{"access_key": "...", "secret_key": "..."}'>{{ form.credentials or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        JSON, encrypted at rest and never shown again — to change them, replace the
+        store. {% if not is_superuser %}Required for <code>s3</code>, <code>gcs</code>
+        and <code>azure_blob</code>: without them the store runs on the platform's own
+        cloud identity rather than yours.{% else %}Leave blank on
+        <code>s3</code>/<code>gcs</code>/<code>azure_blob</code> only if you intend the
+        store to run on the platform's own cloud identity.{% endif %}
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Register store</button>
+      <a class="cancel" href="/ui/t/{{ tenant.id }}/connections">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -212,8 +212,60 @@
   </div>
 </div>
 
+{% if can_manage_keys %}
 <div class="panel">
-  <h2>Recent jobs</h2>
+  <h2 class="with-action">Invoke keys
+    {% if agent.archived_at is none %}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}/invoke-keys/new">New key</a>
+    </span>
+    {% endif %}
+  </h2>
+  <p class="muted" style="margin-top:0">
+    Data-plane credentials scoped to this agent: submit jobs, read results, leave
+    feedback. Secrets are shown once at creation and stored only as a hash.
+  </p>
+  {% if invoke_keys %}
+  <table>
+    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th class="col-actions"></th></tr>
+    {% for k in invoke_keys %}
+    <tr>
+      <td><strong>{{ k.name or '(unnamed)' }}</strong></td>
+      <td class="muted">{% if k.rate_limit %}{{ k.rate_limit }}/min{% else %}—{% endif %}</td>
+      <td class="muted">{{ k.created_at.strftime('%Y-%m-%d') }}</td>
+      <td>
+        {% if k.revoked_at %}
+        <span class="badge failed">revoked</span>
+        <span class="muted">{{ k.revoked_at.strftime('%Y-%m-%d') }}</span>
+        {% else %}<span class="badge active">active</span>{% endif %}
+      </td>
+      <td>
+        {% if not k.revoked_at %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/agents/{{ agent.id }}/invoke-keys/{{ k.id }}/revoke">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Revoke</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="muted">No keys yet — this agent cannot be called from outside the UI until it has one.</div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2 class="with-action">Recent jobs
+    {% if can_edit and agent.current_version_id %}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}/run">Test run</a>
+    </span>
+    {% endif %}
+  </h2>
   <table>
     <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
     {% for j in recent_jobs %}
