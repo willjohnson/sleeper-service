@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}New team · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}New team{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Teams own agents and carry the roles — owner, editor, viewer. Every team has an owner from
+    the moment it is created.
+  </p>
+  <form method="post" action="/ui/t/{{ tenant.id }}/teams" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="nt-name">Name</label>
+    <input id="nt-name" type="text" name="name" required maxlength="200" autofocus
+           placeholder="risk" value="{{ form.name or '' }}">
+
+    <label for="nt-owner">Owner</label>
+    <select id="nt-owner" name="owner_user_id">
+      {% for u in candidates %}
+      <option value="{{ u.id }}"
+        {% if form.owner_user_id == u.id|string or (not form.owner_user_id and u.id == user.id) %}selected{% endif %}>
+        {{ u.email }}{% if u.id == user.id %} (you){% endif %}
+      </option>
+      {% endfor %}
+    </select>
+
+    <div></div>
+    <div class="muted" style="font-size:12px; margin-top:-6px">
+      Only people already in this tenant can be made owner. Add more members to the team
+      afterwards with <span class="mono">PUT /v1/teams/{team_id}/members/{user_id}</span>.
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create team</button>
+      <a class="cancel" href="/ui/t/{{ tenant.id }}/agents">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

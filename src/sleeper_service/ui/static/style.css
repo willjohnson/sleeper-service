@@ -28,13 +28,16 @@ a:hover { text-decoration: underline; }
 .sidebar .whoami { font-size: 12px; color: #8b90a0; word-break: break-all; }
 
 .main { flex: 1; padding: 24px 32px; max-width: 1200px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 20px; }
 .topbar h1 { margin: 0; font-size: 20px; }
 .topbar form { margin: 0; }
-select, input[type=text], input[type=email], input[type=password] {
+select, textarea,
+input[type=text], input[type=email], input[type=password], input[type=number] {
   padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
   font: inherit;
 }
+textarea { width: 100%; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+input[type=number] { width: 84px; }
 button, .btn {
   padding: 7px 14px; border: 0; border-radius: 8px; background: var(--accent);
   color: var(--accent-ink); font: inherit; cursor: pointer; display: inline-block;
@@ -43,6 +46,9 @@ button:hover, .btn:hover { filter: brightness(1.1); }
 button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
 button.danger { background: var(--bad); }
 button.subtle { background: var(--line); color: var(--ink); padding: 4px 10px; font-size: 12px; }
+/* .subtle is defined after .danger, so the pairing needs to be explicit or the
+   grey background wins and the white label disappears. */
+button.subtle.danger { background: var(--bad); color: #fff; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 20px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
@@ -96,5 +102,74 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .meter { background: var(--line); border-radius: 999px; height: 8px; overflow: hidden; }
 .meter > div { background: var(--accent); height: 100%; }
-.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+/* Each inline form is one flex item, so an input and its button never wrap
+   apart from each other. */
+.actions > form { display: flex; gap: 6px; align-items: center; }
+.version-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* Wide enough for Promote + the alias form on one line, so the controls line
+   up down the column instead of wrapping on some rows and not others. */
+table.versions th.col-actions { width: 310px; }
+/* Rows differ — the current version has no Promote — so right-align the group
+   and every row's controls end on the same edge. */
+table.versions .actions { justify-content: flex-end; }
+table.versions .nowrap { white-space: nowrap; }
+.badge.alias { display: inline-flex; align-items: center; gap: 6px; padding-right: 5px; }
+.badge.alias form { display: flex; }
+.badge.alias button {
+  background: rgba(255, 255, 255, 0.25); color: #fff; padding: 0; font-size: 11px;
+  width: 15px; height: 15px; border-radius: 999px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.badge.alias button:hover { background: rgba(255, 255, 255, 0.45); filter: none; }
 .pill-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
+
+/* Form pages (new agent, edit agent, new version) */
+.form-grid {
+  display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px 16px;
+  align-items: start; margin-top: 16px; max-width: 720px;
+}
+.form-grid > label { color: var(--muted); font-size: 12.5px; padding-top: 8px; }
+.form-grid > input, .form-grid > select, .form-grid > textarea { width: 100%; }
+/* Fields whose content is short read as broken when stretched to the column. */
+.form-grid .short { max-width: 170px; }
+.form-grid .form-section {
+  grid-column: 1 / -1; margin: 12px 0 0; padding-top: 16px; font-size: 13px;
+  border-top: 1px solid var(--line); color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.form-actions { grid-column: 2; display: flex; align-items: center; gap: 14px; margin-top: 6px; }
+.form-actions .cancel { color: var(--muted); font-size: 13px; }
+.inline-fields {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13px; min-height: 34px;
+}
+.inline-fields label.check {
+  display: inline-flex; align-items: center; gap: 5px; color: var(--ink); padding: 0;
+}
+
+.topbar h1 { margin-right: auto; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.btn.subtle {
+  background: var(--line); color: var(--ink); padding: 4px 10px; font-size: 12px;
+  text-decoration: none;
+}
+.panel h2.with-action { display: flex; align-items: center; justify-content: space-between; }
+
+.subpanel { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+div.subpanel { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+details.subpanel > summary { cursor: pointer; }
+
+.notice {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 12px; font-size: 13px;
+}
+
+table.members { max-width: 640px; }
+table.members td:last-child { text-align: right; }
+
+/* Eval checks grid: operator / path / expected value, one check per row. */
+.check-row { display: grid; grid-template-columns: 150px 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.check-row > * { width: 100%; min-width: 0; }
+.check-head { color: var(--muted); font-size: 12px; margin-bottom: 4px; }

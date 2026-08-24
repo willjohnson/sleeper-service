@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}New version of {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}New version <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Saves as <strong>v{{ next_version_no }}</strong>, prefilled from the current version.
+    {% if next_version_no > 1 %}It is not promoted — an owner promotes it from the agent page
+    once they are happy with it.{% else %}As the first version it is promoted straight away.{% endif %}
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/versions" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="nv-model">Model</label>
+    <select id="nv-model" name="model" required>
+      {% for m in models %}
+      <option value="{{ m }}" {% if (form.model or current_model) == m %}selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="nv-prompt">Prompt</label>
+    <textarea id="nv-prompt" name="prompt" rows="20" required autofocus>{{ form.prompt if form.prompt is defined and form.prompt else current_prompt }}</textarea>
+
+    <label for="nv-iters">Guardrails</label>
+    <div class="inline-fields">
+      <input id="nv-iters" type="number" name="max_iterations" min="1" max="100"
+             value="{{ form.max_iterations or current_iters }}"> <span class="muted">max iterations</span>
+      <input type="number" name="timeout_s" min="1" max="3600"
+             value="{{ form.timeout_s or current_timeout }}"> <span class="muted">second timeout</span>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create version</button>
+      <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

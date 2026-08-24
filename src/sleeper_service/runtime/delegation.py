@@ -34,7 +34,11 @@ async def _permitted_agents(db: AsyncSession, caller: Agent) -> list[Agent]:
     scope = delegation_scope(caller)
     if scope == "none":
         return []
-    stmt = select(Agent).where(Agent.tenant_id == caller.tenant_id, Agent.id != caller.id)
+    stmt = select(Agent).where(
+        Agent.tenant_id == caller.tenant_id,
+        Agent.id != caller.id,
+        Agent.archived_at.is_(None),
+    )
     if scope == "team":
         stmt = stmt.where(Agent.team_id == caller.team_id)
     return list(await db.scalars(stmt.order_by(Agent.name)))

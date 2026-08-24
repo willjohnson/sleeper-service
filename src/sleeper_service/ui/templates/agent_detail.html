@@ -4,6 +4,20 @@
 {% block content %}
 <div class="panel">
   <h2>Overview</h2>
+  {% if agent.archived_at %}
+  <div class="notice">
+    <div>
+      <strong>Archived</strong> on {{ agent.archived_at.strftime('%Y-%m-%d') }} — this agent takes
+      no new work. Its jobs, versions and evals are untouched.
+    </div>
+    {% if can_archive %}
+    <form method="post" action="/ui/agents/{{ agent.id }}/restore">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <button class="subtle">Restore</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
   <p class="muted" style="margin-top:0">{{ agent.description or "No description." }}</p>
   <div class="pill-row">
     {% if agent.options.get('delegation') in ('team', 'tenant') %}<span class="badge opt">delegates: {{ agent.options['delegation'] }}</span>{% endif %}
@@ -15,39 +29,84 @@
   <p class="mono" style="margin-bottom:4px">month spend ${{ '%.4f'|format(spend) }} of ${{ '%.2f'|format(spending_limit) }}</p>
   <div class="meter" style="max-width:320px"><div style="width: {{ [spend / spending_limit * 100, 100] | min }}%"></div></div>
   {% endif %}
+
+  {% if can_edit %}
+  <div class="subpanel">
+    <a class="btn subtle" href="/ui/agents/{{ agent.id }}/settings">Edit settings</a>
+  </div>
+  {% endif %}
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2 class="with-action">Jobs per day by status
+      <span class="muted" style="font-weight:400">{{ chart_days }} days</span>
+    </h2>
+    <canvas id="jobsChart" height="210"></canvas>
+  </div>
+  <div class="panel">
+    <h2 class="with-action">Tokens per day
+      <span class="muted" style="font-weight:400">
+        {% if jobs_total %}avg {{ '{:,.0f}'.format(avg_tokens_per_job) }} tokens/job{% else %}no jobs{% endif %}
+      </span>
+    </h2>
+    <canvas id="tokensChart" height="210"></canvas>
+  </div>
 </div>
 
 <div class="panel">
-  <h2>Versions</h2>
-  <table>
-    <tr><th>Version</th><th>Model</th><th>Prompt</th><th>Guardrails</th><th>Created</th><th></th></tr>
+  <h2 class="with-action">Versions
+    {% if can_edit %}
+    <a class="btn subtle" href="/ui/agents/{{ agent.id }}/versions/new">New version</a>
+    {% endif %}
+  </h2>
+  <table class="versions">
+    <tr><th>Version</th><th>Model</th><th>Prompt</th><th class="nowrap">Guardrails</th>
+      <th class="nowrap">Created</th><th class="col-actions"></th></tr>
     {% for v in versions %}
     <tr>
-      <td>v{{ v.version_no }} {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
-        {% for a in v.aliases %}<span class="badge opt">{{ a }}{% if can_promote %}<form method="post" action="/ui/agents/{{ agent.id }}/aliases/{{ a }}/delete" style="display:inline"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle" title="Remove alias" style="padding:0 2px">&times;</button></form>{% endif %}</span>{% endfor %}</td>
-      <td class="mono">{{ v.model_string }}</td>
-      <td class="muted">{{ v.prompt|truncate(80) }}</td>
-      <td class="mono">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
-      <td class="muted">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
       <td>
-        {% if v.id != agent.current_version_id and can_promote %}
-        <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}" style="display:inline">
-          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-          <button class="subtle">Promote</button>
-        </form>
-        {% endif %}
-        {% if can_promote %}
-        <form method="post" action="/ui/agents/{{ agent.id }}/aliases" style="display:inline">
-          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="version_no" value="{{ v.version_no }}">
-          <input name="alias" placeholder="alias" size="7" pattern="[a-z0-9][a-z0-9_-]{0,39}">
-          <button class="subtle">Set alias</button>
-        </form>
-        {% endif %}
+        <div class="version-cell">
+          <a href="/ui/agents/{{ agent.id }}/versions/{{ v.version_no }}">v{{ v.version_no }}</a>
+          {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
+          {% for a in v.aliases %}
+          <span class="badge opt alias">{{ a }}
+            {% if can_promote %}
+            <form method="post" action="/ui/agents/{{ agent.id }}/aliases/{{ a }}/delete">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+              <button title="Remove alias">&times;</button>
+            </form>
+            {% endif %}
+          </span>
+          {% endfor %}
+        </div>
+      </td>
+      <td class="mono">{{ v.model_string }}</td>
+      <td class="muted"><a href="/ui/agents/{{ agent.id }}/versions/{{ v.version_no }}" class="muted">{{ v.prompt|truncate(80) }}</a></td>
+      <td class="mono nowrap">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
+      <td class="muted nowrap">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
+      <td>
+        <div class="actions">
+          {% if v.id != agent.current_version_id and can_promote %}
+          <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle">Promote</button>
+          </form>
+          {% endif %}
+          {% if can_promote %}
+          <form method="post" action="/ui/agents/{{ agent.id }}/aliases" class="alias-form">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="version_no" value="{{ v.version_no }}">
+            <input name="alias" placeholder="alias" size="7" pattern="[a-z0-9][a-z0-9_-]{0,39}">
+            <button class="subtle">Set alias</button>
+          </form>
+          {% endif %}
+        </div>
       </td>
     </tr>
     {% endfor %}
   </table>
+
 </div>
 
 {% if agent.options.get('memory') %}
@@ -73,7 +132,7 @@
         {% if can_promote %}
         <div class="actions">
           <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/approve"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Approve</button></form>
-          <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/reject"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle danger" style="color:#fff">Reject</button></form>
+          <form method="post" action="/ui/agents/{{ agent.id }}/memory/{{ p.version.version_no }}/reject"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle danger">Reject</button></form>
         </div>
         {% endif %}
       </td>
@@ -92,38 +151,86 @@
 </div>
 {% endif %}
 
-<div class="grid2">
-  <div class="panel">
-    <h2>Eval runs</h2>
+<div class="panel">
+  <h2 class="with-action">Evals
+    {% if can_edit %}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}/eval-cases/new">New case</a>
+      <form method="post" action="/ui/agents/{{ agent.id }}/eval-runs">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <button class="subtle">Run eval</button>
+      </form>
+    </span>
+    {% endif %}
+  </h2>
+  <p class="muted" style="margin-top:0">
+    A case is a saved prompt plus the checks its output must pass. A run replays every
+    case against the current version{% if agent.current_version_id %} (v{{ current_version_no }}){% endif %}.
+  </p>
+
+  {% if eval_cases %}
+  <table>
+    <tr><th>Case</th><th>Prompt</th><th>Checks</th><th class="col-actions"></th></tr>
+    {% for c in eval_cases %}
+    <tr>
+      <td><a href="/ui/agents/{{ agent.id }}/eval-cases/{{ c.id }}"><strong>{{ c.name }}</strong></a></td>
+      <td class="muted">{{ c.prompt|truncate(70) }}</td>
+      <td class="mono" style="font-size:12px">
+        {% for label in c.checks %}<div>{{ label|truncate(60) }}</div>{% endfor %}
+      </td>
+      <td>
+        {% if can_edit %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/agents/{{ agent.id }}/eval-cases/{{ c.id }}/delete">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Delete</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<div class="muted">No cases yet — a run needs at least one.</div>{% endif %}
+
+  <div class="subpanel" style="display:block">
+    <h2 style="margin-bottom:8px">Runs</h2>
     {% if eval_runs %}
     <table>
       <tr><th>Run</th><th>Version</th><th>Status</th><th>Pass rate</th><th>When</th></tr>
       {% for r in eval_runs %}
       <tr>
-        <td class="mono">{{ r.id|string|truncate(8, true, '') }}{% if r.memory_version_id %} <span class="badge pending">memory gate</span>{% endif %}</td>
-        <td>v{{ r.version_no }}</td>
+        <td><a class="mono" href="/ui/eval-runs/{{ r.id }}">{{ r.id|string|truncate(8, true, '') }}</a>{% if r.memory_version_id %} <span class="badge pending">memory gate</span>{% endif %}</td>
+        <td><a href="/ui/agents/{{ agent.id }}/versions/{{ r.version_no }}">v{{ r.version_no }}</a></td>
         <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
         <td>{% if r.pass_rate is not none %}<strong>{{ '%.0f%%'|format(r.pass_rate * 100) }}</strong>{% else %}—{% endif %}</td>
         <td class="muted">{{ r.created_at.strftime('%m-%d %H:%M') }}</td>
       </tr>
       {% endfor %}
     </table>
-    {% else %}<div class="muted">No eval runs. {{ eval_case_count }} case(s) defined.</div>{% endif %}
-  </div>
-
-  <div class="panel">
-    <h2>Recent jobs</h2>
-    <table>
-      <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
-      {% for j in recent_jobs %}
-      <tr>
-        <td><a class="mono" href="/ui/jobs/{{ j.id }}">{{ j.id|string|truncate(8, true, '') }}</a>{% if j.is_eval %} <span class="badge opt">eval</span>{% endif %}</td>
-        <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
-        <td>{{ j.tokens_in + j.tokens_out }}</td>
-        <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
-      </tr>
-      {% endfor %}
-    </table>
+    {% else %}<div class="muted">No runs yet.</div>{% endif %}
   </div>
 </div>
+
+<div class="panel">
+  <h2>Recent jobs</h2>
+  <table>
+    <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
+    {% for j in recent_jobs %}
+    <tr>
+      <td><a class="mono" href="/ui/jobs/{{ j.id }}">{{ j.id|string|truncate(8, true, '') }}</a>{% if j.is_eval %} <span class="badge opt">eval</span>{% endif %}</td>
+      <td><span class="badge {{ j.status }}">{{ j.status }}</span></td>
+      <td>{{ j.tokens_in + j.tokens_out }}</td>
+      <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<script src="/ui/static/vendor/chart.umd.min.js"></script>
+<script src="/ui/static/charts.js"></script>
+<script>
+jobsPerDayChart("jobsChart", {{ jobs_chart | safe }});
+tokensPerDayChart("tokensChart", {{ tokens_chart | safe }});
+</script>
 {% endblock %}

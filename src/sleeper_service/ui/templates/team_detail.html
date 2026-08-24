@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}{{ team.name }} — Sleeper Service{% endblock %}
+{% block heading %}{{ team.name }}
+  {% if team.is_org_team %}<span class="muted" style="font-size:14px">· org-wide</span>{% endif %}
+{% endblock %}
+{% block actions %}<a class="btn subtle" href="/ui/t/{{ tenant.id }}/agents">Back to agents</a>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Members</h2>
+  <table class="members">
+    <tr><th>Email</th><th>Role</th><th></th></tr>
+    {% for m in members %}
+    <tr>
+      <td>{{ m.email }}{% if m.is_me %} <span class="muted">(you)</span>{% endif %}</td>
+      <td>
+        {% if can_manage and not m.is_last_owner %}
+        <form method="post" action="/ui/teams/{{ team.id }}/members/{{ m.user_id }}/role" class="inline-fields">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <select name="role">
+            {% for r in roles %}
+            <option value="{{ r }}" {% if r == m.role %}selected{% endif %}>{{ r }}</option>
+            {% endfor %}
+          </select>
+          <button class="subtle">Save</button>
+        </form>
+        {% else %}
+        <span class="badge opt">{{ m.role }}</span>
+        {% if m.is_last_owner %}<span class="muted">last owner</span>{% endif %}
+        {% endif %}
+      </td>
+      <td>
+        {% if can_manage and not m.is_last_owner %}
+        <form method="post" action="/ui/teams/{{ team.id }}/members/{{ m.user_id }}/remove">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <button class="subtle danger">Remove</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% if can_manage %}
+  <div class="subpanel" style="display:block">
+    <h3 style="margin:0 0 4px; font-size:13px">Add a member</h3>
+    <p class="muted" style="margin:0 0 10px; font-size:12px">
+      By email. People must already have an account — an instance superuser creates those.
+      Adding someone who is already on the team changes their role.
+    </p>
+    <form method="post" action="/ui/teams/{{ team.id }}/members" class="inline-fields">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="email" name="email" required placeholder="person@example.com"
+             list="tenant-users" style="min-width:280px">
+      <datalist id="tenant-users">
+        {% for email in suggestions %}<option value="{{ email }}">{% endfor %}
+      </datalist>
+      <select name="role">
+        {% for r in roles %}
+        <option value="{{ r }}" {% if r == 'viewer' %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Add</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

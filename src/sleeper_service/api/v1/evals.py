@@ -101,6 +101,10 @@ async def start_eval_run(
 ) -> EvalRun:
     agent = await _get_visible_agent(agent_id, db, principal)
     require_role(principal, agent.team_id, Role.EDITOR)
+    if agent.archived_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Agent {agent.name!r} is archived and cannot take new work"
+        )
 
     if body.agent_version_id is not None:
         version = await db.get(AgentVersion, body.agent_version_id)

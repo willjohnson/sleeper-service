@@ -9,7 +9,7 @@
 <body>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand">Sleeper Service<small>agent as a service</small></div>
+    <div class="brand">Sleeper Service<small>agents as a service</small></div>
     {% if tenant %}
     <a class="nav {% if section == 'dashboard' %}active{% endif %}" href="/ui/t/{{ tenant.id }}">Dashboard</a>
     <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
@@ -21,6 +21,7 @@
   <main class="main">
     <div class="topbar">
       <h1>{% block heading %}{% endblock %}</h1>
+      <div class="topbar-actions">{% block actions %}{% endblock %}</div>
       {% if tenants and tenants|length > 1 %}
       <form method="get" action="/ui/switch">
         <select name="tenant_id" onchange="this.form.submit()">
@@ -31,6 +32,7 @@
       </form>
       {% endif %}
     </div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
 </div>

@@ -39,26 +39,9 @@
 </div>
 
 <script src="/ui/static/vendor/chart.umd.min.js"></script>
+<script src="/ui/static/charts.js"></script>
 <script>
-const jobsData = {{ jobs_chart | safe }};
-const tokensData = {{ tokens_chart | safe }};
-const statusColors = {succeeded: "#16a34a", failed: "#dc2626", dead_letter: "#991b1b",
-  rejected: "#d97706", timeout: "#f59e0b", iteration_limit: "#f59e0b",
-  budget_exceeded: "#9333ea", running: "#2563eb", queued: "#6b7280"};
-new Chart(document.getElementById("jobsChart"), {
-  type: "bar",
-  data: {labels: jobsData.labels, datasets: jobsData.statuses.map(s => ({
-    label: s.name, data: s.counts, backgroundColor: statusColors[s.name] || "#6b7280"}))},
-  options: {scales: {x: {stacked: true}, y: {stacked: true, ticks: {precision: 0}}},
-            plugins: {legend: {position: "bottom"}}, responsive: true}
-});
-new Chart(document.getElementById("tokensChart"), {
-  type: "line",
-  data: {labels: tokensData.labels, datasets: [
-    {label: "tokens in", data: tokensData.tokens_in, borderColor: "#4f46e5", tension: .25},
-    {label: "tokens out", data: tokensData.tokens_out, borderColor: "#16a34a", tension: .25}]},
-  options: {plugins: {legend: {position: "bottom"}}, responsive: true,
-            scales: {y: {ticks: {precision: 0}}}}
-});
+jobsPerDayChart("jobsChart", {{ jobs_chart | safe }});
+tokensPerDayChart("tokensChart", {{ tokens_chart | safe }});
 </script>
 {% endblock %}

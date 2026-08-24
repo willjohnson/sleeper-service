@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}New eval case for {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}New eval case <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    A case is one saved job input plus the checks its output must pass. Grading is
+    deterministic, so a case costs nothing beyond the job it runs.
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/eval-cases" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="ec-name">Name</label>
+    <input id="ec-name" type="text" name="name" required autofocus maxlength="200"
+           value="{{ form.name or '' }}">
+
+    <label for="ec-prompt">Prompt</label>
+    <textarea id="ec-prompt" name="prompt" rows="6" required>{{ form.prompt or '' }}</textarea>
+
+    <div class="form-section">Checks</div>
+
+    <label>Grid</label>
+    <div>
+      <div class="check-row check-head">
+        <span>Operator</span><span>Path into output</span><span>Expected value</span>
+      </div>
+      {% for op, path, value in rows %}
+      <div class="check-row">
+        <select name="check_op">
+          <option value="">—</option>
+          {% for o in row_ops %}
+          <option value="{{ o }}" {% if op == o %}selected{% endif %}>{{ o }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="check_path" value="{{ path }}"
+               placeholder="{{ 'risk_level' if loop.first else '' }}">
+        <input type="text" name="check_value" value="{{ value }}"
+               placeholder="{{ 'high' if loop.first else '' }}">
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        A value is read as JSON when it parses — <code>0.8</code>, <code>[0, 10]</code> for
+        in_range, <code>true</code> — and as plain text otherwise. <code>is_valid</code> checks
+        the output against the version's schema and needs no path.
+      </div>
+    </div>
+
+    <label for="ec-extra">More checks</label>
+    <div>
+      <textarea id="ec-extra" name="extra_checks" rows="6"
+                placeholder='[{"op": "code", "code": "def grade(output): ..."}]'>{{ form.extra_checks or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Optional JSON array, appended to the grid rows. This is where code graders go —
+        a <code>grade(output)</code> that runs sandboxed, truthy return = pass.
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create case</button>
+      <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

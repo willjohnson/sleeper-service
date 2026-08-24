@@ -1,12 +1,15 @@
 """Admin UI: session auth, page rendering, owner-gated actions."""
 
+import html
+import json
 import re
 import uuid
 
 from httpx import AsyncClient
 
 from sleeper_service.runtime import runner
-from tests.conftest import auth
+from sleeper_service.runtime.evals import run_eval
+from tests.conftest import Bootstrap, auth
 
 
 async def _login(client: AsyncClient, email: str, password: str = "password-123"):
@@ -67,6 +70,45 @@ async def test_agents_and_detail_pages(client: AsyncClient, risk_agent: dict) ->
     assert "Promote" not in r.text
 
 
+async def test_version_page_shows_the_whole_prompt(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    long_prompt = "Assess business risk. " + "Weigh staffing, weather and market moves. " * 8
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=bob,
+        json={"prompt": long_prompt, "model": "test/default", "max_iterations": 7},
+    )
+    assert r.status_code == 201
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert f'/ui/agents/{agent_id}/versions/2"' in page.text  # the table links out
+    assert long_prompt not in page.text  # ...because the table only has room for a slice
+
+    r = await client.get(f"/ui/agents/{agent_id}/versions/2")
+    assert r.status_code == 200
+    assert long_prompt in r.text
+    assert "7 iterations" in r.text
+    assert "test:default" in r.text
+    assert "bob@example.com" in r.text  # who wrote it
+
+    # a version that doesn't exist falls back to the agent
+    r = await client.get(f"/ui/agents/{agent_id}/versions/99", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+    # "new" still reaches the create form, not the detail page
+    r = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert r.status_code == 200
+    assert "Create version" in r.text
+
+    # outsiders see nothing
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/agents/{agent_id}/versions/2", follow_redirects=False)
+    assert r.status_code == 303
+
+
 async def test_promote_via_ui_owner_only(client: AsyncClient, risk_agent: dict) -> None:
     bob = auth(risk_agent["users"]["bob"]["api_key"])
     agent_id = risk_agent["agent"]["id"]
@@ -113,6 +155,258 @@ async def test_job_page_and_outsider_blocked(client: AsyncClient, risk_agent: di
     await _login(client, "dave@example.com")
     r = await client.get(f"/ui/jobs/{job_id}", follow_redirects=False)
     assert r.status_code == 303
+
+
+async def test_agent_page_charts_activity(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+
+    await _login(client, "bob@example.com")
+    r = await client.get(f"/ui/agents/{agent_id}")
+    assert "Jobs per day by status" in r.text
+    assert "Tokens per day" in r.text
+    assert "no jobs" in r.text  # nothing run yet, so no average to quote
+
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=bob, json={"context": {"prompt": "hi"}}
+    )
+    await runner.execute_job(uuid.UUID(r.json()["id"]))
+
+    r = await client.get(f"/ui/agents/{agent_id}")
+    assert "tokens/job" in r.text
+    charts = re.search(r'jobsPerDayChart\("jobsChart", (\{.*?\})\);', r.text).group(1)
+    assert sum(sum(s["counts"]) for s in json.loads(charts)["statuses"]) == 1
+    tokens = re.search(r'tokensPerDayChart\("tokensChart", (\{.*?\})\);', r.text).group(1)
+    assert sum(json.loads(tokens)["tokens_in"]) > 0
+
+
+async def test_create_eval_case_and_run_from_the_ui(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")
+
+    # a run with no cases is refused, and the reason survives the redirect
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "No cases yet" in page.text
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-runs",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    assert "Add an eval case" in r.text
+    assert "Add an eval case" not in (await client.get(f"/ui/agents/{agent_id}")).text  # one-shot
+
+    form = await client.get(f"/ui/agents/{agent_id}/eval-cases/new")
+    assert form.status_code == 200
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-cases",
+        data={
+            "_csrf_token": _csrf(form.text),
+            "name": "low-risk",
+            "prompt": "calm markets today",
+            # TestModel answers risk_level=low, so both rows pass; blank rows drop out
+            "check_op": ["equals", "is_valid", "", ""],
+            "check_path": ["risk_level", "", "", ""],
+            "check_value": ["low", "", "", ""],
+            "extra_checks": "",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    cases = (await client.get(f"/v1/agents/{agent_id}/eval-cases", headers=bob)).json()
+    assert [c["name"] for c in cases] == ["low-risk"]
+    assert cases[0]["input"]["prompt"] == "calm markets today"
+    assert cases[0]["checks"] == [
+        {"op": "equals", "path": "risk_level", "value": "low"},
+        {"op": "is_valid"},
+    ]
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "low-risk" in page.text
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-runs",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    runs = (await client.get(f"/v1/agents/{agent_id}/eval-runs", headers=bob)).json()
+    assert len(runs) == 1
+    await run_eval(uuid.UUID(runs[0]["id"]))  # as the worker would
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "100%" in page.text
+
+    # and the case can be deleted again
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-cases/{cases[0]['id']}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+    )
+    assert (await client.get(f"/v1/agents/{agent_id}/eval-cases", headers=bob)).json() == []
+
+
+async def test_eval_case_form_rejects_bad_input(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")
+    form = await client.get(f"/ui/agents/{agent_id}/eval-cases/new")
+    token = _csrf(form.text)
+
+    async def post(**fields):
+        data = {"_csrf_token": token, "name": "case", "prompt": "hi", "extra_checks": "", **fields}
+        return await client.post(f"/ui/agents/{agent_id}/eval-cases", data=data)
+
+    # no checks at all
+    r = await post()
+    assert r.status_code == 400
+    assert "At least one check" in r.text
+
+    # a path op with no path
+    r = await post(check_op=["equals"], check_path=[""], check_value=["low"])
+    assert r.status_code == 400
+    assert "needs a path" in r.text
+
+    # the JSON escape hatch has to be JSON, and a list of checks
+    r = await post(extra_checks="not json")
+    assert "not valid JSON" in r.text
+    r = await post(extra_checks='{"op": "is_valid"}')
+    assert "JSON array" in r.text
+
+    # a code grader that doesn't parse is refused, as it is on the API
+    r = await post(extra_checks='[{"op": "code", "code": "def grade(:"}]')
+    assert r.status_code == 400
+    assert "invalid grader" in r.text
+    # the typed input survives the error
+    assert "def grade(:" in r.text
+
+    # a working code grader goes through
+    grader = "def grade(output):\n    return output['risk_level'] == 'low'"
+    r = await post(extra_checks=json.dumps([{"op": "code", "code": grader}]))
+    assert r.status_code == 303
+
+    # duplicate name
+    r = await post(check_op=["is_valid"], check_path=[""], check_value=[""])
+    assert r.status_code == 400
+    assert "already exists" in r.text
+
+
+async def test_eval_case_page_spells_out_the_checks(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    grader = "def grade(output):\n    return bool(output.get('factors'))\n"
+    long_prompt = "Assess this event. " + "Consider staffing, weather and market moves. " * 4
+    r = await client.post(
+        f"/v1/agents/{agent_id}/eval-cases",
+        headers=bob,
+        json={
+            "name": "01-low-risk",
+            "input": {"prompt": long_prompt},
+            "checks": [
+                {"op": "equals", "path": "risk_level", "value": "low"},
+                {"op": "code", "code": grader},
+            ],
+        },
+    )
+    case_id = r.json()["id"]
+
+    await _login(client, "bob@example.com")
+    page = html.unescape((await client.get(f"/ui/agents/{agent_id}")).text)
+    # the list says what each check wants, without needing a run to have happened
+    assert 'risk_level equals "low"' in page
+    assert "code grader (monty)" in page
+    assert f"/ui/agents/{agent_id}/eval-cases/{case_id}" in page
+    assert long_prompt not in page  # the table only has room for a slice of it
+
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/{case_id}")
+    assert r.status_code == 200
+    detail = html.unescape(r.text)
+    assert long_prompt in detail
+    assert 'risk_level equals "low"' in detail
+    assert "def grade(output):" in detail  # the grader's source, not just its name
+
+    # a case that no longer exists falls back to the agent, so a run's stale
+    # link degrades instead of 404ing
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/{uuid.uuid4()}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/{case_id}", follow_redirects=False)
+    assert r.status_code == 303
+
+
+async def test_eval_run_detail_page(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    # TestModel answers risk_level=low, so the first case passes and the second
+    # fails — a mixed run is what the detail page has to explain.
+    for case in (
+        {
+            "name": "01-low-risk",
+            "input": {"prompt": "calm markets today"},
+            "checks": [{"op": "equals", "path": "risk_level", "value": "low"}],
+        },
+        {
+            "name": "02-expects-high",
+            "input": {"prompt": "storm in STL"},
+            "checks": [{"op": "equals", "path": "risk_level", "value": "high"}],
+        },
+    ):
+        r = await client.post(f"/v1/agents/{agent_id}/eval-cases", headers=bob, json=case)
+        assert r.status_code == 201
+    run_id = (await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={})).json()[
+        "id"
+    ]
+    await run_eval(uuid.UUID(run_id))
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert f'/ui/eval-runs/{run_id}"' in page.text  # the runs table links out
+
+    r = await client.get(f"/ui/eval-runs/{run_id}")
+    assert r.status_code == 200
+    # the labels quote JSON values, so read the page as rendered, not as markup
+    page = html.unescape(r.text)
+    assert "50%" in page
+    assert "1 of 2 case(s) passed" in page
+    assert "01-low-risk" in page and "02-expects-high" in page
+    # the check that failed, spelled out, with the grader's reason
+    assert 'risk_level equals "high"' in page
+    assert "expected 'high'" in page
+    # and each case links to the eval job it graded
+    assert "/ui/jobs/" in page
+
+    # outsiders cannot read another team's run
+    await _login(client, "dave@example.com")
+    r = await client.get(f"/ui/eval-runs/{run_id}", follow_redirects=False)
+    assert r.status_code == 303
+
+
+async def test_eval_actions_are_editor_only(client: AsyncClient, risk_agent: dict) -> None:
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    await client.post(
+        f"/v1/agents/{agent_id}/eval-cases",
+        headers=bob,
+        json={"name": "a-case", "input": {"prompt": "hi"}, "checks": [{"op": "is_valid"}]},
+    )
+
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "a-case" in page.text  # visible, but not editable
+    assert "New case" not in page.text
+    assert "Run eval" not in page.text
+
+    token = _csrf(page.text)
+    r = await client.get(f"/ui/agents/{agent_id}/eval-cases/new", follow_redirects=False)
+    assert r.status_code == 303
+    r = await client.post(f"/ui/agents/{agent_id}/eval-runs", data={"_csrf_token": token})
+    assert (await client.get(f"/v1/agents/{agent_id}/eval-runs", headers=bob)).json() == []
+    r = await client.post(
+        f"/ui/agents/{agent_id}/eval-cases",
+        data={"_csrf_token": token, "name": "sneaky", "prompt": "hi", "check_op": ["is_valid"]},
+    )
+    cases = (await client.get(f"/v1/agents/{agent_id}/eval-cases", headers=bob)).json()
+    assert [c["name"] for c in cases] == ["a-case"]
 
 
 async def test_ui_posts_require_csrf(client: AsyncClient, risk_agent: dict) -> None:
@@ -283,3 +577,741 @@ async def test_login_rate_limit_is_per_client_not_per_proxy(
         headers={"X-Forwarded-For": "198.51.100.4"},
     )
     assert r.status_code == 401, "one address must not lock the account for others"
+
+
+# --- Creating agents and versions from the UI ---
+
+
+async def _agents_page(client: AsyncClient, tenant_id: str) -> str:
+    r = await client.get(f"/ui/t/{tenant_id}/agents")
+    assert r.status_code == 200
+    return r.text
+
+
+async def test_create_agent_makes_a_runnable_agent(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    await _login(client, "alice@example.com")
+    listing = await _agents_page(client, org["tenant"]["id"])
+    assert f"/ui/t/{org['tenant']['id']}/agents/new" in listing
+
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    assert page.status_code == 200
+    assert "First version" in page.text
+
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "team_id": org["team"]["id"],
+            "name": "credit-memo",
+            "description": "Draft credit memos",
+            "spending_limit": "12.50",
+            "model": "test:default",
+            "prompt": "You are a credit analyst.",
+            "max_iterations": "7",
+            "timeout_s": "120",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent_id = r.headers["location"].rsplit("/", 1)[-1]
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["name"] == "credit-memo"
+    assert agent["spending_limit"] == "12.5000"
+    # The first version exists and was auto-promoted, so the agent can run.
+    assert agent["current_version_id"] is not None
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    assert len(versions) == 1
+    assert versions[0]["version_no"] == 1
+    assert versions[0]["prompt"] == "You are a credit analyst."
+    assert versions[0]["max_iterations"] == 7
+    assert versions[0]["timeout_s"] == 120
+    assert versions[0]["id"] == agent["current_version_id"]
+
+
+async def test_create_agent_hidden_and_refused_for_viewers(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    await _login(client, "carol@example.com")  # viewer
+    listing = await _agents_page(client, org["tenant"]["id"])
+    assert "/agents/new" not in listing
+
+    # The page itself is not reachable...
+    r = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/agents")
+
+    # ...and neither is the endpoint behind it.
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={
+            "_csrf_token": _csrf(listing),
+            "team_id": org["team"]["id"],
+            "name": "sneaky",
+            "model": "test:default",
+            "prompt": "hello",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    alice = auth(org["users"]["alice"]["api_key"])
+    assert (await client.get("/v1/agents", headers=alice)).json() == []
+
+
+async def test_governed_options_are_owner_only(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    base = {
+        "team_id": org["team"]["id"],
+        "name": "learner",
+        "model": "test:default",
+        "prompt": "hello",
+        "learning": "1",
+    }
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={"_csrf_token": _csrf(page.text), **base},
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "owner-managed" in r.text
+
+    await _login(client, "alice@example.com")  # owner
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    r = await client.post(
+        f"/ui/t/{org['tenant']['id']}/agents",
+        data={"_csrf_token": _csrf(page.text), **base},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent_id = r.headers["location"].rsplit("/", 1)[-1]
+    alice = auth(org["users"]["alice"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["options"] == {"learning": True}
+
+
+async def test_create_agent_errors_keep_the_typed_prompt(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{risk_agent['tenant']['id']}/agents/new")
+    r = await client.post(
+        f"/ui/t/{risk_agent['tenant']['id']}/agents",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "team_id": risk_agent["team"]["id"],
+            "name": "risk-analyzer",  # already taken
+            "model": "test:default",
+            "prompt": "A prompt that took a while to write.",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "already exists" in r.text
+    assert "A prompt that took a while to write." in r.text
+
+
+async def test_create_agent_validates_prompt_and_model(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    common = {
+        "_csrf_token": _csrf(page.text),
+        "team_id": org["team"]["id"],
+        "name": "nope",
+    }
+    url = f"/ui/t/{org['tenant']['id']}/agents"
+
+    r = await client.post(url, data={**common, "model": "test:default", "prompt": "   "})
+    assert r.status_code == 400 and "needs a prompt" in r.text
+
+    r = await client.post(url, data={**common, "model": "nonesuch:v1", "prompt": "hi"})
+    assert r.status_code == 400 and "Unknown model" in r.text
+
+    r = await client.post(
+        url, data={**common, "model": "test:default", "prompt": "hi", "max_iterations": "999"}
+    )
+    assert r.status_code == 400 and "between 1 and 100" in r.text
+
+
+async def test_create_version_from_agent_page(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    detail = await client.get(f"/ui/agents/{agent_id}")
+    assert f"/ui/agents/{agent_id}/versions/new" in detail.text
+
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert page.status_code == 200
+    assert "Saves as <strong>v2</strong>" in page.text
+    # Prefilled from the current version so iterating is an edit, not a retype.
+    textarea = page.text.split('id="nv-prompt"')[1].split("</textarea>")[0]
+    assert "Assess business risk for the event in the payload." in textarea
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "model": "anthropic:claude-sonnet-5",
+            "prompt": "Assess business risk, and cite the payload fields you used.",
+            "max_iterations": "12",
+            "timeout_s": "90",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert [v["version_no"] for v in versions] == [1, 2]
+    assert versions[1]["max_iterations"] == 12
+    # A later version does not auto-promote — that stays an owner action.
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["current_version_id"] == versions[0]["id"]
+
+
+async def test_create_version_refused_for_viewers(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "/versions/new" not in page.text
+
+    r = await client.get(f"/ui/agents/{agent_id}/versions/new", follow_redirects=False)
+    assert r.status_code == 303
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={"_csrf_token": _csrf(page.text), "model": "test:default", "prompt": "hi"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert len(versions) == 1
+
+
+async def test_edit_agent_settings(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    detail = await client.get(f"/ui/agents/{agent_id}")
+    assert f"/ui/agents/{agent_id}/settings" in detail.text
+
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    assert page.status_code == 200
+    assert 'value="risk-analyzer"' in page.text  # prefilled from the agent
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "risk-analyzer-renamed",
+            "description": "Now with a better description",
+            "spending_limit": "25",
+            "delegation": "team",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["name"] == "risk-analyzer-renamed"
+    assert agent["description"] == "Now with a better description"
+    assert agent["spending_limit"] == "25.0000"
+    assert agent["options"] == {"delegation": "team"}
+    # Editing settings must not create a version.
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert len(versions) == 1
+
+
+async def test_edit_clears_spending_limit_and_rejects_bad_input(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    await client.patch(f"/v1/agents/{agent_id}", headers=alice, json={"spending_limit": "9"})
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": token, "name": "risk-analyzer", "spending_limit": "-3"},
+    )
+    assert r.status_code == 400 and "greater than zero" in r.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": token, "name": "", "spending_limit": "1"},
+    )
+    assert r.status_code == 400 and "Name is required" in r.text
+
+    # Blank clears the limit.
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": token, "name": "risk-analyzer", "spending_limit": "  "},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["spending_limit"] is None
+
+
+async def test_edit_keeps_owner_options_when_an_editor_saves(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """An editor changing a description must not read as flipping memory off."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.patch(
+        f"/v1/agents/{agent_id}", headers=alice, json={"options": {"memory": True}}
+    )
+    assert r.status_code == 200
+
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    # The checkbox is disabled for editors, so the template round-trips the
+    # owner's setting in a hidden field. Without it the save would read as
+    # flipping memory off and be refused.
+    assert '<input type="hidden" name="memory" value="1">' in page.text
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "risk-analyzer",
+            "description": "Edited by an editor",
+            "spending_limit": "",
+            "memory": "1",  # what the browser sends from the hidden field
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=alice)).json()
+    assert agent["description"] == "Edited by an editor"
+    assert agent["options"] == {"memory": True}
+
+
+async def test_editor_cannot_flip_governed_options(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "risk-analyzer",
+            "spending_limit": "",
+            "learning": "1",
+        },
+    )
+    assert r.status_code == 400 and "owner-managed" in r.text
+
+
+async def test_edit_hidden_and_refused_for_viewers(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "/settings" not in page.text
+
+    r = await client.get(f"/ui/agents/{agent_id}/settings", follow_redirects=False)
+    assert r.status_code == 303
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={"_csrf_token": _csrf(page.text), "name": "hijacked", "spending_limit": ""},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["name"] == "risk-analyzer"
+
+
+async def test_settings_error_keeps_the_typed_input(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/settings",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "",  # invalid
+            "description": "A description worth keeping",
+            "spending_limit": "",
+        },
+    )
+    assert r.status_code == 400
+    assert "Name is required" in r.text
+    # Re-rendered as the edit page, not the detail page, with input intact.
+    assert f'action="/ui/agents/{agent_id}/settings"' in r.text
+    assert "A description worth keeping" in r.text
+
+
+async def test_form_pages_are_closed_for_archived_agents(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    assert (await client.post(f"/v1/agents/{agent_id}/archive", headers=alice)).status_code == 200
+
+    await _login(client, "alice@example.com")
+    for path in (f"/ui/agents/{agent_id}/settings", f"/ui/agents/{agent_id}/versions/new"):
+        r = await client.get(path, follow_redirects=False)
+        assert r.status_code == 303, path
+        assert r.headers["location"] == f"/ui/agents/{agent_id}"
+
+
+# --- Archiving ---
+
+
+async def test_archive_hides_agent_and_refuses_new_work(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    tenant_id = risk_agent["tenant"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/archive",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    # Gone from the active table, listed under Archived instead.
+    page = await _agents_page(client, tenant_id)
+    assert "Archived (1)" in page
+    active = page.split("Archived (1)")[0]
+    assert "risk-analyzer" not in active
+
+    # Refuses new work through the API...
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=alice, json={"context": {"prompt": "check this"}}
+    )
+    assert r.status_code == 409
+    assert "archived" in r.json()["detail"]
+
+    # ...and drops out of API listings unless asked for.
+    listed = (await client.get("/v1/agents", headers=alice)).json()
+    assert [a["id"] for a in listed] == []
+    listed = (await client.get("/v1/agents?include_archived=true", headers=alice)).json()
+    assert [a["id"] for a in listed] == [agent_id]
+
+    # History survives.
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    assert len(versions) == 1
+
+
+async def test_restore_brings_the_agent_back(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    assert (await client.post(f"/v1/agents/{agent_id}/archive", headers=alice)).status_code == 200
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Archived" in page.text
+    # An archived agent offers no way to give it more work.
+    assert "New version" not in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/restore",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "New version" in page.text
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=alice, json={"context": {"prompt": "check this"}}
+    )
+    assert r.status_code in (201, 202)
+
+
+async def test_owner_is_offered_archive_on_the_edit_page(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")  # owner
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    assert "Archive agent" in page.text
+    # ...and it is no longer duplicated on the detail page.
+    detail = await client.get(f"/ui/agents/{agent_id}")
+    assert "Archive agent" not in detail.text
+
+
+async def test_archive_is_owner_only(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    # Archiving lives on the edit page now, and an editor is offered it there.
+    page = await client.get(f"/ui/agents/{agent_id}/settings")
+    assert page.status_code == 200
+    assert "Archive agent" not in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/archive",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent = (await client.get(f"/v1/agents/{agent_id}", headers=bob)).json()
+    assert agent["archived_at"] is None
+
+
+# --- Creating teams ---
+
+# A tenant's org-wide team is created without an owner (see create_tenant), so
+# in these fixtures the instance superuser is the tenant admin for "acme".
+ROOT = ("root@example.com", "root-password")
+
+
+async def test_create_team_via_ui(client: AsyncClient, org: dict, bootstrap: Bootstrap) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    listing = await _agents_page(client, tenant_id)
+    assert f"/ui/t/{tenant_id}/teams/new" in listing
+
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    assert page.status_code == 200
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={"_csrf_token": _csrf(page.text), "name": "compliance"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/t/{tenant_id}/agents"
+
+    # Verified as the superuser: a team's creator is its only member, so the
+    # other users in the tenant cannot see it yet.
+    root = auth(bootstrap.superuser_key)
+    teams = (await client.get(f"/v1/tenants/{tenant_id}/teams", headers=root)).json()
+    team = next(t for t in teams if t["name"] == "compliance")
+    members = (await client.get(f"/v1/teams/{team['id']}/members", headers=root)).json()
+    assert [m["role"] for m in members] == ["owner"]
+    # ...and it shows up straight away on the agents page.
+    assert "compliance" in await _agents_page(client, tenant_id)
+
+
+async def test_create_team_can_name_another_tenant_user_as_owner(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    # Only people already in the tenant are offered; dave is in no team.
+    assert "bob@example.com" in page.text
+    assert "dave@example.com" not in page.text
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "platform",
+            "owner_user_id": org["users"]["bob"]["id"],
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    root = auth(bootstrap.superuser_key)
+    teams = (await client.get(f"/v1/tenants/{tenant_id}/teams", headers=root)).json()
+    team = next(t for t in teams if t["name"] == "platform")
+    members = (await client.get(f"/v1/teams/{team['id']}/members", headers=root)).json()
+    assert [(str(m["user_id"]), m["role"]) for m in members] == [
+        (org["users"]["bob"]["id"], "owner")
+    ]
+
+
+async def test_create_team_rejects_outsider_as_owner(client: AsyncClient, org: dict) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "name": "smuggled",
+            "owner_user_id": org["users"]["dave"]["id"],  # not in this tenant
+        },
+    )
+    assert r.status_code == 400
+    assert "Pick an owner from this tenant" in r.text
+
+
+async def test_create_team_validates_name(client: AsyncClient, org: dict) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    page = await client.get(f"/ui/t/{tenant_id}/teams/new")
+    token = _csrf(page.text)
+
+    r = await client.post(f"/ui/t/{tenant_id}/teams", data={"_csrf_token": token, "name": "  "})
+    assert r.status_code == 400 and "Name is required" in r.text
+
+    r = await client.post(f"/ui/t/{tenant_id}/teams", data={"_csrf_token": token, "name": "risk"})
+    assert r.status_code == 400 and "already exists" in r.text
+
+
+async def test_create_team_is_tenant_admin_only(client: AsyncClient, org: dict) -> None:
+    """Owning a team is not enough — it takes the org-wide team's owner."""
+    tenant_id = org["tenant"]["id"]
+    await _login(client, "alice@example.com")  # owner of "risk", not of the org team
+    listing = await _agents_page(client, tenant_id)
+    assert "/teams/new" not in listing
+
+    r = await client.get(f"/ui/t/{tenant_id}/teams/new", follow_redirects=False)
+    assert r.status_code == 303
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/teams",
+        data={"_csrf_token": _csrf(listing), "name": "sneaky"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    teams = (
+        await client.get(
+            f"/v1/tenants/{tenant_id}/teams", headers=auth(org["users"]["alice"]["api_key"])
+        )
+    ).json()
+    assert "sneaky" not in [t["name"] for t in teams]
+
+
+# --- Team membership ---
+
+
+async def test_team_page_lists_members(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "carol@example.com")  # viewer
+    listing = await _agents_page(client, org["tenant"]["id"])
+    assert f"/ui/teams/{team_id}" in listing
+
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert page.status_code == 200
+    for email in ("alice@example.com", "bob@example.com", "carol@example.com"):
+        assert email in page.text
+    # A viewer sees the roster but is offered no controls.
+    assert "Add a member" not in page.text
+    assert "/remove" not in page.text
+
+
+async def test_owner_adds_member_by_email(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    alice = auth(org["users"]["alice"]["api_key"])
+    await _login(client, "alice@example.com")  # owner
+    page = await client.get(f"/ui/teams/{team_id}")
+    # Tenant colleagues are suggested; dave is in no team here, so he is not.
+    assert "Add a member" in page.text
+    assert "dave@example.com" not in page.text
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "email": "Dave@Example.com",  # matched case-insensitively
+            "role": "editor",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    by_id = {str(m["user_id"]): m["role"] for m in members}
+    assert by_id[org["users"]["dave"]["id"]] == "editor"
+
+
+async def test_adding_an_unknown_email_is_refused(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/teams/{team_id}")
+    r = await client.post(
+        f"/ui/teams/{team_id}/members",
+        data={"_csrf_token": _csrf(page.text), "email": "nobody@example.com", "role": "viewer"},
+    )
+    assert r.status_code == 400
+    assert "No user with the email" in r.text
+
+
+async def test_owner_changes_and_removes_members(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    alice = auth(org["users"]["alice"]["api_key"])
+    bob_id = org["users"]["bob"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/teams/{team_id}")
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members/{bob_id}/role",
+        data={"_csrf_token": token, "role": "owner"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert {str(m["user_id"]): m["role"] for m in members}[bob_id] == "owner"
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members/{org['users']['carol']['id']}/remove",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert org["users"]["carol"]["id"] not in [str(m["user_id"]) for m in members]
+
+
+async def test_the_last_owner_cannot_be_demoted_or_removed(client: AsyncClient, org: dict) -> None:
+    """Mirrors _forbid_removing_last_owner: the UI must not offer it either."""
+    team_id = org["team"]["id"]
+    alice_id = org["users"]["alice"]["id"]
+    await _login(client, "alice@example.com")  # the only owner
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert "last owner" in page.text
+    assert f"/members/{alice_id}/remove" not in page.text
+    assert f"/members/{alice_id}/role" not in page.text
+    token = _csrf(page.text)
+
+    for path in (f"/members/{alice_id}/role", f"/members/{alice_id}/remove"):
+        r = await client.post(
+            f"/ui/teams/{team_id}{path}", data={"_csrf_token": token, "role": "viewer"}
+        )
+        assert r.status_code == 400, path
+        assert "at least one owner" in r.text
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert {str(m["user_id"]): m["role"] for m in members}[alice_id] == "owner"
+
+
+async def test_member_management_is_team_owner_only(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert "Add a member" not in page.text
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/members",
+        data={"_csrf_token": _csrf(page.text), "email": "dave@example.com", "role": "owner"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/teams/{team_id}"
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    members = (await client.get(f"/v1/teams/{team_id}/members", headers=alice)).json()
+    assert org["users"]["dave"]["id"] not in [str(m["user_id"]) for m in members]
+
+
+async def test_outsider_cannot_see_a_team(client: AsyncClient, org: dict) -> None:
+    await _login(client, "dave@example.com")  # no membership anywhere
+    r = await client.get(f"/ui/teams/{org['team']['id']}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui"

@@ -576,3 +576,61 @@ async def test_rejected_callback_destination_is_not_retried(
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", failing_client)
     with pytest.raises(Retry):
         await deliver_callback({"job_try": 1}, str(job_id))
+
+
+async def test_delete_refuses_an_agent_with_job_history(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """jobs.agent_id does not cascade, so a bare delete would be a 500."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=alice, json={"context": {"prompt": "check this"}}
+    )
+    assert r.status_code in (201, 202)
+
+    r = await client.delete(f"/v1/agents/{agent_id}", headers=alice)
+    assert r.status_code == 409
+    assert "archive it instead" in r.json()["detail"]
+
+    # An agent that never ran is still deletable.
+    r = await client.post(
+        "/v1/agents",
+        headers=alice,
+        json={"team_id": risk_agent["team"]["id"], "name": "never-ran"},
+    )
+    assert r.status_code == 201
+    assert (await client.delete(f"/v1/agents/{r.json()['id']}", headers=alice)).status_code == 204
+
+
+async def test_archived_agents_leave_delegation_scope(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    from sleeper_service.db.models import Agent
+    from sleeper_service.db.session import get_sessionmaker
+    from sleeper_service.runtime.delegation import _permitted_agents
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        "/v1/agents",
+        headers=alice,
+        json={
+            "team_id": risk_agent["team"]["id"],
+            "name": "delegator",
+            "options": {"delegation": "team"},
+        },
+    )
+    assert r.status_code == 201
+    caller_id = r.json()["id"]
+
+    async with get_sessionmaker()() as db:
+        caller = await db.get(Agent, uuid.UUID(caller_id))
+        assert "risk-analyzer" in [a.name for a in await _permitted_agents(db, caller)]
+
+    assert (
+        await client.post(f"/v1/agents/{risk_agent['agent']['id']}/archive", headers=alice)
+    ).status_code == 200
+
+    async with get_sessionmaker()() as db:
+        caller = await db.get(Agent, uuid.UUID(caller_id))
+        assert "risk-analyzer" not in [a.name for a in await _permitted_agents(db, caller)]

@@ -1,14 +1,15 @@
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.api.v1.schemas import AgentCreate, AgentOut, AgentUpdate
 from sleeper_service.auth.principal import UserPrincipal, get_user_principal
 from sleeper_service.auth.rbac import require_role
 from sleeper_service.constants import Role
-from sleeper_service.db.models import Agent, Team
+from sleeper_service.db.models import Agent, Job, Team
 from sleeper_service.db.session import get_db
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -52,10 +53,13 @@ async def create_agent(
 async def list_agents(
     tenant_id: uuid.UUID | None = None,
     team_id: uuid.UUID | None = None,
+    include_archived: bool = False,
     db: AsyncSession = Depends(get_db),
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> list[Agent]:
     stmt = select(Agent).order_by(Agent.created_at)
+    if not include_archived:
+        stmt = stmt.where(Agent.archived_at.is_(None))
     if tenant_id is not None:
         stmt = stmt.where(Agent.tenant_id == tenant_id)
     if team_id is not None:
@@ -143,8 +147,49 @@ async def delete_agent(
 ) -> None:
     agent = await _get_visible_agent(agent_id, db, principal)
     require_role(principal, agent.team_id, Role.OWNER)
+    # jobs.agent_id does not cascade, so this would fail in the database with
+    # an IntegrityError. Refuse it here with an answer the caller can act on.
+    jobs = await db.scalar(select(func.count()).select_from(Job).where(Job.agent_id == agent.id))
+    if jobs:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Agent has {jobs} job(s) and cannot be deleted — archive it instead "
+            f"(POST /v1/agents/{agent_id}/archive).",
+        )
     await db.delete(agent)
     await db.commit()
+
+
+@router.post("/{agent_id}/archive", response_model=AgentOut)
+async def archive_agent(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> Agent:
+    """Retire an agent without touching its history: it disappears from
+    listings and refuses new work, while jobs, versions and evals stay."""
+    agent = await _get_visible_agent(agent_id, db, principal)
+    require_role(principal, agent.team_id, Role.OWNER)
+    if agent.archived_at is None:
+        agent.archived_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(agent)
+    return agent
+
+
+@router.post("/{agent_id}/restore", response_model=AgentOut)
+async def restore_agent(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> Agent:
+    agent = await _get_visible_agent(agent_id, db, principal)
+    require_role(principal, agent.team_id, Role.OWNER)
+    if agent.archived_at is not None:
+        agent.archived_at = None
+        await db.commit()
+        await db.refresh(agent)
+    return agent
 
 
 @router.get("/{agent_id}/memory")

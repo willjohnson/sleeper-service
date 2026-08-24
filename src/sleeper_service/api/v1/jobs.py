@@ -116,6 +116,10 @@ async def create_job(
     prior submission and no new job was created. Shared by direct submission
     and event-source ingress.
     """
+    if agent.archived_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Agent {agent.name!r} is archived and cannot take new work"
+        )
     if idempotency_key is not None:
         existing = await db.scalar(
             select(Job).where(Job.agent_id == agent.id, Job.idempotency_key == idempotency_key)
@@ -372,7 +376,11 @@ async def retry_job(
     """Re-queue a terminally failed job (dead_letter/failed/timeout) — e.g.
     after a provider outage ends. Same job row: full history stays attached."""
     job = await _get_job_for(db, principal, job_id)
-    await _get_agent_for(db, principal, job.agent_id, submit=True)
+    agent = await _get_agent_for(db, principal, job.agent_id, submit=True)
+    if agent.archived_at is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Agent {agent.name!r} is archived and cannot take new work"
+        )
     if job.status not in ("dead_letter", "failed", "timeout"):
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Only failed jobs can be retried (status: {job.status})"

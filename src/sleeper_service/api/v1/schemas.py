@@ -130,6 +130,7 @@ class AgentOut(OrmModel):
     current_version_id: uuid.UUID | None
     spending_limit: Decimal | None
     options: dict
+    archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
