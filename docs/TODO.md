@@ -49,37 +49,37 @@ Ordering follows that arc rather than the size of each surface.
   credential in the browser's cookie jar and every `Set-Cookie` along the way.
   Tenant- and team-scoped keys deliberately stayed on the API.
 
-1. **The version form is weaker than `VersionCreate`.** The API accepts
-   `params`, `input_schema`, `output_schema`, `tool_grants` and
-   `data_store_grants`; `version_new.html` collects model, prompt,
-   `max_iterations` and `timeout_s`. Every version created in the UI is
-   therefore schema-less, tool-less and storage-less, and because versions are
-   immutable there is no way to add any of it afterwards —
-   `version_detail.html` will happily *display* grants the UI gave you no way
-   to set. Structured output is a headline feature and is currently
-   unreachable from the pages, so schemas and params are the part to do first;
-   the two grant lists are blocked on items 3 and 4 below, since granting
-   against an empty registry is meaningless.
+- [x] ~~**The version form is weaker than `VersionCreate`**~~ — schemas and
+  params done 2026-08-24; the two grant lists remain, blocked on items 2 and 3
+  below since granting against an empty registry is meaningless. Output
+  schema, input schema and `params` are now edited on the version form and
+  prefilled from the outgoing version, output schema is also on the new-agent
+  form, and both are validated as JSON Schema — stricter than the API, which
+  takes any dict and lets the runner discover the problem one failed job at a
+  time. The worse half of this was silent: publishing v2 from the UI over an
+  API-created v1 dropped that agent's schema and grants entirely, since the
+  new row took the column defaults. Grants are carried forward now and shown
+  read-only on the form.
 
-2. **Model registry** (`/models`, superuser-only). Small, and it removes a dead
+1. **Model registry** (`/models`, superuser-only). Small, and it removes a dead
    end: the version form already errors with "register it in the models
    registry first", naming a place the UI does not have.
 
-3. **Data stores** (`/tenants/{id}/data-stores`) — a tenant-level registry
+2. **Data stores** (`/tenants/{id}/data-stores`) — a tenant-level registry
    page for the S3/Azure/GCS/Box/local backends, plus a grant editor on the
    version form (store / prefix / ro-rw). Note the two superuser gates in
    `data_stores.py` are not decoration: `local` stores and credential-less
    cloud stores run on the platform's own identity, so the UI must reproduce
    the gate rather than the form.
 
-4. **MCP servers** (`/tenants/{id}/mcp-servers`) — structurally identical to
-   item 3 (registry plus per-version grants), so much cheaper done right after
+3. **MCP servers** (`/tenants/{id}/mcp-servers`) — structurally identical to
+   item 2 (registry plus per-version grants), so much cheaper done right after
    it than before it. Registration must keep the audit-5 endpoint validation.
 
-5. **Submit a job.** No "test run this agent" anywhere in the UI, which is an
+4. **Submit a job.** No "test run this agent" anywhere in the UI, which is an
    odd gap given the pages already render job trees and results in detail.
 
-6. **Feedback** (`POST /v1/feedback/{job_id}`). Asymmetric today: the learning
+5. **Feedback** (`POST /v1/feedback/{job_id}`). Asymmetric today: the learning
    loop's *output* (memory approval) is in the UI, its *input* is not, so a
    reviewer reading a bad result in the job page has no way to say so from
    there.
