@@ -68,6 +68,17 @@
              value="{{ form.timeout_s or 300 }}"> <span class="muted">second timeout</span>
     </div>
 
+    <label for="na-out">Output schema</label>
+    <div>
+      <textarea id="na-out" name="output_schema" rows="8" class="mono"
+                placeholder='{"type": "object", "properties": {"risk_level": {"type": "string"}}, "required": ["risk_level"]}'>{{ form.output_schema or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Optional JSON Schema. Set one and the model must return JSON matching it, which
+        is what makes the agent usable as a workflow node rather than a chat box. Input
+        schema and model params are set when publishing a version.
+      </div>
+    </div>
+
     <div class="form-actions">
       <button type="submit">Create agent</button>
       <a class="cancel" href="/ui/t/{{ tenant.id }}/agents">Cancel</a>

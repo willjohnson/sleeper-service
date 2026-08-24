@@ -29,6 +29,49 @@
              value="{{ form.timeout_s or current_timeout }}"> <span class="muted">second timeout</span>
     </div>
 
+    <div class="form-section">Output and input</div>
+
+    <label for="nv-out">Output schema</label>
+    <div>
+      <textarea id="nv-out" name="output_schema" rows="10" class="mono"
+                placeholder='{"type": "object", "properties": {"risk_level": {"type": "string"}}, "required": ["risk_level"]}'>{{ form.output_schema if form.output_schema is defined else current_output_schema }}</textarea>
+      <div class="muted" style="font-size:12px">
+        JSON Schema. Set one and the model must return JSON matching it — that is what
+        makes the agent callable as a workflow node rather than a chat box, and what
+        <code>is_valid</code> eval checks grade against. Leave blank for free text.
+      </div>
+    </div>
+
+    <label for="nv-in">Input schema</label>
+    <div>
+      <textarea id="nv-in" name="input_schema" rows="6" class="mono"
+                placeholder="optional">{{ form.input_schema if form.input_schema is defined else current_input_schema }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Validates the job payload before the run, so a malformed caller fails fast
+        instead of paying for a confused one.
+      </div>
+    </div>
+
+    <label for="nv-params">Model params</label>
+    <div>
+      <textarea id="nv-params" name="params" rows="4" class="mono"
+                placeholder='{"temperature": 0.2}'>{{ form.params if form.params is defined else current_params }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Passed through to the provider for this version.
+      </div>
+    </div>
+
+    {% if carried_grants %}
+    <label>Grants</label>
+    <div class="inline-fields">
+      {% for g in carried_grants %}<span class="badge opt">{{ g }}</span>{% endfor %}
+      <span class="muted" style="font-size:12px">
+        carried over from the current version — tool and data store grants are still
+        API-only to change.
+      </span>
+    </div>
+    {% endif %}
+
     <div class="form-actions">
       <button type="submit">Create version</button>
       <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>

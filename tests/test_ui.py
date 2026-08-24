@@ -1477,3 +1477,160 @@ async def test_archived_agent_issues_no_keys_but_still_revokes(
     keys = (await client.get("/v1/api-keys", headers=alice)).json()
     assert [k["name"] for k in keys] == ["live-key"]
     assert keys[0]["revoked_at"] is not None
+
+
+RISK_OUT_SCHEMA = {
+    "type": "object",
+    "properties": {"risk_level": {"type": "string", "enum": ["low", "high"]}},
+    "required": ["risk_level"],
+}
+
+
+async def test_version_form_sets_schemas_and_params(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+
+    # The form arrives prefilled from the current version, so publishing v2
+    # does not silently drop the schema v1 declared.
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert "risk_level" in page.text
+    assert "Output schema" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "model": "test:default",
+            "prompt": "v2 prompt",
+            "max_iterations": "5",
+            "timeout_s": "60",
+            "output_schema": json.dumps(RISK_OUT_SCHEMA),
+            "input_schema": '{"type": "object"}',
+            "params": '{"temperature": 0.2}',
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    v2 = next(v for v in versions if v["version_no"] == 2)
+    assert v2["output_schema"] == RISK_OUT_SCHEMA
+    assert v2["input_schema"] == {"type": "object"}
+    assert v2["params"] == {"temperature": 0.2}
+
+    page = await client.get(f"/ui/agents/{agent_id}/versions/2")
+    assert "temperature" in page.text
+    assert "risk_level" in page.text
+
+
+async def test_version_form_rejects_bad_schemas(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    token = _csrf(page.text)
+
+    base = {
+        "_csrf_token": token,
+        "model": "test:default",
+        "prompt": "v2",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    for field, value, expected in [
+        ("output_schema", "{not json", "not valid JSON"),
+        ("output_schema", "[1, 2]", "must be a JSON object"),
+        # Valid JSON and a valid object, but not a usable schema: the runner
+        # builds an output type from this and every job would fail.
+        ("output_schema", '{"type": "nonesuch"}', "not a valid JSON Schema"),
+        ("input_schema", '{"required": "risk_level"}', "not a valid JSON Schema"),
+        ("params", "12", "must be a JSON object"),
+    ]:
+        r = await client.post(f"/ui/agents/{agent_id}/versions", data={**base, field: value})
+        assert r.status_code == 400, (field, value)
+        assert expected in html.unescape(r.text), (field, value)
+        # the bad input comes back in the form rather than being thrown away
+        assert value.split()[0][:6] in html.unescape(r.text), (field, value)
+
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    assert [v["version_no"] for v in versions] == [1]
+
+
+async def test_ui_version_carries_grants_forward(client: AsyncClient, risk_agent: dict) -> None:
+    """Grants have no UI editor yet, so a version published from the pages must
+    inherit them — otherwise publishing v2 quietly strips the agent's tools."""
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=bob,
+        json={
+            "prompt": "v2 with grants",
+            "model": "test/default",
+            "tool_grants": ["search"],
+            "data_store_grants": [{"store": "reference", "prefix": "docs/", "mode": "ro"}],
+        },
+    )
+    assert r.status_code == 201
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/versions/new")
+    assert "carried over from the current version" in page.text
+    assert "search" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/versions",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "model": "test:default",
+            "prompt": "v3",
+            "max_iterations": "10",
+            "timeout_s": "300",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=bob)).json()
+    v3 = next(v for v in versions if v["version_no"] == 3)
+    assert v3["tool_grants"] == ["search"]
+    assert v3["data_store_grants"] == [{"store": "reference", "prefix": "docs/", "mode": "ro"}]
+
+
+async def test_new_agent_form_takes_an_output_schema(
+    client: AsyncClient, org: dict, seeded_models: None
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{tenant_id}/agents/new")
+    assert "Output schema" in page.text
+
+    base = {
+        "_csrf_token": _csrf(page.text),
+        "team_id": org["team"]["id"],
+        "name": "structured-agent",
+        "model": "test:default",
+        "prompt": "Return a risk level.",
+        "max_iterations": "10",
+        "timeout_s": "300",
+    }
+    r = await client.post(
+        f"/ui/t/{tenant_id}/agents", data={**base, "output_schema": '{"type": "bogus"}'}
+    )
+    assert r.status_code == 400
+    assert "not a valid JSON Schema" in html.unescape(r.text)
+
+    r = await client.post(
+        f"/ui/t/{tenant_id}/agents",
+        data={**base, "output_schema": json.dumps(RISK_OUT_SCHEMA)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    agents = (await client.get("/v1/agents", headers=alice)).json()
+    agent_id = next(a["id"] for a in agents if a["name"] == "structured-agent")
+    versions = (await client.get(f"/v1/agents/{agent_id}/versions", headers=alice)).json()
+    assert versions[0]["output_schema"] == RISK_OUT_SCHEMA

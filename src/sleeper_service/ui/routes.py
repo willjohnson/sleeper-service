@@ -21,6 +21,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import anyio
+import jsonschema
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -243,6 +244,41 @@ def _form_int(raw: str, default: int, lo: int, hi: int, label: str) -> tuple[int
     return value, None
 
 
+def _pretty_json(value: dict | list | None) -> str:
+    """Indented JSON for a form field or a <pre>; empty for nothing to show,
+    so a blank textarea and an unset column render the same way."""
+    if not value:
+        return ""
+    return json.dumps(value, indent=2)
+
+
+def _form_json_object(
+    raw: str, label: str, *, as_schema: bool = False
+) -> tuple[dict | None, str | None]:
+    """Parse an optional JSON-object field. Blank means unset, which is not the
+    same as `{}` — an empty output schema would still force structured output.
+
+    Schemas are additionally checked as JSON Schema. The API takes any dict
+    here, but a malformed schema is not caught until the runner builds an
+    output type from it, by which point every job on the version fails; the
+    form is the last place it can be a correction rather than an outage."""
+    raw = raw.strip()
+    if not raw:
+        return None, None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"{label} is not valid JSON: {exc.msg} (line {exc.lineno})."
+    if not isinstance(value, dict):
+        return None, f"{label} must be a JSON object, not {type(value).__name__}."
+    if as_schema:
+        try:
+            jsonschema.Draft202012Validator.check_schema(value)
+        except jsonschema.SchemaError as exc:
+            return None, f"{label} is not a valid JSON Schema: {exc.message}"
+    return value, None
+
+
 async def _clean_agent_fields(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -304,9 +340,19 @@ async def _new_version(
     model: Model,
     max_iterations: int,
     timeout_s: int,
+    params: dict | None = None,
+    input_schema: dict | None = None,
+    output_schema: dict | None = None,
+    tool_grants: list | None = None,
+    data_store_grants: list | None = None,
 ) -> AgentVersion:
     """Append a version, auto-promoting the first one so a freshly created
-    agent is immediately runnable (same rule as POST /v1/agents/{id}/versions)."""
+    agent is immediately runnable (same rule as POST /v1/agents/{id}/versions).
+
+    Grants are carried rather than collected: the form has no registry to pick
+    from yet (docs/TODO § Admin UI parity), so the caller passes the outgoing
+    version's lists through and a UI-published version stops silently dropping
+    the tools and stores its predecessor had."""
     next_no = (
         await db.scalar(
             select(func.coalesce(func.max(AgentVersion.version_no), 0)).where(
@@ -319,8 +365,13 @@ async def _new_version(
         version_no=next_no,
         prompt=prompt,
         model_id=model.id,
+        params=params or {},
         max_iterations=max_iterations,
         timeout_s=timeout_s,
+        tool_grants=tool_grants or [],
+        data_store_grants=data_store_grants or [],
+        input_schema=input_schema,
+        output_schema=output_schema,
         created_by=p.user.id,
     )
     db.add(version)
@@ -1056,6 +1107,7 @@ async def ui_create_agent(
     spending_limit: str = Form(""),
     max_iterations: str = Form("10"),
     timeout_s: str = Form("300"),
+    output_schema: str = Form(""),
     delegation: str = Form("none"),
     memory: bool = Form(False),
     learning: bool = Form(False),
@@ -1077,6 +1129,7 @@ async def ui_create_agent(
         "spending_limit": spending_limit,
         "max_iterations": max_iterations,
         "timeout_s": timeout_s,
+        "output_schema": output_schema,
         "delegation": delegation,
         "memory": memory,
         "learning": learning,
@@ -1122,6 +1175,9 @@ async def ui_create_agent(
     timeout, err = _form_int(timeout_s, 300, 1, 3600, "Timeout")
     if err:
         return await fail(err)
+    out_schema, err = _form_json_object(output_schema, "Output schema", as_schema=True)
+    if err:
+        return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
         return await fail(f"Unknown model {model!r} — register it in the models registry first.")
@@ -1144,6 +1200,7 @@ async def ui_create_agent(
         model=model_row,
         max_iterations=iterations,
         timeout_s=timeout,
+        output_schema=out_schema,
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent.id}", status_code=303)
@@ -1668,6 +1725,14 @@ async def _render_new_version(
             current_prompt=current.prompt if current else "",
             current_iters=current.max_iterations if current else 10,
             current_timeout=current.timeout_s if current else 300,
+            current_output_schema=_pretty_json(current.output_schema if current else None),
+            current_input_schema=_pretty_json(current.input_schema if current else None),
+            current_params=_pretty_json(current.params if current else None),
+            carried_grants=(
+                current.tool_grants + [g.get("store", "?") for g in current.data_store_grants]
+            )
+            if current
+            else [],
             next_version_no=(current.version_no + 1) if current else 1,
             error=error,
             form=form or {},
@@ -1694,6 +1759,9 @@ async def ui_create_version(
     prompt: str = Form(""),
     max_iterations: str = Form("10"),
     timeout_s: str = Form("300"),
+    output_schema: str = Form(""),
+    input_schema: str = Form(""),
+    params: str = Form(""),
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
 ):
@@ -1702,6 +1770,9 @@ async def ui_create_version(
         "prompt": prompt,
         "max_iterations": max_iterations,
         "timeout_s": timeout_s,
+        "output_schema": output_schema,
+        "input_schema": input_schema,
+        "params": params,
     }
 
     async def fail(message: str):
@@ -1722,10 +1793,22 @@ async def ui_create_version(
     timeout, err = _form_int(timeout_s, 300, 1, 3600, "Timeout")
     if err:
         return await fail(err)
+    out_schema, err = _form_json_object(output_schema, "Output schema", as_schema=True)
+    if err:
+        return await fail(err)
+    in_schema, err = _form_json_object(input_schema, "Input schema", as_schema=True)
+    if err:
+        return await fail(err)
+    model_params, err = _form_json_object(params, "Model params")
+    if err:
+        return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
         return await fail(f"Unknown model {model!r} — register it in the models registry first.")
 
+    current = (
+        await db.get(AgentVersion, agent.current_version_id) if agent.current_version_id else None
+    )
     await _new_version(
         db,
         agent,
@@ -1734,6 +1817,11 @@ async def ui_create_version(
         model=model_row,
         max_iterations=iterations,
         timeout_s=timeout,
+        params=model_params,
+        input_schema=in_schema,
+        output_schema=out_schema,
+        tool_grants=current.tool_grants if current else None,
+        data_store_grants=current.data_store_grants if current else None,
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
@@ -1792,12 +1880,9 @@ async def version_detail(
             author=author,
             aliases=aliases,
             is_current=version.id == agent.current_version_id,
-            output_schema=json.dumps(version.output_schema, indent=2)
-            if version.output_schema
-            else None,
-            input_schema=json.dumps(version.input_schema, indent=2)
-            if version.input_schema
-            else None,
+            output_schema=_pretty_json(version.output_schema),
+            input_schema=_pretty_json(version.input_schema),
+            params=_pretty_json(version.params),
         ),
     )
 
