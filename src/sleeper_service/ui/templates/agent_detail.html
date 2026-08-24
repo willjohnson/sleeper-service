@@ -30,9 +30,19 @@
   <div class="meter" style="max-width:320px"><div style="width: {{ [spend / spending_limit * 100, 100] | min }}%"></div></div>
   {% endif %}
 
-  {% if can_edit %}
+  {% if can_edit or can_delete %}
   <div class="subpanel">
+    {% if can_edit %}
     <a class="btn subtle" href="/ui/agents/{{ agent.id }}/settings">Edit settings</a>
+    {% endif %}
+    {% if can_delete %}
+    <form method="post" action="/ui/agents/{{ agent.id }}/delete">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <button class="subtle danger">Delete</button>
+    </form>
+    <span class="muted" style="font-size:12px">Nothing has run here yet, so this can go
+      without a trace. Once it has jobs, archiving is what retiring it means.</span>
+    {% endif %}
   </div>
   {% endif %}
 </div>
@@ -148,6 +158,27 @@
   {% elif not pending_memory %}
     <div class="muted">No memory yet.</div>
   {% endif %}
+  {% if memory_versions|length > 1 or (memory_versions and not current_memory) %}
+  <details class="subpanel">
+    <summary class="muted">History · {{ memory_versions|length }} versions</summary>
+    <table style="margin-top:10px">
+      <tr><th style="width:70px">Version</th><th style="width:90px">Status</th>
+        <th style="width:150px">Written</th><th>Content</th></tr>
+      {% for m in memory_versions %}
+      <tr>
+        <td>v{{ m.version_no }}</td>
+        <td><span class="badge {{ m.status }}">{{ m.status }}</span></td>
+        <td class="muted">{{ m.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td><pre style="white-space:pre-wrap; margin:0">{{ m.content|truncate(300) }}</pre></td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p class="muted" style="font-size:12px; margin-bottom:0">
+      The newest active version is what gets injected; rolling back retires it so the
+      one before takes over. Rejected versions are never injected again.
+    </p>
+  </details>
+  {% endif %}
 </div>
 {% endif %}
 
@@ -255,6 +286,97 @@
   {% else %}
   <div class="muted">No keys yet — this agent cannot be called from outside the UI until it has one.</div>
   {% endif %}
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2 class="with-action">Event sources
+    {% if can_manage_keys and agent.archived_at is none %}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}/event-sources/new">New event source</a>
+    </span>
+    {% endif %}
+  </h2>
+  <p class="muted" style="margin-top:0">
+    Webhooks that turn an external event into a job here. The sender authenticates with
+    the source's own secret rather than a platform key, and a template shapes the event
+    body into the job's prompt.
+  </p>
+  {% if event_sources %}
+  <table>
+    <tr><th>Name</th><th>Endpoint</th><th>Dedup on</th><th class="col-actions"></th></tr>
+    {% for e in event_sources %}
+    <tr>
+      <td><strong>{{ e.name }}</strong></td>
+      <td class="mono" style="font-size:12px">/v1/events/{{ e.id }}</td>
+      <td class="muted">{% if e.dedup_key_path %}<code>{{ e.dedup_key_path }}</code>
+        {% else %}—{% endif %}</td>
+      <td>
+        {% if can_manage_keys %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/agents/{{ agent.id }}/event-sources/{{ e.id }}/delete">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Delete</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="muted">None — nothing outside can trigger this agent except an invoke key.</div>
+  {% endif %}
+</div>
+
+{% if can_manage_keys %}
+<div class="panel">
+  <h2>Provider credentials</h2>
+  <p class="muted" style="margin-top:0">
+    Vendor API keys for this agent alone, overriding the team's and the tenant's. Use
+    one when this agent's spend has to land on its own bill. Stored encrypted; never
+    shown again.
+  </p>
+  {% if agent_creds %}
+  <table style="max-width:640px">
+    <tr><th>Provider</th><th>Set</th><th class="col-actions"></th></tr>
+    {% for c in agent_creds %}
+    <tr>
+      <td><span class="badge opt">{{ c.provider }}</span></td>
+      <td class="muted">{{ c.created_at.strftime('%Y-%m-%d') }}</td>
+      <td>
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/agents/{{ agent.id }}/provider-creds/delete">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="provider" value="{{ c.provider }}">
+            <button class="subtle danger">Delete</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="muted">None — this agent uses its team's, or the tenant's.</div>
+  {% endif %}
+
+  <form method="post" action="/ui/agents/{{ agent.id }}/provider-creds" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <label for="apc-provider">Provider</label>
+    <div>
+      <select id="apc-provider" name="provider" class="short">
+        {% for name in providers %}<option value="{{ name }}">{{ name }}</option>{% endfor %}
+      </select>
+    </div>
+    <label for="apc-key">API key</label>
+    <div>
+      <input id="apc-key" type="password" name="api_key" autocomplete="off" class="mono"
+             placeholder="sk-...">
+    </div>
+    <div class="form-actions">
+      <button type="submit">Set credential</button>
+    </div>
+  </form>
 </div>
 {% endif %}
 

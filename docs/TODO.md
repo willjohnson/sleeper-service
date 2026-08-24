@@ -19,8 +19,8 @@ E2B-as-abstraction evaluated and passed over — rationale in BUILD_PLAN
 the decision log embedded in each section.
 
 Since then the security follow-up list below has been worked down: as of
-2026-08-11 the only open item is screening text inside binary uploads, and
-172 tests are green.
+2026-08-11 the only open item is screening text inside binary uploads. Admin
+UI parity with the API was finished 2026-08-24; 283 tests are green.
 
 ## Remaining from the build plan
 
@@ -33,7 +33,9 @@ Since then the security follow-up list below has been worked down: as of
 
 Surveyed 2026-08-24, after v0.1.1: 79 API routes against 36 UI routes. The CLI
 is not an alternative — it has only `init`, `seed-models` and `demo-setup` — so
-everything below is genuinely curl-or-nothing today.
+everything below was genuinely curl-or-nothing at the time. **Closed
+2026-08-24**: 81 API routes against 80 UI routes, and the gap is now only the
+two deliberate exceptions recorded at the end of this section.
 
 The organising goal is that one person can build, ship and operate an agent
 without leaving the pages, because that is what most people will actually want.
@@ -47,7 +49,9 @@ Ordering follows that arc rather than the size of each surface.
   response that created it rather than being flashed through a redirect — the
   session cookie is signed but not encrypted, so a flash would park a live
   credential in the browser's cookie jar and every `Set-Cookie` along the way.
-  Tenant- and team-scoped keys deliberately stayed on the API.
+  Tenant- and team-scoped keys deliberately stayed on the API — *until the
+  settings page existed to hold them; they landed later the same day, see the
+  admin-console tail below.*
 
 - [x] ~~**The version form is weaker than `VersionCreate`**~~ — closed
   2026-08-24 in two passes. All five missing fields are now on the form,
@@ -112,23 +116,87 @@ Ordering follows that arc rather than the size of each surface.
   holding it, so the session is the credential and the role is the gate. One
   vote per job, and the recorded vote replaces the form.
 
-Admin-console tail — better as one `/ui/t/{id}/settings` section than scattered
-across existing pages:
+- [x] ~~**Admin-console tail**~~ — done 2026-08-24. The whole list below is
+  now in the pages, and a fresh route-by-route sweep says the parity work is
+  finished: every `/v1` route has a UI path except the two noted at the end.
 
-- **Users** — create, rotate key, revoke key. Currently *adding* a user to a
-  team is in the UI while *creating* that user is not, so people can only be
-  invited if they were made by curl first.
-- **Provider credentials** — nine endpoints across tenant/team/agent scope.
-- **Tenant settings** — `system_prompt` plus the `settings` blob, which is
-  where injection-screening tuning, hooks and learning/fold config live.
-- **Notification channels** — Apprise alerting, per team.
-- **OIDC config** — the login page renders the SSO block, but nothing in the
-  UI configures it.
-- **Event sources** — registry and ingest.
-- **Files** — upload and read; job inputs can reference files the UI cannot
-  put there.
-- **Agent memory read** (`GET /v1/agents/{id}/memory`) — the UI does pending
-  approval and rollback but cannot show what the memory currently says.
+  Not all of it landed on one settings page, as the heading here originally
+  guessed. The gates decided the placement instead, since a page whose panels
+  answer to different roles cannot state one honest rule at the top:
+
+  - **`/ui/t/{id}/settings`** (tenant admin, whole page) — tenant
+    `system_prompt` and the `settings` blob, tenant provider credentials, OIDC
+    config, tenant-wide invoke keys. Settings are validated with the API's own
+    `validate_hooks_settings` / `validate_learning_settings`; unlike
+    `TenantUpdate`, an emptied field means an emptied blob, because a form
+    posts whole state and the textarea arrives prefilled.
+  - **`/ui/t/{id}/files`** (any tenant member, matching `_check_tenant_access`)
+    — upload, list, download. Content type is sniffed with the API's own
+    `sniff_content_type` rather than a second copy of the rule. Downloads are
+    forced to `attachment` with `nosniff`: these bytes are uploaded by anyone
+    who can reach the tenant and would otherwise be served from the origin
+    holding the session cookie, which the API's own download does not have.
+  - **Team page** — Apprise alert channels and team provider credentials and
+    team-scoped invoke keys, all owner-gated, and the panels are not even
+    rendered for a viewer since which vendors a team pays for is not viewer
+    business.
+  - **Agent page** — event sources, agent provider credentials, memory
+    history. Event sources are a tenant-scoped API path but an agent-scoped
+    *question*, so they sit next to the invoke keys: both answer "how does
+    something outside call this agent", one with a platform credential and one
+    with a per-source secret.
+  - **`/ui/users`**, **`/ui/account`**, **`/ui/tenants`** — creating users
+    (superuser), rotating your own key (anyone, matching the API's
+    `user_id != principal.user.id` check), creating tenants.
+
+  Three things the work turned up that were not on this list:
+
+  - **Tenant- and team-scoped invoke keys** were deliberately parked on the
+    API "until there is a settings section with somewhere to put them". This
+    change built that section, so the reason expired and they are now in the
+    UI too — leaving them out would have been a stale excuse rather than a
+    decision.
+  - **Creating a tenant** and **deleting an agent** were never on the list but
+    were missing all the same. Delete only shows while nothing has ever run on
+    the agent, mirroring the API's refusal — `jobs.agent_id` does not cascade,
+    so offering a button that always fails would be worse than not offering
+    one.
+  - The tenant-admin flag the sidebar needs is resolved once per request in
+    `ui_user`, not per page: with ~30 render sites, the one that forgot to ask
+    would have quietly dropped the Settings link for an admin.
+
+  The memory item below was half wrong when written: the active document was
+  already rendered on the agent page. What was missing was the version history
+  — what came before, what was rejected, and what a rollback falls back to.
+
+  <details><summary>The original list</summary>
+
+  - **Users** — create, rotate key, revoke key. Currently *adding* a user to a
+    team is in the UI while *creating* that user is not, so people can only be
+    invited if they were made by curl first.
+  - **Provider credentials** — nine endpoints across tenant/team/agent scope.
+  - **Tenant settings** — `system_prompt` plus the `settings` blob, which is
+    where injection-screening tuning, hooks and learning/fold config live.
+  - **Notification channels** — Apprise alerting, per team.
+  - **OIDC config** — the login page renders the SSO block, but nothing in the
+    UI configures it.
+  - **Event sources** — registry and ingest.
+  - **Files** — upload and read; job inputs can reference files the UI cannot
+    put there.
+  - **Agent memory read** (`GET /v1/agents/{id}/memory`) — the UI does pending
+    approval and rollback but cannot show what the memory currently says.
+
+  </details>
+
+**Deliberately still curl-only**, and both stay that way:
+
+- **Event ingest** (`POST /v1/events/{source_id}`) — the webhook itself. A
+  page that posted an event would be testing the sender, not the platform;
+  the created-source page hands over the secret and the `curl` instead.
+- **`callback_url`, `files`, `links` and `user_ctx` on the test-run form** —
+  the decision recorded above stands. Each carries its own policy, and a test
+  run is a prompt. Uploading a file is now possible; referencing one from a
+  test run still is not.
 
 ## Security follow-ups (low severity, from audit-2 review)
 

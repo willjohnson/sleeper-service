@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Tenants — Sleeper Service{% endblock %}
+{% block heading %}Tenants{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Every tenant</h2>
+  <p class="muted" style="margin-top:0">
+    A tenant is the boundary everything else sits inside: its own teams, agents,
+    connections, files and settings. Nothing crosses between them.
+  </p>
+  <table>
+    <tr><th>Name</th><th>Teams</th><th>Live agents</th><th>Created</th><th class="col-actions"></th></tr>
+    {% for row in rows %}
+    <tr>
+      <td><strong>{{ row.tenant.name }}</strong></td>
+      <td class="muted">{{ row.teams }}</td>
+      <td class="muted">{{ row.agents }}</td>
+      <td class="muted">{{ row.tenant.created_at.strftime('%Y-%m-%d') }}</td>
+      <td>
+        <div class="actions" style="justify-content:flex-end">
+          <a class="btn subtle" href="/ui/t/{{ row.tenant.id }}">Open</a>
+          <a class="btn subtle" href="/ui/t/{{ row.tenant.id }}/settings">Settings</a>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="panel">
+  <h2>Create a tenant</h2>
+  <p class="muted" style="margin-top:0">
+    It is born with an org-wide team. Owning that team is what makes someone a tenant
+    admin, so add its first owner from the team page — until then only an instance
+    superuser can administer it.
+  </p>
+  <form method="post" action="/ui/tenants" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="t-name">Name</label>
+    <div>
+      <input id="t-name" type="text" name="name" required maxlength="200"
+             value="{{ form.name or '' }}" placeholder="acme">
+    </div>
+
+    <label for="t-prompt">System prompt</label>
+    <div>
+      <textarea id="t-prompt" name="system_prompt" rows="3"
+                placeholder="Optional. Prepended to every agent in the tenant.">{{ form.system_prompt or '' }}</textarea>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create tenant</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

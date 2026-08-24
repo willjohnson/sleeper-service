@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}New event source · {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}New event source <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    A webhook that turns an incoming event into a job on this agent. The sender
+    authenticates with the source's own secret and holds no platform key, so it can
+    submit to this agent and nothing else.
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/event-sources" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="e-name">Name</label>
+    <div>
+      <input id="e-name" type="text" name="name" required
+             value="{{ form.name or '' }}" placeholder="pagerduty-incidents">
+      <div class="muted" style="font-size:12px">Unique within the tenant.</div>
+    </div>
+
+    <label for="e-template">Payload template</label>
+    <div>
+      <textarea id="e-template" name="payload_template" rows="6">{{ form.payload_template or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        The job context, with <code>{{ '{{path.to.field}}' }}</code> substituted from the
+        event body and <code>{{ '{{body}}' }}</code> standing for the whole body as JSON.
+        It must produce a non-empty <code>prompt</code>; a field missing from an event
+        substitutes as blank.
+      </div>
+    </div>
+
+    <label for="e-dedup">Dedup key path</label>
+    <div>
+      <input id="e-dedup" type="text" name="dedup_key_path" class="mono"
+             value="{{ form.dedup_key_path or '' }}" placeholder="incident.id">
+      <div class="muted" style="font-size:12px">
+        Optional. A path into the event body whose value makes the job idempotent —
+        a redelivered event returns the original job instead of running again.
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Create event source</button>
+      <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Files · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}Files <span class="muted" style="font-size:14px">· {{ tenant.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Upload</h2>
+  <p class="muted" style="margin-top:0">
+    Payload files a job can reference by id — <code>{"context": {"prompt": "...",
+    "files": ["&lt;id&gt;"]}}</code>. Shared across the tenant, and readable by anyone
+    with a team in it. Up to {{ max_size_mb }} MiB each.
+  </p>
+  <form method="post" action="/ui/t/{{ tenant.id }}/files" enctype="multipart/form-data"
+        class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <label for="f-file">File</label>
+    <div>
+      <input id="f-file" type="file" name="file" required>
+      <div class="muted" style="font-size:12px">
+        The content type is read from the bytes, not from what the browser says: text
+        is inlined into the prompt and injection-screened, anything else is handed to
+        the model as opaque content.
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="submit">Upload</button>
+    </div>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>Uploaded</h2>
+  {% if files %}
+  <table>
+    <tr><th>Name</th><th>Id</th><th>Type</th><th>Size</th><th>Uploaded</th><th>Expires</th></tr>
+    {% for f in files %}
+    <tr>
+      <td><a href="/ui/files/{{ f.id }}/content">{{ f.name }}</a></td>
+      <td class="mono" style="font-size:11.5px">{{ f.id }}</td>
+      <td><span class="badge opt">{{ f.content_type }}</span></td>
+      <td class="muted">{{ '{:,}'.format(f.size) }} B</td>
+      <td class="muted">{{ f.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td class="muted">{% if f.expires_at %}{{ f.expires_at.strftime('%Y-%m-%d') }}
+        {% else %}never{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted" style="font-size:12px; margin-bottom:0">
+    Files expire on the tenant's retention setting, and a job referencing one that has
+    gone will fail — upload again rather than reusing an old id.
+  </p>
+  {% else %}
+  <div class="muted">Nothing uploaded yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

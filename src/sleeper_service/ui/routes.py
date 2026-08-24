@@ -22,17 +22,21 @@ from pathlib import Path
 
 import anyio
 import jsonschema
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sleeper_service import storage
 from sleeper_service.api.v1.agents import GOVERNED_OPTION_KEYS
+from sleeper_service.api.v1.events import render_template
+from sleeper_service.api.v1.files import MAX_FILE_SIZE, sniff_content_type
 from sleeper_service.api.v1.schemas import JobContext
-from sleeper_service.auth.keys import generate_key
-from sleeper_service.auth.passwords import verify_password
+from sleeper_service.auth.keys import generate_key, hash_key
+from sleeper_service.auth.passwords import hash_password, verify_password
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.auth.rbac import is_tenant_admin, visible_team_ids
 from sleeper_service.config import get_settings
@@ -45,13 +49,17 @@ from sleeper_service.db.models import (
     DataStore,
     EvalCase,
     EvalRun,
+    EventSource,
     Feedback,
+    File,
     Job,
     JobEvent,
     McpServer,
     MemoryVersion,
     Model,
+    NotifChannel,
     OidcConfig,
+    ProviderCred,
     Team,
     TeamMember,
     Tenant,
@@ -61,8 +69,18 @@ from sleeper_service.db.models import (
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
 from sleeper_service.runtime.evals import PATH_OPS, validate_checks
+from sleeper_service.runtime.hooks import validate_hooks_settings
+from sleeper_service.runtime.learning import validate_learning_settings
 from sleeper_service.runtime.memory import latest_memory, learning_enabled
-from sleeper_service.runtime.outbound import OutboundUrlError, validate_mcp_url
+from sleeper_service.runtime.outbound import (
+    OutboundUrlError,
+    notif_policy,
+    validate_apprise_url,
+    validate_callback_url,
+    validate_mcp_url,
+)
+from sleeper_service.runtime.providers import SUPPORTED_PROVIDERS
+from sleeper_service.runtime.retention import file_expiry
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -163,7 +181,28 @@ async def ui_user(request: Request, db: AsyncSession = Depends(get_db)) -> UserP
     auth_tenant_id = request.session.get("auth_tenant_id")
     if auth_tenant_id is not None:
         roles = await _roles_within_tenant(db, roles, uuid.UUID(auth_tenant_id))
+    # Resolved here, once, because the sidebar on every page needs it: without
+    # it each render would have to remember to ask, and the one that forgot
+    # would quietly drop the Settings link for an admin.
+    request.state.admin_tenant_ids = await _admin_tenant_ids(db, user, roles)
     return UserPrincipal(user=user, roles=roles)
+
+
+async def _admin_tenant_ids(
+    db: AsyncSession, user: User, roles: dict[uuid.UUID, Role]
+) -> set[uuid.UUID]:
+    """Tenants this session administers, by rbac.is_tenant_admin's rule:
+    superuser, or owner of the tenant's org-wide team."""
+    if user.is_superuser:
+        return set(await db.scalars(select(Tenant.id)))
+    owned = [team_id for team_id, role in roles.items() if role == Role.OWNER]
+    if not owned:
+        return set()
+    return set(
+        await db.scalars(
+            select(Team.tenant_id).where(Team.id.in_(owned), Team.is_org_team.is_(True))
+        )
+    )
 
 
 async def _roles_within_tenant(
@@ -207,6 +246,11 @@ async def _tenant_or_home(
 # Blank check rows offered on the new-eval-case form.
 CHECK_ROWS = 4
 
+# Deliberately loose, matching what a browser's type=email accepts: the API
+# validates with EmailStr, but rejecting an address the user's own IdP will
+# later assert is worse than accepting one that bounces.
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 def _flash(request: Request, message: str) -> None:
     """One-shot error for a POST that redirects instead of re-rendering; the
@@ -221,6 +265,10 @@ def _ctx(request: Request, p: UserPrincipal, **extra) -> dict:
         "csrf_token": _csrf_token(request),
         **extra,
     }
+    tenant = ctx.get("tenant")
+    ctx["tenant_admin"] = tenant is not None and tenant.id in getattr(
+        request.state, "admin_tenant_ids", set()
+    )
     flash = request.session.pop("flash", None)
     if flash and not ctx.get("error"):
         ctx["error"] = flash
@@ -826,6 +874,8 @@ async def _render_team(
     p: UserPrincipal,
     *,
     error: str | None = None,
+    created_key: ApiKey | None = None,
+    plaintext: str | None = None,
     status_code: int = 200,
 ):
     team = await db.get(Team, team_id)
@@ -875,6 +925,19 @@ async def _render_team(
             suggestions=suggestions,
             can_manage=role == Role.OWNER,
             roles=[r.value for r in Role],
+            # Owner-only panels, and owner-only data: an Apprise subscription
+            # and the list of providers a team pays for are both things a
+            # viewer has no business reading, so they are not fetched at all
+            # unless the panel is going to render.
+            channels=await _team_channels(db, team.id) if role == Role.OWNER else [],
+            creds=await _provider_creds(db, KeyScope.TEAM, team.id) if role == Role.OWNER else [],
+            providers=PROVIDER_CHOICES,
+            notif_events=NOTIF_EVENTS,
+            invoke_keys=await _scoped_invoke_keys(db, KeyScope.TEAM, team.id)
+            if role == Role.OWNER
+            else [],
+            created_key=created_key,
+            plaintext=plaintext,
             error=error,
         ),
         status_code=status_code,
@@ -1402,6 +1465,22 @@ async def agent_detail(
     # created it — but the panel is all owner actions, so it hides whole.
     can_manage_keys = role == Role.OWNER
     invoke_keys = await _invoke_keys(db, agent.id) if can_manage_keys else []
+    # Event sources list for any team member, matching what
+    # api.v1.events.list_event_sources shows; creating and deleting stay owner
+    # work, like the keys above. Provider credentials are owner-only whole:
+    # which vendors a team pays for is not viewer business.
+    event_sources = await _agent_event_sources(db, agent.id)
+    agent_creds = await _provider_creds(db, KeyScope.AGENT, agent.id) if can_manage_keys else []
+    # The whole memory trail, as GET /v1/agents/{id}/memory returns it. The
+    # active document is rendered in full below it; this is what came before,
+    # what was refused, and what a rollback would fall back to.
+    memory_versions = list(
+        await db.scalars(
+            select(MemoryVersion)
+            .where(MemoryVersion.agent_id == agent.id)
+            .order_by(MemoryVersion.version_no.desc())
+        )
+    )
 
     return templates.TemplateResponse(
         request,
@@ -1432,7 +1511,15 @@ async def agent_detail(
             avg_tokens_per_job=charts["avg_tokens_per_job"],
             invoke_keys=invoke_keys,
             can_manage_keys=can_manage_keys,
+            event_sources=event_sources,
+            agent_creds=agent_creds,
+            providers=PROVIDER_CHOICES,
+            memory_versions=memory_versions,
             can_promote=role == Role.OWNER,
+            # Deletable only while nothing has ever run on it, matching the
+            # API's refusal — offering a button that always fails would be
+            # worse than not offering one.
+            can_delete=role == Role.OWNER and not recent_jobs,
             can_edit=role in (Role.OWNER, Role.EDITOR) and agent.archived_at is None,
             can_archive=role == Role.OWNER,
         ),
@@ -1562,6 +1649,35 @@ async def ui_archive_agent(
         agent.archived_at = datetime.now(UTC)
         await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/delete")
+async def ui_delete_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return RedirectResponse("/ui", status_code=303)
+    if await _team_role(db, p, agent.team_id) != Role.OWNER:
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    tenant_id = agent.tenant_id
+    # The same refusal api.v1.agents.delete_agent makes, for the same reason:
+    # jobs.agent_id does not cascade, so this would come back from the database
+    # as an IntegrityError rather than as something a person can act on. Once
+    # an agent has run, archiving is what retiring it means — the trail stays.
+    jobs = await db.scalar(select(func.count()).select_from(Job).where(Job.agent_id == agent.id))
+    if jobs:
+        _flash(
+            request,
+            f"{agent.name} has {jobs} job(s) and cannot be deleted — archive it instead.",
+        )
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    await db.delete(agent)
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/agents", status_code=303)
 
 
 @router.post("/agents/{agent_id}/restore")
@@ -2255,9 +2371,9 @@ async def _versions_granting(
 
 # --- Invoke keys ---
 #
-# Agent-scoped data-plane keys only: those are what make an agent built in the
-# UI actually callable. Tenant- and team-scoped keys stay on the API until
-# there is a settings section with somewhere to put them.
+# Agent-scoped data-plane keys: those are what make an agent built in the UI
+# actually callable. The wider tenant- and team-scoped keys are issued where
+# that scope is administered — see the invoke-key routes further down.
 
 
 async def _key_admin_page(
@@ -3123,6 +3239,1226 @@ async def ui_submit_feedback(
     pool = await get_pool()
     await pool.enqueue_job("fold_feedback", str(fb.id))
     return back
+
+
+# --- Provider credentials ---
+#
+# The same three-field form at three scopes, because that is what the API is:
+# tenant creds on the settings page, team creds on the team page, agent creds
+# on the agent page. Runtime resolution walks agent → team → tenant → process
+# environment, so where a credential is set decides which vendor bill the
+# spend lands on — which is why the form is repeated per scope rather than
+# collected in one place with a scope picker.
+#
+# Nothing here is ever read back: the API never returns a credential, and the
+# UI cannot either, so an existing entry offers replace and delete only.
+
+# 'test' is excluded: the test provider is the in-process fake, and a key for
+# it would be a credential for nothing. A row the API wrote under some other
+# provider name still lists and still deletes — the select gates writes, not
+# what is already there.
+PROVIDER_CHOICES = tuple(sorted(SUPPORTED_PROVIDERS - {"test"}))
+
+
+async def _provider_creds(
+    db: AsyncSession, scope: KeyScope, scope_id: uuid.UUID
+) -> list[ProviderCred]:
+    return list(
+        await db.scalars(
+            select(ProviderCred)
+            .where(ProviderCred.scope == scope, ProviderCred.scope_id == scope_id)
+            .order_by(ProviderCred.provider)
+        )
+    )
+
+
+async def _set_provider_cred(
+    db: AsyncSession, scope: KeyScope, scope_id: uuid.UUID, provider: str, api_key: str
+) -> str | None:
+    """Upsert one credential, mirroring provider_creds._set. Error message or None."""
+    provider = provider.strip().lower()
+    if provider not in PROVIDER_CHOICES:
+        return f"Pick a provider — one of {', '.join(PROVIDER_CHOICES)}."
+    api_key = api_key.strip()
+    if not api_key:
+        return "The API key is required."
+    cred = await db.scalar(
+        select(ProviderCred).where(
+            ProviderCred.scope == scope,
+            ProviderCred.scope_id == scope_id,
+            ProviderCred.provider == provider,
+        )
+    )
+    if cred is None:
+        db.add(
+            ProviderCred(
+                scope=scope,
+                scope_id=scope_id,
+                provider=provider,
+                credentials_enc=encrypt(api_key),
+            )
+        )
+    else:
+        cred.credentials_enc = encrypt(api_key)
+    await db.commit()
+    return None
+
+
+async def _delete_provider_cred(
+    db: AsyncSession, scope: KeyScope, scope_id: uuid.UUID, provider: str
+) -> None:
+    """Delete by name rather than id: the name is what resolution looks up, and
+    scope+scope_id+provider is unique, so it cannot address another scope's row."""
+    cred = await db.scalar(
+        select(ProviderCred).where(
+            ProviderCred.scope == scope,
+            ProviderCred.scope_id == scope_id,
+            ProviderCred.provider == provider.strip().lower(),
+        )
+    )
+    if cred is not None:
+        await db.delete(cred)
+        await db.commit()
+
+
+# --- Tenant settings: the admin console ---
+#
+# Everything on this page is tenant-admin work against a tenant-scoped API
+# surface: the tenant's own row, the provider credentials billed to it, and
+# the IdP its people sign in through. Unlike Connections there is no reader
+# half — none of it is something an editor picks from when publishing — so
+# the page is admin-only whole rather than admin-only in its buttons.
+
+
+async def _tenant_admin_or_redirect(
+    db: AsyncSession, p: UserPrincipal, tenant_id: uuid.UUID
+) -> tuple[Tenant | None, RedirectResponse | None]:
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return None, tenant
+    if not await is_tenant_admin(db, p, tenant_id):
+        return None, RedirectResponse(f"/ui/t/{tenant_id}", status_code=303)
+    return tenant, None
+
+
+async def _render_settings(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    created_key: ApiKey | None = None,
+    plaintext: str | None = None,
+    status_code: int = 200,
+):
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    oidc = await db.scalar(select(OidcConfig).where(OidcConfig.tenant_id == tenant.id))
+    defaults = {
+        "system_prompt": tenant.system_prompt,
+        "settings": _pretty_json(tenant.settings),
+        "issuer": oidc.issuer if oidc else "",
+        "client_id": oidc.client_id if oidc else "",
+        "scopes": oidc.scopes if oidc else "openid email profile",
+    }
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="settings",
+            creds=await _provider_creds(db, KeyScope.TENANT, tenant.id),
+            providers=PROVIDER_CHOICES,
+            invoke_keys=await _scoped_invoke_keys(db, KeyScope.TENANT, tenant.id),
+            created_key=created_key,
+            plaintext=plaintext,
+            oidc=oidc,
+            # What the IdP must have registered as the redirect URI — it is
+            # built from the same route the callback is served on, so it
+            # cannot drift from where the flow actually returns.
+            redirect_uri=str(request.url_for("oidc_callback", tenant_id=tenant.id)),
+            # The form re-renders with what was typed on an error and with the
+            # stored values otherwise, so a rejected edit is corrected rather
+            # than retyped.
+            form={**defaults, **(form or {})},
+            error=error,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/t/{tenant_id}/settings", response_class=HTMLResponse)
+async def settings_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_settings(request, tenant_id, db, p)
+
+
+@router.post("/t/{tenant_id}/settings")
+async def ui_update_tenant(
+    request: Request,
+    tenant_id: uuid.UUID,
+    system_prompt: str = Form(""),
+    settings: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {"system_prompt": system_prompt, "settings": settings}
+
+    async def fail(message: str):
+        return await _render_settings(
+            request, tenant_id, db, p, error=message, form=form, status_code=400
+        )
+
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+
+    blob, err = _form_json_object(settings, "Settings")
+    if err:
+        return await fail(err)
+    # A form posts whole state, so an emptied field means an emptied blob —
+    # unlike TenantUpdate, where omitting the field means "leave it alone".
+    # The textarea arrives prefilled with what is stored, so clearing it is a
+    # deliberate act rather than an omission.
+    blob = blob or {}
+    error = validate_hooks_settings(blob) or validate_learning_settings(blob)
+    if error is not None:
+        return await fail(error)
+
+    tenant.system_prompt = system_prompt.strip()
+    tenant.settings = blob
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
+
+
+@router.post("/t/{tenant_id}/provider-creds")
+async def ui_set_tenant_provider_cred(
+    request: Request,
+    tenant_id: uuid.UUID,
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    error = await _set_provider_cred(db, KeyScope.TENANT, tenant.id, provider, api_key)
+    if error is not None:
+        return await _render_settings(request, tenant_id, db, p, error=error, status_code=400)
+    return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
+
+
+@router.post("/t/{tenant_id}/provider-creds/delete")
+async def ui_delete_tenant_provider_cred(
+    tenant_id: uuid.UUID,
+    provider: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    await _delete_provider_cred(db, KeyScope.TENANT, tenant.id, provider)
+    return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
+
+
+@router.post("/t/{tenant_id}/oidc")
+async def ui_set_oidc(
+    request: Request,
+    tenant_id: uuid.UUID,
+    issuer: str = Form(""),
+    client_id: str = Form(""),
+    client_secret: str = Form(""),
+    scopes: str = Form("openid email profile"),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {"issuer": issuer, "client_id": client_id, "scopes": scopes}
+
+    async def fail(message: str):
+        return await _render_settings(
+            request, tenant_id, db, p, error=message, form=form, status_code=400
+        )
+
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+
+    issuer, client_id = issuer.strip().rstrip("/"), client_id.strip()
+    scopes = " ".join(scopes.split()) or "openid email profile"
+    # Bounds are OidcConfigSet's; the UI must not accept what the API rejects.
+    if not re.match(r"^https?://", issuer) or len(issuer) > 500:
+        return await fail("The issuer must be an http(s) URL of 500 characters or fewer.")
+    if not client_id or len(client_id) > 500:
+        return await fail("A client ID is required, of 500 characters or fewer.")
+    if not client_secret or len(client_secret) > 2000:
+        return await fail(
+            "The client secret is required, of 2000 characters or fewer. It is stored "
+            "encrypted and never shown again, so changing anything here means entering it."
+        )
+    try:
+        # The same gate as the API (audit-3 #2): the discovery document is
+        # fetched server-side, so an issuer naming an internal address turns
+        # the login flow into a probe of the platform's own network.
+        validate_callback_url(
+            issuer,
+            allow_loopback=get_settings().oidc_allow_loopback_issuers,
+            label="OIDC issuer",
+        )
+    except OutboundUrlError as e:
+        return await fail(str(e))
+
+    config = await db.scalar(select(OidcConfig).where(OidcConfig.tenant_id == tenant.id))
+    if config is None:
+        config = OidcConfig(tenant_id=tenant.id)
+        db.add(config)
+    config.issuer = issuer
+    config.client_id = client_id
+    config.client_secret_enc = encrypt(client_secret)
+    config.scopes = scopes
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
+
+
+@router.post("/t/{tenant_id}/oidc/delete")
+async def ui_delete_oidc(
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    config = await db.scalar(select(OidcConfig).where(OidcConfig.tenant_id == tenant.id))
+    if config is not None:
+        await db.delete(config)
+        await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
+
+
+# --- Files ---
+#
+# Tenant-scoped like the API surface: any member of any team in the tenant may
+# upload and read, which is exactly what _visible_tenants already establishes
+# for a user principal. Jobs reference a file by id, so the list exists to make
+# an id findable — uploading one and then having no way to name it would leave
+# the gap the upload was closing.
+
+
+async def _tenant_files(db: AsyncSession, tenant_id: uuid.UUID) -> list[dict]:
+    rows = list(
+        await db.scalars(
+            select(File).where(File.tenant_id == tenant_id).order_by(File.created_at.desc())
+        )
+    )
+    return [
+        {
+            "id": f.id,
+            "name": f.object_key.rsplit("/", 1)[-1],
+            "size": f.size,
+            "content_type": f.content_type,
+            "created_at": f.created_at,
+            "expires_at": f.expires_at,
+        }
+        for f in rows
+    ]
+
+
+async def _render_files(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+):
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+    return templates.TemplateResponse(
+        request,
+        "files.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="files",
+            files=await _tenant_files(db, tenant.id),
+            max_size_mb=MAX_FILE_SIZE // (1024 * 1024),
+            error=error,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/t/{tenant_id}/files", response_class=HTMLResponse)
+async def files_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_files(request, tenant_id, db, p)
+
+
+@router.post("/t/{tenant_id}/files")
+async def ui_upload_file(
+    request: Request,
+    tenant_id: uuid.UUID,
+    file: UploadFile | None = None,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+
+    async def fail(message: str):
+        return await _render_files(request, tenant_id, db, p, error=message, status_code=400)
+
+    if file is None or not file.filename:
+        return await fail("Choose a file to upload.")
+    # Checked on the rolled size first, as api.v1.files does: read() pulls the
+    # whole spooled body into memory, so a check that only runs afterwards
+    # cannot keep an oversized upload from exhausting it (audit 5).
+    if file.size is not None and file.size > MAX_FILE_SIZE:
+        return await fail(f"That file is larger than the {MAX_FILE_SIZE // (1024 * 1024)} MiB cap.")
+    data = await file.read()
+    if len(data) > MAX_FILE_SIZE:
+        return await fail(f"That file is larger than the {MAX_FILE_SIZE // (1024 * 1024)} MiB cap.")
+
+    safe_name = Path(file.filename).name or "upload"
+    file_id = uuid.uuid4()
+    object_key = f"{tenant.id}/payload/{file_id}/{safe_name}"
+    # The declared type is a security decision, not a display hint — see
+    # api.v1.files.sniff_content_type. Reusing it rather than restating it
+    # keeps the UI from being the way to label injection text as a PDF.
+    content_type = sniff_content_type(data, file.content_type or "application/octet-stream")
+    await storage.put_object(object_key, data, content_type)
+    db.add(
+        File(
+            id=file_id,
+            tenant_id=tenant.id,
+            object_key=object_key,
+            size=len(data),
+            content_type=content_type,
+            expires_at=file_expiry(tenant.settings or {}),
+        )
+    )
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant_id}/files", status_code=303)
+
+
+@router.get("/files/{file_id}/content")
+async def ui_download_file(
+    file_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    row = await db.get(File, file_id)
+    if row is None:
+        return RedirectResponse("/ui", status_code=303)
+    if not p.user.is_superuser and not await visible_team_ids(db, p, row.tenant_id):
+        return RedirectResponse("/ui", status_code=303)
+    data = await storage.get_object(row.object_key)
+    # Always a download, never a render. These bytes are uploaded by whoever
+    # can reach the tenant and would otherwise be served from the same origin
+    # as the session cookie that authorises this page: an HTML upload rendered
+    # inline could act as the viewer against /ui. The API's own download has no
+    # cookie to steal; this one does.
+    return Response(
+        content=data,
+        media_type=row.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{row.object_key.rsplit("/", 1)[-1]}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# --- Users and API keys ---
+#
+# Creating a user is superuser work (api.v1.users.create_user), and until now
+# it was the one thing that had to happen by curl before anything else could:
+# adding someone to a team was already in the UI, but only for people who
+# already existed. Rotating your *own* key needs no superuser, matching the
+# API's `user_id != principal.user.id and not is_superuser` check, so it lives
+# on its own page every signed-in user can reach.
+
+
+async def _user_keys(db: AsyncSession, user_id: uuid.UUID) -> list[ApiKey]:
+    return list(
+        await db.scalars(
+            select(ApiKey)
+            .where(ApiKey.kind == KeyKind.USER, ApiKey.user_id == user_id)
+            .order_by(ApiKey.created_at.desc())
+        )
+    )
+
+
+async def _issue_user_key(db: AsyncSession, user_id: uuid.UUID) -> tuple[ApiKey, str]:
+    plaintext, key_hash = generate_key(KeyKind.USER)
+    key = ApiKey(kind=KeyKind.USER, user_id=user_id, key_hash=key_hash)
+    db.add(key)
+    await db.commit()
+    await db.refresh(key)
+    return key, plaintext
+
+
+async def _revoke_key(db: AsyncSession, key_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    key = await db.get(ApiKey, key_id)
+    if (
+        key is not None
+        and key.kind == KeyKind.USER
+        and key.user_id == user_id
+        and key.revoked_at is None
+    ):
+        key.revoked_at = datetime.now(UTC)
+        await db.commit()
+
+
+async def _render_account(
+    request: Request,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    plaintext: str | None = None,
+    status_code: int = 200,
+):
+    tenants = await _visible_tenants(db, p)
+    return templates.TemplateResponse(
+        request,
+        "account.html",
+        _ctx(
+            request,
+            p,
+            tenant=next(iter(tenants), None),
+            tenants=tenants,
+            section="account",
+            keys=await _user_keys(db, p.user.id),
+            plaintext=plaintext,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/account", response_class=HTMLResponse)
+async def account_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_account(request, db, p)
+
+
+@router.post("/account/keys")
+async def ui_issue_own_key(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _key, plaintext = await _issue_user_key(db, p.user.id)
+    # Rendered into this response rather than flashed through the session, for
+    # the reason invoke keys are: the session cookie is signed but not
+    # encrypted, so a flash parks a live credential in the cookie jar.
+    return await _render_account(request, db, p, plaintext=plaintext, status_code=201)
+
+
+@router.post("/account/keys/{key_id}/revoke")
+async def ui_revoke_own_key(
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    await _revoke_key(db, key_id, p.user.id)
+    return RedirectResponse("/ui/account", status_code=303)
+
+
+async def _render_users(
+    request: Request,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    created: User | None = None,
+    plaintext: str | None = None,
+    status_code: int = 200,
+):
+    tenants = await _visible_tenants(db, p)
+    rows = list(await db.scalars(select(User).order_by(User.email)))
+    active = dict(
+        (
+            await db.execute(
+                select(ApiKey.user_id, func.count())
+                .where(ApiKey.kind == KeyKind.USER, ApiKey.revoked_at.is_(None))
+                .group_by(ApiKey.user_id)
+            )
+        ).all()
+    )
+    return templates.TemplateResponse(
+        request,
+        "users.html",
+        _ctx(
+            request,
+            p,
+            tenant=next(iter(tenants), None),
+            tenants=tenants,
+            section="users",
+            # Not "keys": Jinja resolves a dict's .keys to the method
+            # before the item, so the count would render as a bound method.
+            users=[{"user": u, "key_count": active.get(u.id, 0)} for u in rows],
+            created=created,
+            plaintext=plaintext,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/users", response_class=HTMLResponse)
+async def users_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/account", status_code=303)
+    return await _render_users(request, db, p)
+
+
+@router.post("/users")
+async def ui_create_user(
+    request: Request,
+    email: str = Form(""),
+    password: str = Form(""),
+    is_superuser: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/account", status_code=303)
+    form = {"email": email, "is_superuser": is_superuser}
+
+    async def fail(message: str):
+        return await _render_users(request, db, p, error=message, form=form, status_code=400)
+
+    email = email.strip().lower()
+    if not EMAIL_RE.match(email):
+        return await fail("That does not look like an email address.")
+    # UserCreate's min_length; the API hashes whatever it is given, so this is
+    # the only place a floor can be enforced from the pages.
+    if len(password) < 8:
+        return await fail("The password must be at least 8 characters.")
+    if await db.scalar(select(User).where(User.email == email)):
+        return await fail(f"{email} is already registered.")
+
+    user = User(email=email, password_hash=hash_password(password), is_superuser=is_superuser)
+    db.add(user)
+    await db.flush()
+    plaintext, key_hash = generate_key(KeyKind.USER)
+    db.add(ApiKey(kind=KeyKind.USER, user_id=user.id, key_hash=key_hash, name="initial"))
+    await db.commit()
+    await db.refresh(user)
+    # Born with a key, as POST /v1/users does — a user who cannot call the API
+    # until someone mints one separately is half-created.
+    return await _render_users(request, db, p, created=user, plaintext=plaintext, status_code=201)
+
+
+@router.post("/users/{user_id}/keys")
+async def ui_issue_user_key(
+    request: Request,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/account", status_code=303)
+    user = await db.get(User, user_id)
+    if user is None:
+        return RedirectResponse("/ui/users", status_code=303)
+    _key, plaintext = await _issue_user_key(db, user.id)
+    return await _render_users(request, db, p, created=user, plaintext=plaintext, status_code=201)
+
+
+@router.post("/users/{user_id}/keys/revoke-all")
+async def ui_revoke_user_keys(
+    request: Request,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/account", status_code=303)
+    # Revoking one key by id is the API's shape, but from here the question is
+    # "cut this person off", and a list that shows only a count would make
+    # picking the right row guesswork. Your own keys stay on /ui/account,
+    # where they are listed individually and revoked one at a time.
+    now = datetime.now(UTC)
+    for key in await _user_keys(db, user_id):
+        if key.revoked_at is None:
+            key.revoked_at = now
+    await db.commit()
+    return RedirectResponse("/ui/users", status_code=303)
+
+
+# --- Notification channels ---
+#
+# Per team and owner-gated, matching api.v1.notif_channels._gate. The Apprise
+# URL embeds its own credential (a Slack token, a webhook secret), so it is
+# encrypted at rest and never returned — the list shows what a channel is
+# subscribed to, not where it points.
+
+NOTIF_EVENTS = ("dead_letter", "budget", "error_rate", "eval_regression", "callback_failed")
+
+
+async def _team_channels(db: AsyncSession, team_id: uuid.UUID) -> list[NotifChannel]:
+    return list(
+        await db.scalars(
+            select(NotifChannel)
+            .where(NotifChannel.team_id == team_id)
+            .order_by(NotifChannel.created_at)
+        )
+    )
+
+
+@router.post("/teams/{team_id}/notif-channels")
+async def ui_create_notif_channel(
+    request: Request,
+    team_id: uuid.UUID,
+    apprise_url: str = Form(""),
+    events: list[str] = Form(default=[]),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+
+    async def fail(message: str):
+        return await _render_team(request, team_id, db, p, error=message, status_code=400)
+
+    apprise_url = apprise_url.strip()
+    if not apprise_url:
+        return await fail("An Apprise URL is required.")
+    chosen = [e for e in events if e in NOTIF_EVENTS]
+    if not chosen:
+        return await fail("Pick at least one event — a channel subscribed to nothing is silent.")
+    tenant = await db.get(Tenant, team.tenant_id)
+    try:
+        # Same validation as the API, and the same reason: the worker connects
+        # to whatever this names, so it is an outbound destination like a
+        # callback. Delivery re-checks it against a fresh resolution.
+        validate_apprise_url(apprise_url, tenant.settings if tenant else {}, **notif_policy())
+    except OutboundUrlError as e:
+        return await fail(str(e))
+
+    db.add(NotifChannel(team_id=team_id, apprise_url_enc=encrypt(apprise_url), events=chosen))
+    await db.commit()
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+@router.post("/teams/{team_id}/notif-channels/{channel_id}/delete")
+async def ui_delete_notif_channel(
+    team_id: uuid.UUID,
+    channel_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+    channel = await db.get(NotifChannel, channel_id)
+    if channel is not None and channel.team_id == team_id:
+        await db.delete(channel)
+        await db.commit()
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+@router.post("/teams/{team_id}/provider-creds")
+async def ui_set_team_provider_cred(
+    request: Request,
+    team_id: uuid.UUID,
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+    error = await _set_provider_cred(db, KeyScope.TEAM, team.id, provider, api_key)
+    if error is not None:
+        return await _render_team(request, team_id, db, p, error=error, status_code=400)
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+@router.post("/teams/{team_id}/provider-creds/delete")
+async def ui_delete_team_provider_cred(
+    team_id: uuid.UUID,
+    provider: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+    await _delete_provider_cred(db, KeyScope.TEAM, team.id, provider)
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
+
+
+# --- Event sources ---
+#
+# The API path is tenant-scoped, but a source targets exactly one agent and is
+# managed by that agent's team owner, so the pages put it on the agent next to
+# the invoke keys: both answer "how does something outside call this agent",
+# one with a platform credential and one with a per-source secret.
+
+
+async def _agent_event_sources(db: AsyncSession, agent_id: uuid.UUID) -> list[EventSource]:
+    return list(
+        await db.scalars(
+            select(EventSource)
+            .where(EventSource.target_agent_id == agent_id)
+            .order_by(EventSource.name)
+        )
+    )
+
+
+@router.get("/agents/{agent_id}/event-sources/new", response_class=HTMLResponse)
+async def new_event_source_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_new_event_source(request, agent_id, db, p)
+
+
+async def _render_new_event_source(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.archived_at is not None:
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "event_source_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            error=error,
+            form=form or {"payload_template": _pretty_json({"prompt": "{{body}}"})},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.post("/agents/{agent_id}/event-sources")
+async def ui_create_event_source(
+    request: Request,
+    agent_id: uuid.UUID,
+    name: str = Form(""),
+    payload_template: str = Form(""),
+    dedup_key_path: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {
+        "name": name,
+        "payload_template": payload_template,
+        "dedup_key_path": dedup_key_path,
+    }
+
+    async def fail(message: str):
+        return await _render_new_event_source(
+            request, agent_id, db, p, error=message, form=form, status_code=400
+        )
+
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.archived_at is not None:
+        _flash(request, "This agent is archived — restore it before wiring an event source.")
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+    name = name.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    dup = await db.scalar(
+        select(EventSource).where(
+            EventSource.tenant_id == agent.tenant_id, EventSource.name == name
+        )
+    )
+    if dup is not None:
+        return await fail(f"An event source named {name!r} already exists in this tenant.")
+
+    template, err = _form_json_object(payload_template, "Payload template")
+    if err:
+        return await fail(err)
+    template = template or {"prompt": "{{body}}"}
+    # Rendering happens per event, against a body nobody has seen yet, and a
+    # template that cannot produce a job context fails at ingest — one 422 per
+    # delivered event, in someone else's logs. Rendering it here against an
+    # empty body is the one moment that mistake is cheap: substitutions come
+    # out blank, so what is checked is the shape.
+    try:
+        JobContext.model_validate(render_template(template, {}))
+    except ValidationError:
+        return await fail(
+            "The template does not produce a job context. It needs a non-empty "
+            '"prompt" — the substitutions are blank when a field is missing from '
+            "the event, so a prompt of only {{fields}} can render empty."
+        )
+
+    secret = "ss_evt_" + secrets.token_urlsafe(24)
+    source = EventSource(
+        tenant_id=agent.tenant_id,
+        name=name,
+        target_agent_id=agent.id,
+        payload_template=template,
+        dedup_key_path=dedup_key_path.strip() or None,
+        config={},
+        secret_hash=hash_key(secret),
+    )
+    db.add(source)
+    await db.commit()
+    await db.refresh(source)
+    return templates.TemplateResponse(
+        request,
+        "event_source_created.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            source=source,
+            secret=secret,
+            base_url=get_settings().public_base_url.rstrip("/"),
+        ),
+        status_code=201,
+    )
+
+
+@router.post("/agents/{agent_id}/event-sources/{source_id}/delete")
+async def ui_delete_event_source(
+    agent_id: uuid.UUID,
+    source_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    source = await db.get(EventSource, source_id)
+    if source is not None and source.target_agent_id == agent_id:
+        await db.delete(source)
+        await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/provider-creds")
+async def ui_set_agent_provider_cred(
+    request: Request,
+    agent_id: uuid.UUID,
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    error = await _set_provider_cred(db, KeyScope.AGENT, agent.id, provider, api_key)
+    if error is not None:
+        _flash(request, error)
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/agents/{agent_id}/provider-creds/delete")
+async def ui_delete_agent_provider_cred(
+    agent_id: uuid.UUID,
+    provider: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    await _delete_provider_cred(db, KeyScope.AGENT, agent.id, provider)
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+# --- Tenants ---
+#
+# Instance-level and superuser-only, like the models registry, so it hangs off
+# /ui rather than a tenant path — and unlike everything else here, it is what
+# you reach for when there is no tenant to be inside of yet.
+
+
+async def _render_tenants(
+    request: Request,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    tenants = await _visible_tenants(db, p)
+    rows = list(await db.scalars(select(Tenant).order_by(Tenant.name)))
+    teams = dict(
+        (await db.execute(select(Team.tenant_id, func.count()).group_by(Team.tenant_id))).all()
+    )
+    agents = dict(
+        (
+            await db.execute(
+                select(Agent.tenant_id, func.count())
+                .where(Agent.archived_at.is_(None))
+                .group_by(Agent.tenant_id)
+            )
+        ).all()
+    )
+    return templates.TemplateResponse(
+        request,
+        "tenants.html",
+        _ctx(
+            request,
+            p,
+            tenant=next(iter(tenants), None),
+            tenants=tenants,
+            section="tenants",
+            rows=[
+                {"tenant": t, "teams": teams.get(t.id, 0), "agents": agents.get(t.id, 0)}
+                for t in rows
+            ],
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/tenants", response_class=HTMLResponse)
+async def tenants_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui", status_code=303)
+    return await _render_tenants(request, db, p)
+
+
+@router.post("/tenants")
+async def ui_create_tenant(
+    request: Request,
+    name: str = Form(""),
+    system_prompt: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui", status_code=303)
+    form = {"name": name, "system_prompt": system_prompt}
+
+    async def fail(message: str):
+        return await _render_tenants(request, db, p, error=message, form=form, status_code=400)
+
+    name = name.strip()
+    if not name:
+        return await fail("Name is required.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    if await db.scalar(select(Tenant).where(Tenant.name == name)):
+        return await fail(f"A tenant named {name!r} already exists.")
+
+    tenant = Tenant(name=name, system_prompt=system_prompt.strip())
+    db.add(tenant)
+    await db.flush()
+    # Every tenant is born with its org-wide team, as api.v1.tenants does:
+    # owning it is what makes someone a tenant admin, so a tenant without one
+    # can only ever be administered by an instance superuser.
+    db.add(Team(tenant_id=tenant.id, name="org", is_org_team=True))
+    await db.commit()
+    return RedirectResponse(f"/ui/t/{tenant.id}", status_code=303)
+
+
+# --- Invoke keys at tenant and team scope ---
+#
+# Agent-scoped keys live on the agent page. These two are wider — a tenant key
+# can submit to every agent in the tenant and read every file in it, a team key
+# to every agent in the team — so they sit where that scope is administered,
+# next to the other things that carry it.
+
+
+def _invoke_key_fields(name: str, rate_limit: str) -> tuple[str, int | None, str | None]:
+    """The two fields an invoke key has, validated the same way wherever it is
+    issued. Returns (name, rate limit, error)."""
+    name = name.strip()
+    if not name:
+        return name, None, "Give the key a name — it is the only way to tell keys apart later."
+    if len(name) > 200:
+        return name, None, "Name must be 200 characters or fewer."
+    if not rate_limit.strip():
+        return name, None, None
+    # Mirrors InvokeKeyCreate.rate_limit (ge=1); the upper bound is the UI's
+    # own, since a limit past it is indistinguishable from no limit.
+    limit, err = _form_int(rate_limit.strip(), 0, 1, 100000, "Rate limit")
+    return name, (None if err else limit), err
+
+
+async def _scoped_invoke_keys(
+    db: AsyncSession, scope: KeyScope, scope_id: uuid.UUID
+) -> list[ApiKey]:
+    return list(
+        await db.scalars(
+            select(ApiKey)
+            .where(
+                ApiKey.kind == KeyKind.INVOKE,
+                ApiKey.scope == scope,
+                ApiKey.scope_id == scope_id,
+            )
+            .order_by(ApiKey.created_at.desc())
+        )
+    )
+
+
+async def _mint_invoke_key(
+    db: AsyncSession, scope: KeyScope, scope_id: uuid.UUID, name: str, rate_limit: int | None
+) -> tuple[ApiKey, str]:
+    plaintext, key_hash = generate_key(KeyKind.INVOKE)
+    key = ApiKey(
+        kind=KeyKind.INVOKE,
+        scope=scope,
+        scope_id=scope_id,
+        key_hash=key_hash,
+        name=name,
+        rate_limit=rate_limit,
+    )
+    db.add(key)
+    await db.commit()
+    await db.refresh(key)
+    return key, plaintext
+
+
+async def _revoke_invoke_key(
+    db: AsyncSession, key_id: uuid.UUID, scope: KeyScope, scope_id: uuid.UUID
+) -> None:
+    key = await db.get(ApiKey, key_id)
+    if (
+        key is not None
+        and key.kind == KeyKind.INVOKE
+        and key.scope == scope
+        and key.scope_id == scope_id
+        and key.revoked_at is None
+    ):
+        key.revoked_at = datetime.now(UTC)
+        await db.commit()
+
+
+@router.post("/t/{tenant_id}/invoke-keys")
+async def ui_create_tenant_invoke_key(
+    request: Request,
+    tenant_id: uuid.UUID,
+    name: str = Form(""),
+    rate_limit: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    name, limit, error = _invoke_key_fields(name, rate_limit)
+    if error is not None:
+        return await _render_settings(request, tenant_id, db, p, error=error, status_code=400)
+    key, plaintext = await _mint_invoke_key(db, KeyScope.TENANT, tenant.id, name, limit)
+    # Rendered into this response rather than flashed: the session cookie is
+    # signed but not encrypted, so a flash would park a live data-plane
+    # credential in the browser's cookie jar.
+    return await _render_settings(
+        request, tenant_id, db, p, created_key=key, plaintext=plaintext, status_code=201
+    )
+
+
+@router.post("/t/{tenant_id}/invoke-keys/{key_id}/revoke")
+async def ui_revoke_tenant_invoke_key(
+    tenant_id: uuid.UUID,
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant, redirect = await _tenant_admin_or_redirect(db, p, tenant_id)
+    if redirect is not None:
+        return redirect
+    await _revoke_invoke_key(db, key_id, KeyScope.TENANT, tenant.id)
+    return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
+
+
+@router.post("/teams/{team_id}/invoke-keys")
+async def ui_create_team_invoke_key(
+    request: Request,
+    team_id: uuid.UUID,
+    name: str = Form(""),
+    rate_limit: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+    name, limit, error = _invoke_key_fields(name, rate_limit)
+    if error is not None:
+        return await _render_team(request, team_id, db, p, error=error, status_code=400)
+    key, plaintext = await _mint_invoke_key(db, KeyScope.TEAM, team.id, name, limit)
+    return await _render_team(
+        request, team_id, db, p, created_key=key, plaintext=plaintext, status_code=201
+    )
+
+
+@router.post("/teams/{team_id}/invoke-keys/{key_id}/revoke")
+async def ui_revoke_team_invoke_key(
+    team_id: uuid.UUID,
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+    await _revoke_invoke_key(db, key_id, KeyScope.TEAM, team.id)
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
 
 
 # --- Actions (owner/editor gated, mirroring the API) ---

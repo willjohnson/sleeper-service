@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Event source created · {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}Event source created <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <div class="notice">
+    <span><strong>Copy this now.</strong> Only its hash is stored, so this page is the
+      one and only time the secret is readable. Leaving without copying it means
+      deleting the source and making another.</span>
+  </div>
+  <h2>{{ source.name }}</h2>
+  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ secret }}</pre>
+</div>
+
+<div class="panel">
+  <h2>Sending it events</h2>
+  <p class="muted" style="margin-top:0">
+    The secret is the whole credential — anyone holding it can queue jobs on this
+    agent, and its spend counts against the agent's limit.
+  </p>
+  <pre>curl -X POST {{ base_url }}/v1/events/{{ source.id }} \
+  -H "X-Event-Secret: {{ secret }}" \
+  -H "Content-Type: application/json" \
+  -d '{"your": "event"}'</pre>
+  <p class="muted" style="margin-bottom:0">
+    The response carries the job id. Events run against whichever version is current
+    when they arrive.{% if source.dedup_key_path %} A repeat of
+    <code>{{ source.dedup_key_path }}</code> comes back as the original job with
+    <code>deduped: true</code>.{% endif %}
+  </p>
+</div>
+
+<p><a class="btn" href="/ui/agents/{{ agent.id }}">I have copied it — back to the agent</a></p>
+{% endblock %}
