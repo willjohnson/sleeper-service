@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Your account — Sleeper Service{% endblock %}
+{% block heading %}Your account{% endblock %}
+{% block content %}
+{% if plaintext %}
+<div class="panel">
+  <div class="notice">
+    <span><strong>Copy this now.</strong> Only its hash is stored, so this page is the
+      one and only time the key is readable.</span>
+  </div>
+  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
+  <p class="muted" style="margin-bottom:0">
+    It carries your roles in every team you belong to. Pass it as
+    <code>Authorization: Bearer …</code>.
+  </p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2 class="with-action">API keys
+    <span class="actions">
+      <form method="post" action="/ui/account/keys">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <button class="subtle">Issue a key</button>
+      </form>
+    </span>
+  </h2>
+  <p class="muted" style="margin-top:0">
+    Your own control-plane keys, for the API and the CLI. They act as you, so a
+    revoked one stops working everywhere at once. Issue a new key before revoking the
+    old one to rotate without a gap.
+  </p>
+  {% if keys %}
+  <table style="max-width:640px">
+    <tr><th>Name</th><th>Created</th><th>Status</th><th class="col-actions"></th></tr>
+    {% for k in keys %}
+    <tr>
+      <td>{{ k.name or '—' }}</td>
+      <td class="muted">{{ k.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td>{% if k.revoked_at %}<span class="badge rejected">revoked</span>
+        {% else %}<span class="badge active">active</span>{% endif %}</td>
+      <td>
+        {% if not k.revoked_at %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/account/keys/{{ k.id }}/revoke">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Revoke</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="muted">No keys — you sign in to these pages with your password, and need a
+    key only to reach the API.</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Membership</h2>
+  <table style="max-width:640px">
+    <tr><th style="width:110px">Email</th><td>{{ user.email }}</td></tr>
+    <tr><th>Role</th><td>{% if user.is_superuser %}instance superuser
+      {% else %}per-team, set by each team's owner{% endif %}</td></tr>
+    <tr><th>Tenants</th><td>{% if tenants %}{{ tenants | map(attribute='name') | join(', ') }}
+      {% else %}<span class="muted">none yet</span>{% endif %}</td></tr>
+  </table>
+</div>
+{% endblock %}

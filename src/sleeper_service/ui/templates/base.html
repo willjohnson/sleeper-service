@@ -14,12 +14,18 @@
     <a class="nav {% if section == 'dashboard' %}active{% endif %}" href="/ui/t/{{ tenant.id }}">Dashboard</a>
     <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
     <a class="nav {% if section == 'connections' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/connections">Connections</a>
+    <a class="nav {% if section == 'files' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/files">Files</a>
+    {% if tenant_admin %}
+    <a class="nav {% if section == 'settings' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/settings">Settings</a>
+    {% endif %}
     {% endif %}
     {% if user.is_superuser %}
     <a class="nav {% if section == 'models' %}active{% endif %}" href="/ui/models">Models</a>
+    <a class="nav {% if section == 'users' %}active{% endif %}" href="/ui/users">Users</a>
+    <a class="nav {% if section == 'tenants' %}active{% endif %}" href="/ui/tenants">Tenants</a>
     {% endif %}
     <div class="spacer"></div>
-    <div class="whoami">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</div>
+    <a class="whoami" href="/ui/account">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</a>
     <form method="post" action="/ui/logout"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="ghost" style="width:100%">Sign out</button></form>
   </aside>
   <main class="main">

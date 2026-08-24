@@ -177,4 +177,5 @@ table.members td:last-child { text-align: right; }
 /* A field carrying a hint below it is wrapped in a div, so it is not a direct
    child of the grid and misses the full-width rule above. .short still caps
    the genuinely short ones, since it matches by descendant. */
-.form-grid > div > input[type=text], .form-grid > div > textarea { width: 100%; }
+.form-grid > div > input[type=text], .form-grid > div > input[type=email],
+.form-grid > div > input[type=password], .form-grid > div > textarea { width: 100%; }
