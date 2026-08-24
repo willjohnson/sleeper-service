@@ -259,7 +259,13 @@
 {% endif %}
 
 <div class="panel">
-  <h2>Recent jobs</h2>
+  <h2 class="with-action">Recent jobs
+    {% if can_edit and agent.current_version_id %}
+    <span class="actions">
+      <a class="btn subtle" href="/ui/agents/{{ agent.id }}/run">Test run</a>
+    </span>
+    {% endif %}
+  </h2>
   <table>
     <tr><th>Job</th><th>Status</th><th>Tokens</th><th>When</th></tr>
     {% for j in recent_jobs %}

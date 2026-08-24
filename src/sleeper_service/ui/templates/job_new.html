@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Run {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}Test run <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Submits a real job: it costs real tokens, counts against the monthly limit, and
+    lands in the agent's history like any other.
+    {% if spending_limit %}
+    <strong>${{ '%.4f'|format(spend) }}</strong> of ${{ '%.2f'|format(spending_limit) }}
+    spent this month.
+    {% endif %}
+  </p>
+  <form method="post" action="/ui/agents/{{ agent.id }}/run" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="jr-prompt">Prompt</label>
+    <div>
+      <textarea id="jr-prompt" name="prompt" rows="10" required autofocus>{{ form.prompt or '' }}</textarea>
+      {% if input_schema %}
+      <div class="muted" style="font-size:12px">
+        This version declares an input schema, so the payload has to match it:
+      </div>
+      <pre style="margin-top:6px">{{ input_schema }}</pre>
+      {% endif %}
+    </div>
+
+    <label for="jr-pin">Version</label>
+    <div>
+      <select id="jr-pin" name="pin">
+        {% for c in choices %}
+        <option value="{{ c.value }}" {% if form.pin == c.value %}selected{% endif %}>{{ c.label }}</option>
+        {% endfor %}
+      </select>
+      <div class="muted" style="font-size:12px">
+        Pin an older version or an alias to compare against what is current.
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Run</button>
+      <a class="cancel" href="/ui/agents/{{ agent.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

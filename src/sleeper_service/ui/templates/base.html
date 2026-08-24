@@ -15,6 +15,9 @@
     <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
     <a class="nav {% if section == 'connections' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/connections">Connections</a>
     {% endif %}
+    {% if user.is_superuser %}
+    <a class="nav {% if section == 'models' %}active{% endif %}" href="/ui/models">Models</a>
+    {% endif %}
     <div class="spacer"></div>
     <div class="whoami">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</div>
     <form method="post" action="/ui/logout"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="ghost" style="width:100%">Sign out</button></form>

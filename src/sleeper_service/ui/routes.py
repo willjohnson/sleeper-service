@@ -45,6 +45,7 @@ from sleeper_service.db.models import (
     DataStore,
     EvalCase,
     EvalRun,
+    Feedback,
     Job,
     JobEvent,
     McpServer,
@@ -60,7 +61,7 @@ from sleeper_service.db.models import (
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
 from sleeper_service.runtime.evals import PATH_OPS, validate_checks
-from sleeper_service.runtime.memory import latest_memory
+from sleeper_service.runtime.memory import latest_memory, learning_enabled
 from sleeper_service.runtime.outbound import OutboundUrlError, validate_mcp_url
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -1245,7 +1246,7 @@ async def ui_create_agent(
         return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
-        return await fail(f"Unknown model {model!r} — register it in the models registry first.")
+        return await fail(f"Unknown model {model!r} — register it under Models first.")
 
     agent = Agent(
         tenant_id=tenant.id,
@@ -1578,6 +1579,274 @@ async def ui_restore_agent(
         agent.archived_at = None
         await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+# --- Test runs ---
+#
+# Submission goes through api.v1.jobs.create_job rather than building a Job
+# here: archived-agent refusal, idempotency, the budget pre-flight and the
+# enqueue all live in it, and a second implementation would drift from them.
+# What the form deliberately does not offer is callback_url, files, links and
+# user_ctx — each carries its own policy, and a test run is a prompt.
+
+
+def _version_choices(versions: list[dict], current_version_no: int | None) -> list[dict]:
+    """Pin targets for the run form: current, then each version, then aliases."""
+    choices = [{"value": "current", "label": f"current (v{current_version_no})"}]
+    for v in versions:
+        choices.append({"value": f"v:{v['version_no']}", "label": f"v{v['version_no']}"})
+        for alias in v["aliases"]:
+            choices.append({"value": f"a:{alias}", "label": f"{alias} → v{v['version_no']}"})
+    return choices
+
+
+async def _agent_versions(db: AsyncSession, agent: Agent) -> list[dict]:
+    rows = list(
+        await db.scalars(
+            select(AgentVersion)
+            .where(AgentVersion.agent_id == agent.id)
+            .order_by(AgentVersion.version_no.desc())
+        )
+    )
+    aliases: dict[uuid.UUID, list[str]] = {}
+    for a in await db.scalars(
+        select(VersionAlias).where(VersionAlias.agent_id == agent.id).order_by(VersionAlias.alias)
+    ):
+        aliases.setdefault(a.agent_version_id, []).append(a.alias)
+    return [{"version_no": v.version_no, "aliases": aliases.get(v.id, [])} for v in rows]
+
+
+async def _render_run_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    agent, _role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.current_version_id is None:
+        _flash(request, "This agent has no versions yet — create one before running it.")
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    versions = await _agent_versions(db, agent)
+    current = await db.get(AgentVersion, agent.current_version_id)
+    return templates.TemplateResponse(
+        request,
+        "job_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            choices=_version_choices(versions, current.version_no),
+            input_schema=_pretty_json(current.input_schema),
+            spend=float(await spending.month_spend(db, agent.id)),
+            spending_limit=float(agent.spending_limit) if agent.spending_limit else None,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/agents/{agent_id}/run", response_class=HTMLResponse)
+async def run_agent_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_run_agent(request, agent_id, db, p)
+
+
+@router.post("/agents/{agent_id}/run")
+async def ui_run_agent(
+    request: Request,
+    agent_id: uuid.UUID,
+    prompt: str = Form(""),
+    pin: str = Form("current"),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    from sleeper_service.api.v1.jobs import create_job
+
+    form = {"prompt": prompt, "pin": pin}
+
+    async def fail(message: str):
+        return await _render_run_agent(
+            request, agent_id, db, p, error=message, form=form, status_code=400
+        )
+
+    agent, role, redirect = await _agent_form_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+
+    prompt = prompt.strip()
+    if not prompt:
+        return await fail("A prompt is required — it is the job's payload.")
+
+    version = await _pinned_version(db, agent, pin)
+    if version is None:
+        return await fail("That version is no longer available — pick another.")
+
+    job, _existed = await create_job(
+        db,
+        agent,
+        version,
+        context=JobContext(prompt=prompt).model_dump(mode="json"),
+        # Same shape the API records for a user principal, so a job submitted
+        # from the pages is not a different kind of row in the trail.
+        auth_ctx={
+            "type": "user",
+            "user_id": str(p.user.id),
+            "team_role": role,
+            "tenant_id": str(agent.tenant_id),
+            "team_id": str(agent.team_id),
+            "agent_id": str(agent.id),
+        },
+    )
+    # A job refused at the budget pre-flight still has a row and a reason, so
+    # the job page is the right place to land either way.
+    return RedirectResponse(f"/ui/jobs/{job.id}", status_code=303)
+
+
+async def _pinned_version(db: AsyncSession, agent: Agent, pin: str) -> AgentVersion | None:
+    """Resolve the run form's pin, mirroring api.v1.jobs._resolve_version."""
+    if pin.startswith("v:"):
+        return await db.scalar(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == agent.id,
+                AgentVersion.version_no == _safe_int(pin[2:]),
+            )
+        )
+    if pin.startswith("a:"):
+        row = await db.get(VersionAlias, (agent.id, pin[2:]))
+        return await db.get(AgentVersion, row.agent_version_id) if row else None
+    return await db.get(AgentVersion, agent.current_version_id)
+
+
+def _safe_int(raw: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        return -1
+
+
+# --- Models registry ---
+#
+# Instance-level rather than per-tenant, and superuser-managed, so it hangs off
+# /ui/models rather than a tenant path. Readable by any signed-in user, matching
+# GET /v1/models: the version form's "register it under Models first" has to
+# name somewhere its reader can actually look.
+
+
+async def _render_models(
+    request: Request,
+    db: AsyncSession,
+    p: UserPrincipal,
+    *,
+    error: str | None = None,
+    form: dict | None = None,
+    status_code: int = 200,
+):
+    tenants = await _visible_tenants(db, p)
+    return templates.TemplateResponse(
+        request,
+        "models.html",
+        _ctx(
+            request,
+            p,
+            tenant=next(iter(tenants), None),
+            tenants=tenants,
+            section="models",
+            models=list(await db.scalars(select(Model).order_by(Model.provider, Model.name))),
+            can_manage=p.user.is_superuser,
+            error=error,
+            form=form or {},
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/models", response_class=HTMLResponse)
+async def models_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    return await _render_models(request, db, p)
+
+
+@router.post("/models")
+async def ui_create_model(
+    request: Request,
+    provider: str = Form(""),
+    name: str = Form(""),
+    model_string: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    form = {"provider": provider, "name": name, "model_string": model_string}
+
+    async def fail(message: str):
+        return await _render_models(request, db, p, error=message, form=form, status_code=400)
+
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/models", status_code=303)
+    provider, name, model_string = provider.strip(), name.strip(), model_string.strip()
+    if not provider or not name or not model_string:
+        return await fail("Provider, name and model string are all required.")
+    dup = await db.scalar(select(Model).where(Model.provider == provider, Model.name == name))
+    if dup is not None:
+        return await fail(f"{provider}/{name} is already registered.")
+    # model_string is what a version stores and what the version form matches
+    # on, so two rows sharing one would make the dropdown ambiguous.
+    dup = await db.scalar(select(Model).where(Model.model_string == model_string))
+    if dup is not None:
+        return await fail(f"{model_string!r} is already registered as {dup.provider}/{dup.name}.")
+    db.add(Model(provider=provider, name=name, model_string=model_string))
+    await db.commit()
+    return RedirectResponse("/ui/models", status_code=303)
+
+
+@router.post("/models/{model_id}/delete")
+async def ui_delete_model(
+    request: Request,
+    model_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    back = RedirectResponse("/ui/models", status_code=303)
+    if not p.user.is_superuser:
+        return back
+    model = await db.get(Model, model_id)
+    if model is None:
+        return back
+    # agent_versions.model_id is a plain FK, so the delete would otherwise come
+    # back as an IntegrityError rather than something a person can act on.
+    users = list(
+        await db.scalars(
+            select(Agent.name)
+            .join(AgentVersion, AgentVersion.agent_id == Agent.id)
+            .where(AgentVersion.model_id == model.id)
+            .distinct()
+            .order_by(Agent.name)
+            .limit(4)
+        )
+    )
+    if users:
+        named = ", ".join(users[:3]) + (" and more" if len(users) > 3 else "")
+        _flash(request, f"{model.model_string} is used by versions of {named}.")
+        return back
+    await db.delete(model)
+    await db.commit()
+    return back
 
 
 # --- Connections: the data stores and MCP servers a version can be granted ---
@@ -2302,7 +2571,7 @@ async def ui_create_version(
         return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
-        return await fail(f"Unknown model {model!r} — register it in the models registry first.")
+        return await fail(f"Unknown model {model!r} — register it under Models first.")
 
     # A grant naming something the tenant does not have is a GrantError on
     # every job the version runs, so it is refused here rather than at dispatch.
@@ -2803,8 +3072,57 @@ async def job_detail(
             tree_children=bool(tree_html),
             tree_html=tree_html,
             can_submit=role in (Role.OWNER, Role.EDITOR),
+            feedback=await db.scalar(select(Feedback).where(Feedback.job_id == job.id)),
+            # The API gates feedback on learning being on, since a vote with
+            # nowhere to fold into is a vote thrown away.
+            takes_feedback=learning_enabled(agent.options or {}),
         ),
     )
+
+
+@router.post("/jobs/{job_id}/feedback")
+async def ui_submit_feedback(
+    request: Request,
+    job_id: uuid.UUID,
+    vote: str = Form(""),
+    comment: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    """Record a vote on a result, feeding runtime/learning the same way the
+    signed feedback URL does.
+
+    No token here: that token exists so the party holding a callback URL can
+    reply without a platform key. A signed-in user with an editor role on the
+    agent's team is a stronger claim than holding it, so the session is the
+    credential and the role is the gate.
+    """
+    from sleeper_service.queue import get_pool
+
+    job = await db.get(Job, job_id)
+    if job is None:
+        return RedirectResponse("/ui", status_code=303)
+    back = RedirectResponse(f"/ui/jobs/{job_id}", status_code=303)
+    agent = await db.get(Agent, job.agent_id)
+    if await _team_role(db, p, agent.team_id) not in (Role.OWNER, Role.EDITOR):
+        return back
+    if not learning_enabled(agent.options or {}):
+        _flash(request, f"{agent.name} does not have learning switched on.")
+        return back
+    if vote not in ("1", "-1"):
+        _flash(request, "Pick helpful or unhelpful.")
+        return back
+    if await db.scalar(select(Feedback).where(Feedback.job_id == job.id)) is not None:
+        _flash(request, "This job already has feedback — one vote per job.")
+        return back
+
+    fb = Feedback(job_id=job.id, vote=int(vote), comment=comment.strip()[:2000] or None)
+    db.add(fb)
+    await db.commit()
+    await db.refresh(fb)
+    pool = await get_pool()
+    await pool.enqueue_job("fold_feedback", str(fb.id))
+    return back
 
 
 # --- Actions (owner/editor gated, mirroring the API) ---

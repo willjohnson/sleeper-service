@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Models — Sleeper Service{% endblock %}
+{% block heading %}Models{% endblock %}
+{% block content %}
+<div class="panel">
+  <h2>Registry</h2>
+  <p class="muted" style="margin-top:0">
+    The provider models an agent version may reference. Instance-wide, shared across
+    every tenant. A version stores the model string, so removing an entry does not
+    change what already-published versions run.
+  </p>
+  {% if models %}
+  <table>
+    <tr><th>Provider</th><th>Name</th><th>Model string</th><th class="col-actions"></th></tr>
+    {% for m in models %}
+    <tr>
+      <td><span class="badge opt">{{ m.provider }}</span></td>
+      <td><strong>{{ m.name }}</strong></td>
+      <td class="mono">{{ m.model_string }}</td>
+      <td>
+        {% if can_manage %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/models/{{ m.id }}/delete">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Delete</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="muted">Nothing registered — no agent can be given a version until there is
+    at least one model here.</div>
+  {% endif %}
+</div>
+
+{% if can_manage %}
+<div class="panel">
+  <h2>Register a model</h2>
+  <form method="post" action="/ui/models" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+    <label for="m-provider">Provider</label>
+    <div>
+      <input id="m-provider" type="text" name="provider" required
+             value="{{ form.provider or '' }}" placeholder="anthropic">
+    </div>
+
+    <label for="m-name">Name</label>
+    <div>
+      <input id="m-name" type="text" name="name" required
+             value="{{ form.name or '' }}" placeholder="claude-sonnet-5">
+      <div class="muted" style="font-size:12px">
+        Your label for it. Unique per provider.
+      </div>
+    </div>
+
+    <label for="m-string">Model string</label>
+    <div>
+      <input id="m-string" type="text" name="model_string" required class="mono"
+             value="{{ form.model_string or '' }}" placeholder="anthropic:claude-sonnet-5">
+      <div class="muted" style="font-size:12px">
+        The pydantic-ai identifier the runner passes through — <code>provider:model</code>.
+        This is what a version stores.
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Register model</button>
+    </div>
+  </form>
+</div>
+{% else %}
+<p class="muted">Registering models is superuser work — this list is what you can pick
+  from when publishing a version.</p>
+{% endif %}
+{% endblock %}

@@ -85,17 +85,32 @@ Ordering follows that arc rather than the size of each surface.
   undeletable after one job, and a dangling grant on a version nothing
   dispatches to cannot break a run.
 
-2. **Model registry** (`/models`, superuser-only). Small, and it removes a dead
-   end: the version form already errors with "register it in the models
-   registry first", naming a place the UI does not have.
+- [x] ~~**Model registry**~~ — done 2026-08-24 at `/ui/models`. Instance-wide
+  rather than per-tenant, so it hangs off `/ui` rather than a tenant path;
+  readable by any signed-in user like `GET /v1/models`, superuser-managed like
+  the writes. The version form's error now names it. Deleting a model that any
+  version references is refused by name, since `agent_versions.model_id` is a
+  plain FK and the delete would otherwise surface as an IntegrityError.
 
-3. **Submit a job.** No "test run this agent" anywhere in the UI, which is an
-   odd gap given the pages already render job trees and results in detail.
+- [x] ~~**Submit a job**~~ — done 2026-08-24: a Test run form on the agent
+  page, with a version/alias pin so a change can be compared against what is
+  current. It goes through `api.v1.jobs.create_job` rather than building a Job
+  row, so the archived refusal, idempotency, budget pre-flight and enqueue are
+  the same code the API runs, and it records the same `auth_ctx` shape so a job
+  submitted from the pages is not a different kind of row in the trail. A run
+  refused at the budget pre-flight still lands on its job page, which is where
+  the reason is.
 
-4. **Feedback** (`POST /v1/feedback/{job_id}`). Asymmetric today: the learning
-   loop's *output* (memory approval) is in the UI, its *input* is not, so a
-   reviewer reading a bad result in the job page has no way to say so from
-   there.
+  Deliberately not offered: `callback_url`, `files`, `links` and `user_ctx`.
+  Each carries its own policy, and a test run is a prompt.
+
+- [x] ~~**Feedback**~~ — done 2026-08-24 on the job page, shown once a job has
+  output and the agent has learning on — the same gate the API applies, since a
+  vote with nowhere to fold is a vote thrown away. No signed token here: that
+  token exists so a party holding a callback URL can reply without a platform
+  key, and a signed-in editor on the agent's team is a stronger claim than
+  holding it, so the session is the credential and the role is the gate. One
+  vote per job, and the recorded vote replaces the form.
 
 Admin-console tail — better as one `/ui/t/{id}/settings` section than scattered
 across existing pages:

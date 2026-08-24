@@ -6,7 +6,10 @@ import re
 import uuid
 
 from httpx import AsyncClient
+from sqlalchemy import select
 
+from sleeper_service.db.models import Feedback, Job
+from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.runtime import runner
 from sleeper_service.runtime.evals import run_eval
 from tests.conftest import Bootstrap, auth
@@ -1996,3 +1999,331 @@ async def test_deleting_a_granted_store_is_refused(
     assert "still granted to risk-analyzer" in r.text
     stores = (await client.get(f"/v1/tenants/{tenant_id}/data-stores", headers=root)).json()
     assert [s["name"] for s in stores] == ["reference"]
+
+
+async def test_models_registry_page(client: AsyncClient, org: dict, bootstrap: Bootstrap) -> None:
+    root = auth(bootstrap.superuser_key)
+    await _login(client, "root@example.com", "root-password")
+
+    page = await client.get("/ui/models")
+    assert page.status_code == 200
+    assert "Register a model" in page.text
+    token = _csrf(page.text)
+
+    r = await client.post(
+        "/ui/models",
+        data={
+            "_csrf_token": token,
+            "provider": "anthropic",
+            "name": "claude-sonnet-5",
+            "model_string": "anthropic:claude-sonnet-5",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    models = (await client.get("/v1/models", headers=root)).json()
+    assert [(m["provider"], m["name"]) for m in models] == [("anthropic", "claude-sonnet-5")]
+
+    # provider/name and model_string are both unique; a duplicate of either
+    # would make the version form's dropdown ambiguous
+    for data, expected in [
+        (
+            {"provider": "anthropic", "name": "claude-sonnet-5", "model_string": "x:y"},
+            "already registered",
+        ),
+        (
+            {
+                "provider": "anthropic",
+                "name": "other",
+                "model_string": "anthropic:claude-sonnet-5",
+            },
+            "already registered as anthropic/claude-sonnet-5",
+        ),
+        ({"provider": "", "name": "n", "model_string": "s"}, "all required"),
+    ]:
+        r = await client.post("/ui/models", data={"_csrf_token": token, **data})
+        assert r.status_code == 400, expected
+        assert expected in html.unescape(r.text), expected
+    assert len((await client.get("/v1/models", headers=root)).json()) == 1
+
+    # ...and the new model is pickable on the version form
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents/new")
+    assert "anthropic:claude-sonnet-5" in page.text
+
+    r = await client.post(
+        f"/ui/models/{models[0]['id']}/delete",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get("/v1/models", headers=root)).json() == []
+
+
+async def test_deleting_a_model_in_use_is_refused(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    """agent_versions.model_id is a plain FK, so the delete would otherwise
+    surface as an IntegrityError rather than something a person can act on."""
+    root = auth(bootstrap.superuser_key)
+    models = (await client.get("/v1/models", headers=root)).json()
+    in_use = next(m for m in models if m["model_string"] == "test:default")
+
+    await _login(client, "root@example.com", "root-password")
+    page = await client.get("/ui/models")
+    r = await client.post(
+        f"/ui/models/{in_use['id']}/delete",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=True,
+    )
+    assert "used by versions of risk-analyzer" in r.text
+    assert [m["id"] for m in (await client.get("/v1/models", headers=root)).json()] == [
+        m["id"] for m in models
+    ]
+
+
+async def test_models_registry_is_superuser_managed(client: AsyncClient, org: dict) -> None:
+    await _login(client, "alice@example.com")  # team owner, not a superuser
+    page = await client.get(f"/ui/t/{org['tenant']['id']}/agents")
+    assert 'href="/ui/models"' not in page.text
+
+    page = await client.get("/ui/models")
+    assert page.status_code == 200, "readable, matching GET /v1/models"
+    assert "Register a model" not in page.text
+    assert "superuser work" in page.text
+
+    r = await client.post(
+        "/ui/models",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "provider": "p",
+            "name": "n",
+            "model_string": "p:n",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    alice = auth(org["users"]["alice"]["api_key"])
+    assert (await client.get("/v1/models", headers=alice)).json() == []
+
+
+async def test_test_run_submits_a_real_job(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    await _login(client, "bob@example.com")
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Test run" in page.text
+
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    assert page.status_code == 200
+    assert "current (v1)" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "Assess this event", "pin": "current"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    job_id = r.headers["location"].removeprefix("/ui/jobs/")
+
+    jobs = (await client.get(f"/v1/agents/{agent_id}/jobs", headers=bob)).json()
+    assert [j["id"] for j in jobs] == [job_id]
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["payload"]["prompt"] == "Assess this event"
+    assert job["agent_version_id"] == risk_agent["version"]["id"]
+
+    # the trail records who ran it, in the same shape the API writes
+    async with get_sessionmaker()() as db:
+        row = await db.get(Job, uuid.UUID(job_id))
+        assert row.auth_ctx["type"] == "user"
+        assert row.auth_ctx["user_id"] == risk_agent["users"]["bob"]["id"]
+        assert row.auth_ctx["team_role"] == "editor"
+
+    # and it is a real job: the runner takes it and the page shows the result
+    await runner.execute_job(uuid.UUID(job_id))
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "succeeded" in page.text
+
+
+async def test_test_run_pins_a_version(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{agent_id}/versions",
+        headers=bob,
+        json={"prompt": "v2", "model": "test/default"},
+    )
+    v2_id = r.json()["id"]
+    await client.post(f"/v1/agents/{agent_id}/promote", headers=alice, json={"version_no": 2})
+    await client.put(f"/v1/agents/{agent_id}/aliases/prod", headers=alice, json={"version_no": 1})
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    assert "current (v2)" in page.text
+    assert "prod → v1" in page.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "on v1", "pin": "v:1"},
+        follow_redirects=False,
+    )
+    job = (await client.get(r.headers["location"].replace("/ui/", "/v1/"), headers=bob)).json()
+    assert job["agent_version_id"] == risk_agent["version"]["id"]
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "on prod", "pin": "a:prod"},
+        follow_redirects=False,
+    )
+    job = (await client.get(r.headers["location"].replace("/ui/", "/v1/"), headers=bob)).json()
+    assert job["agent_version_id"] == risk_agent["version"]["id"]
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "current", "pin": "current"},
+        follow_redirects=False,
+    )
+    job = (await client.get(r.headers["location"].replace("/ui/", "/v1/"), headers=bob)).json()
+    assert job["agent_version_id"] == v2_id
+
+
+async def test_test_run_is_editor_only_and_needs_a_prompt(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "   ", "pin": "current"},
+    )
+    assert r.status_code == 400
+    assert "prompt is required" in r.text
+
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "Test run" not in page.text
+    r = await client.get(f"/ui/agents/{agent_id}/run", follow_redirects=False)
+    assert r.status_code == 303
+    await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "sneaky", "pin": "current"},
+    )
+    assert (await client.get(f"/v1/agents/{agent_id}/jobs", headers=bob)).json() == []
+
+
+async def test_test_run_refuses_when_the_budget_is_spent(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """create_job's pre-flight still writes an auditable row, so the job page
+    is the honest place to land — the run just never reaches the queue."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.patch(f"/v1/agents/{agent_id}", headers=alice, json={"spending_limit": "0.00"})
+    assert r.status_code == 200
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/run")
+    r = await client.post(
+        f"/ui/agents/{agent_id}/run",
+        data={"_csrf_token": _csrf(page.text), "prompt": "too expensive", "pin": "current"},
+        follow_redirects=True,
+    )
+    assert "budget_exceeded" in r.text
+
+
+async def _learning_agent(client: AsyncClient, risk_agent: dict) -> str:
+    """The risk agent with memory + learning on, so it accepts feedback."""
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    r = await client.patch(
+        f"/v1/agents/{agent_id}",
+        headers=alice,
+        json={"options": {"memory": True, "learning": True}},
+    )
+    assert r.status_code == 200
+    return agent_id
+
+
+async def _finished_job(client: AsyncClient, agent_id: str, key: str) -> str:
+    r = await client.post(
+        f"/v1/agents/{agent_id}/jobs", headers=auth(key), json={"context": {"prompt": "hi"}}
+    )
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+    return job_id
+
+
+async def test_feedback_from_the_job_page(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = await _learning_agent(client, risk_agent)
+    bob_key = risk_agent["users"]["bob"]["api_key"]
+    job_id = await _finished_job(client, agent_id, bob_key)
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "Feedback" in page.text
+    assert "Helpful" in page.text
+
+    r = await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={
+            "_csrf_token": _csrf(page.text),
+            "vote": "-1",
+            "comment": "Staffing should be listed first.",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    async with get_sessionmaker()() as db:
+        fb = await db.scalar(select(Feedback).where(Feedback.job_id == uuid.UUID(job_id)))
+        assert fb.vote == -1
+        assert fb.comment == "Staffing should be listed first."
+
+    # the vote replaces the form, and one job takes one vote
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "unhelpful" in page.text
+    assert "Staffing should be listed first." in page.text
+    assert "Helpful</button>" not in page.text
+
+    r = await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={"_csrf_token": _csrf(page.text), "vote": "1"},
+        follow_redirects=True,
+    )
+    assert "one vote per job" in r.text
+    async with get_sessionmaker()() as db:
+        votes = list(
+            await db.scalars(select(Feedback.vote).where(Feedback.job_id == uuid.UUID(job_id)))
+        )
+    assert votes == [-1]
+
+
+async def test_feedback_needs_learning_and_an_editor(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]  # learning off
+    bob_key = risk_agent["users"]["bob"]["api_key"]
+    job_id = await _finished_job(client, agent_id, bob_key)
+
+    await _login(client, "bob@example.com")
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "Feedback" not in page.text, "a vote with nowhere to fold is a vote thrown away"
+    r = await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={"_csrf_token": _csrf(page.text), "vote": "1"},
+        follow_redirects=True,
+    )
+    assert "does not have learning switched on" in r.text
+
+    await _learning_agent(client, risk_agent)
+    await _login(client, "carol@example.com")  # viewer
+    page = await client.get(f"/ui/jobs/{job_id}")
+    assert "Helpful</button>" not in page.text
+    await client.post(
+        f"/ui/jobs/{job_id}/feedback",
+        data={"_csrf_token": _csrf(page.text), "vote": "1"},
+    )
+    async with get_sessionmaker()() as db:
+        assert await db.scalar(select(Feedback).where(Feedback.job_id == uuid.UUID(job_id))) is None

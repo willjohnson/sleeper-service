@@ -22,6 +22,44 @@
   {% endif %}
 </div>
 
+{% if takes_feedback and job.output %}
+<div class="panel">
+  <h2>Feedback</h2>
+  {% if feedback %}
+  <p style="margin-top:0">
+    <span class="badge {{ 'succeeded' if feedback.vote == 1 else 'failed' }}">
+      {{ 'helpful' if feedback.vote == 1 else 'unhelpful' }}</span>
+    <span class="muted">recorded {{ feedback.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+  </p>
+  {% if feedback.comment %}<pre style="white-space:pre-wrap">{{ feedback.comment }}</pre>{% endif %}
+  <p class="muted" style="margin-bottom:0">
+    One vote per job. What it taught the agent shows on the
+    <a href="/ui/agents/{{ agent.id }}">agent page</a> under Memory.
+  </p>
+  {% elif can_submit %}
+  <p class="muted" style="margin-top:0">
+    This agent learns from feedback: a vote is folded into its memory, which
+    {% if agent.options.get('memory_approval') %}an owner then approves{% else %}takes
+    effect on the next run{% endif %}. Say why, and the reason is what gets learned.
+  </p>
+  <form method="post" action="/ui/jobs/{{ job.id }}/feedback" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <label for="fb-comment">Comment</label>
+    <div>
+      <textarea id="fb-comment" name="comment" rows="3" maxlength="2000"
+                placeholder="Staffing below 65% should be listed first among the factors."></textarea>
+    </div>
+    <div class="form-actions">
+      <button type="submit" name="vote" value="1">Helpful</button>
+      <button type="submit" name="vote" value="-1" class="subtle danger">Unhelpful</button>
+    </div>
+  </form>
+  {% else %}
+  <div class="muted">No feedback recorded.</div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if tree_children %}
 <div class="panel">
   <h2>Delegation tree</h2>
