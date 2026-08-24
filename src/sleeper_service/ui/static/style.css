@@ -173,3 +173,8 @@ table.members td:last-child { text-align: right; }
 .check-row { display: grid; grid-template-columns: 150px 1fr 1fr; gap: 8px; margin-bottom: 8px; }
 .check-row > * { width: 100%; min-width: 0; }
 .check-head { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+
+/* A field carrying a hint below it is wrapped in a div, so it is not a direct
+   child of the grid and misses the full-width rule above. .short still caps
+   the genuinely short ones, since it matches by descendant. */
+.form-grid > div > input[type=text], .form-grid > div > textarea { width: 100%; }

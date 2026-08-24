@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Key created · {{ agent.name }} — Sleeper Service{% endblock %}
+{% block heading %}Key created <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block content %}
+<div class="panel">
+  <div class="notice">
+    <span><strong>Copy this now.</strong> Only its hash is stored, so this page is the
+      one and only time the key is readable. Leaving without copying it means revoking
+      the key and issuing another.</span>
+  </div>
+  <h2>{{ key.name }}</h2>
+  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
+  <table>
+    <tr><th style="width:140px">Scope</th>
+      <td>this agent only — <a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a></td></tr>
+    <tr><th>Rate limit</th>
+      <td>{% if key.rate_limit %}{{ key.rate_limit }} requests/minute{% else %}<span class="muted">none</span>{% endif %}</td></tr>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>Using it</h2>
+  <p class="muted" style="margin-top:0">
+    Pass it as a bearer token. This submits a job against whichever version is current;
+    add <code>"alias": "prod"</code> or <code>"version_no": 3</code> to pin one.
+  </p>
+  <pre>curl -X POST {{ base_url }}/v1/agents/{{ agent.id }}/jobs \
+  -H "Authorization: Bearer {{ plaintext }}" \
+  -H "Content-Type: application/json" \
+  -d '{"context": {"prompt": "..."}}'</pre>
+  <p class="muted" style="margin-bottom:0">
+    Jobs run asynchronously: the response carries a job id to poll at
+    <code>GET /v1/jobs/{id}</code>, or give <code>callback_url</code> and the result is
+    posted back with an HMAC signature.
+  </p>
+</div>
+
+<p><a class="btn" href="/ui/agents/{{ agent.id }}">I have copied it — back to the agent</a></p>
+{% endblock %}

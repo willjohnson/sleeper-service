@@ -1315,3 +1315,165 @@ async def test_outsider_cannot_see_a_team(client: AsyncClient, org: dict) -> Non
     r = await client.get(f"/ui/teams/{org['team']['id']}", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/ui"
+
+
+async def test_create_and_revoke_an_invoke_key_from_the_ui(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    """The whole point of the panel: an agent built in the UI becomes callable
+    without ever touching /v1/api-keys."""
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")  # owner
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "New key" in page.text
+    assert "No keys yet" in page.text
+
+    assert (await client.get(f"/ui/agents/{agent_id}/invoke-keys/new")).status_code == 200
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": _csrf(page.text), "name": "n8n production", "rate_limit": "60"},
+    )
+    assert r.status_code == 201
+    secret = re.search(r"(ss_invoke_[A-Za-z0-9_-]+)", r.text).group(1)
+    assert "shown once" in r.text or "one and only time" in r.text
+    assert agent_id in r.text  # the curl example targets this agent
+
+    # The secret authenticates: 403 is the invoke key being refused a management
+    # endpoint, which it only reaches once the credential itself has passed.
+    assert (await client.get("/v1/agents", headers=auth(secret))).status_code == 403
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "n8n production" in page.text
+    assert "60/min" in page.text
+    assert secret not in page.text, "the plaintext key must never render again"
+
+    key_id = re.search(rf"/ui/agents/{agent_id}/invoke-keys/([0-9a-f-]+)/revoke", page.text).group(
+        1
+    )
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys/{key_id}/revoke",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get("/v1/agents", headers=auth(secret))).status_code == 401
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "revoked" in page.text
+    assert "/revoke" not in page.text, "a revoked key keeps no revoke button"
+
+
+async def test_invoke_key_form_rejects_bad_input(client: AsyncClient, risk_agent: dict) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}/invoke-keys/new")
+    token = _csrf(page.text)
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys", data={"_csrf_token": token, "name": "  "}
+    )
+    assert r.status_code == 400
+    assert "name" in r.text.lower()
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "ok", "rate_limit": "nope"},
+    )
+    assert r.status_code == 400
+    assert "whole number" in r.text
+
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "ok", "rate_limit": "0"},
+    )
+    assert r.status_code == 400
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    assert (await client.get("/v1/api-keys", headers=alice)).json() == []
+
+    # Blank rate limit is the no-limit case, not an error.
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "unlimited", "rate_limit": ""},
+    )
+    assert r.status_code == 201
+    keys = (await client.get("/v1/api-keys", headers=alice)).json()
+    assert [(k["name"], k["rate_limit"], k["scope"]) for k in keys] == [
+        ("unlimited", None, "agent")
+    ]
+
+
+async def test_invoke_keys_are_owner_only(client: AsyncClient, risk_agent: dict) -> None:
+    """Editor is enough to publish a version but not to mint a credential that
+    outlives the session and spends the agent's budget — matching the API."""
+    agent_id = risk_agent["agent"]["id"]
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    r = await client.post(
+        "/v1/api-keys/invoke",
+        headers=alice,
+        json={"scope": "agent", "scope_id": agent_id, "name": "alices-key"},
+    )
+    assert r.status_code == 201
+    key_id = r.json()["id"]
+
+    for email in ("bob@example.com", "carol@example.com"):  # editor, viewer
+        await _login(client, email)
+        page = await client.get(f"/ui/agents/{agent_id}")
+        assert "Invoke keys" not in page.text, email
+        assert "alices-key" not in page.text, email
+
+        token = _csrf(page.text)
+        r = await client.get(f"/ui/agents/{agent_id}/invoke-keys/new", follow_redirects=False)
+        assert r.status_code == 303, email
+        await client.post(
+            f"/ui/agents/{agent_id}/invoke-keys",
+            data={"_csrf_token": token, "name": "sneaky"},
+        )
+        await client.post(
+            f"/ui/agents/{agent_id}/invoke-keys/{key_id}/revoke", data={"_csrf_token": token}
+        )
+
+    keys = (await client.get("/v1/api-keys", headers=alice)).json()
+    assert [(k["name"], k["revoked_at"]) for k in keys] == [("alices-key", None)]
+
+
+async def test_archived_agent_issues_no_keys_but_still_revokes(
+    client: AsyncClient, risk_agent: dict
+) -> None:
+    agent_id = risk_agent["agent"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/agents/{agent_id}")
+    token = _csrf(page.text)
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys", data={"_csrf_token": token, "name": "live-key"}
+    )
+    assert r.status_code == 201
+    await client.post(f"/ui/agents/{agent_id}/archive", data={"_csrf_token": token})
+
+    page = await client.get(f"/ui/agents/{agent_id}")
+    assert "live-key" in page.text  # still listed, still revocable
+    assert "New key" not in page.text
+    r = await client.get(f"/ui/agents/{agent_id}/invoke-keys/new", follow_redirects=False)
+    assert r.status_code == 303
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys",
+        data={"_csrf_token": token, "name": "posthumous"},
+        follow_redirects=True,
+    )
+    assert "restore it before issuing a key" in r.text
+
+    key_id = re.search(rf"/ui/agents/{agent_id}/invoke-keys/([0-9a-f-]+)/revoke", page.text).group(
+        1
+    )
+    r = await client.post(
+        f"/ui/agents/{agent_id}/invoke-keys/{key_id}/revoke",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    keys = (await client.get("/v1/api-keys", headers=alice)).json()
+    assert [k["name"] for k in keys] == ["live-key"]
+    assert keys[0]["revoked_at"] is not None

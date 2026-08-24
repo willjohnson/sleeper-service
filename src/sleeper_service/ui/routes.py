@@ -30,14 +30,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sleeper_service.api.v1.agents import GOVERNED_OPTION_KEYS
 from sleeper_service.api.v1.schemas import JobContext
+from sleeper_service.auth.keys import generate_key
 from sleeper_service.auth.passwords import verify_password
 from sleeper_service.auth.principal import UserPrincipal
 from sleeper_service.auth.rbac import is_tenant_admin, visible_team_ids
 from sleeper_service.config import get_settings
-from sleeper_service.constants import Role
+from sleeper_service.constants import KeyKind, KeyScope, Role
 from sleeper_service.db.models import (
     Agent,
     AgentVersion,
+    ApiKey,
     EvalCase,
     EvalRun,
     Job,
@@ -1272,6 +1274,11 @@ async def agent_detail(
         )
     )
     charts = await _activity_charts(db, Job.agent_id == agent.id, datetime.now(UTC))
+    # Owner-only, matching who the API lets issue an agent-scoped key. Nothing
+    # secret is on show — the plaintext exists only in the response that
+    # created it — but the panel is all owner actions, so it hides whole.
+    can_manage_keys = role == Role.OWNER
+    invoke_keys = await _invoke_keys(db, agent.id) if can_manage_keys else []
 
     return templates.TemplateResponse(
         request,
@@ -1300,6 +1307,8 @@ async def agent_detail(
             chart_days=CHART_DAYS,
             jobs_total=charts["jobs_total"],
             avg_tokens_per_job=charts["avg_tokens_per_job"],
+            invoke_keys=invoke_keys,
+            can_manage_keys=can_manage_keys,
             can_promote=role == Role.OWNER,
             can_edit=role in (Role.OWNER, Role.EDITOR) and agent.archived_at is None,
             can_archive=role == Role.OWNER,
@@ -1445,6 +1454,177 @@ async def ui_restore_agent(
         and await _team_role(db, p, agent.team_id) == Role.OWNER
     ):
         agent.archived_at = None
+        await db.commit()
+    return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+# --- Invoke keys ---
+#
+# Agent-scoped data-plane keys only: those are what make an agent built in the
+# UI actually callable. Tenant- and team-scoped keys stay on the API until
+# there is a settings section with somewhere to put them.
+
+
+async def _key_admin_page(
+    db: AsyncSession, p: UserPrincipal, agent_id: uuid.UUID
+) -> tuple[Agent | None, RedirectResponse | None]:
+    """Gate for the invoke-key pages, mirroring api_keys._require_scope_admin
+    at agent scope: owner of the agent's team, where editor is not enough — a
+    key outlives the session that made it and carries spend.
+
+    Unlike the other agent-scoped forms this stays open on an archived agent:
+    retiring one is exactly when its keys want revoking. Issuing is blocked
+    separately.
+    """
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        return None, RedirectResponse("/ui", status_code=303)
+    if await _team_role(db, p, agent.team_id) != Role.OWNER:
+        return None, RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    return agent, None
+
+
+async def _invoke_keys(db: AsyncSession, agent_id: uuid.UUID) -> list[ApiKey]:
+    return list(
+        await db.scalars(
+            select(ApiKey)
+            .where(
+                ApiKey.kind == KeyKind.INVOKE,
+                ApiKey.scope == KeyScope.AGENT,
+                ApiKey.scope_id == agent_id,
+            )
+            .order_by(ApiKey.created_at.desc())
+        )
+    )
+
+
+@router.get("/agents/{agent_id}/invoke-keys/new", response_class=HTMLResponse)
+async def new_invoke_key_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.archived_at is not None:
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "invoke_key_new.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            form={},
+        ),
+    )
+
+
+@router.post("/agents/{agent_id}/invoke-keys")
+async def ui_create_invoke_key(
+    request: Request,
+    agent_id: uuid.UUID,
+    name: str = Form(""),
+    rate_limit: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    if agent.archived_at is not None:
+        _flash(request, "This agent is archived — restore it before issuing a key.")
+        return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+    async def fail(message: str):
+        return templates.TemplateResponse(
+            request,
+            "invoke_key_new.html",
+            _ctx(
+                request,
+                p,
+                tenant=await db.get(Tenant, agent.tenant_id),
+                tenants=await _visible_tenants(db, p),
+                section="agents",
+                agent=agent,
+                error=message,
+                form={"name": name, "rate_limit": rate_limit},
+            ),
+            status_code=400,
+        )
+
+    name = name.strip()
+    if not name:
+        return await fail("Give the key a name — it is the only way to tell keys apart later.")
+    if len(name) > 200:
+        return await fail("Name must be 200 characters or fewer.")
+    limit: int | None = None
+    if rate_limit.strip():
+        # Mirrors InvokeKeyCreate.rate_limit (ge=1); the upper bound is the UI's
+        # own, since a limit past it is indistinguishable from no limit.
+        limit, err = _form_int(rate_limit.strip(), 0, 1, 100000, "Rate limit")
+        if err:
+            return await fail(err)
+
+    plaintext, key_hash = generate_key(KeyKind.INVOKE)
+    key = ApiKey(
+        kind=KeyKind.INVOKE,
+        scope=KeyScope.AGENT,
+        scope_id=agent.id,
+        key_hash=key_hash,
+        name=name,
+        rate_limit=limit,
+    )
+    db.add(key)
+    await db.commit()
+    await db.refresh(key)
+
+    # Rendered straight into this response rather than redirected through the
+    # session: the session cookie is signed, not encrypted, so flashing the
+    # secret would park a live data-plane credential in the browser's cookie
+    # jar and every Set-Cookie header along the way.
+    return templates.TemplateResponse(
+        request,
+        "invoke_key_created.html",
+        _ctx(
+            request,
+            p,
+            tenant=await db.get(Tenant, agent.tenant_id),
+            tenants=await _visible_tenants(db, p),
+            section="agents",
+            agent=agent,
+            key=key,
+            plaintext=plaintext,
+            base_url=get_settings().public_base_url.rstrip("/"),
+        ),
+        status_code=201,
+    )
+
+
+@router.post("/agents/{agent_id}/invoke-keys/{key_id}/revoke")
+async def ui_revoke_invoke_key(
+    agent_id: uuid.UUID,
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    _agent, redirect = await _key_admin_page(db, p, agent_id)
+    if redirect is not None:
+        return redirect
+    key = await db.get(ApiKey, key_id)
+    if (
+        key is not None
+        and key.kind == KeyKind.INVOKE
+        and key.scope == KeyScope.AGENT
+        and key.scope_id == agent_id
+        and key.revoked_at is None
+    ):
+        key.revoked_at = datetime.now(UTC)
         await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
 
