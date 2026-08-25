@@ -393,7 +393,6 @@ class EventSourceCreate(BaseModel):
     # body as JSON. Example: {"prompt": "Price event: {{body}}"}
     payload_template: dict = Field(default_factory=lambda: {"prompt": "{{body}}"})
     dedup_key_path: str | None = None
-    config: dict = Field(default_factory=dict)
 
 
 class EventSourceOut(OrmModel):
@@ -403,7 +402,6 @@ class EventSourceOut(OrmModel):
     target_agent_id: uuid.UUID
     payload_template: dict
     dedup_key_path: str | None
-    config: dict
     created_at: datetime
 
 

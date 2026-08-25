@@ -22,7 +22,9 @@
   <h2>Everyone</h2>
   <p class="muted" style="margin-top:0">
     Users are instance-wide: one account can hold roles in several tenants. Membership
-    is set per team, on the team's own page.
+    is set per team, on the team's own page. <strong>Revoke keys</strong> cuts someone
+    off in one move; <strong>Keys</strong> opens their credentials one by one, to issue
+    a replacement or retire a single key.
   </p>
   <table>
     <tr><th>Email</th><th>Kind</th><th>Active keys</th><th>Created</th><th class="col-actions"></th></tr>
@@ -36,10 +38,7 @@
       <td class="muted">{{ row.user.created_at.strftime('%Y-%m-%d') }}</td>
       <td>
         <div class="actions" style="justify-content:flex-end">
-          <form method="post" action="/ui/users/{{ row.user.id }}/keys">
-            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-            <button class="subtle">Issue key</button>
-          </form>
+          <a class="btn subtle" href="/ui/users/{{ row.user.id }}/keys">Keys</a>
           {% if row.key_count %}
           <form method="post" action="/ui/users/{{ row.user.id }}/keys/revoke-all">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">

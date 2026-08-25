@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}{{ subject.email }} · keys — Sleeper Service{% endblock %}
+{% block heading %}{{ subject.email }}
+  <span class="muted" style="font-size:14px">· API keys</span>
+{% endblock %}
+{% block actions %}<a class="btn subtle" href="/ui/users">Back to users</a>{% endblock %}
+{% block content %}
+{% if plaintext %}
+<div class="panel">
+  <div class="notice">
+    <span><strong>Copy this now.</strong> Only its hash is stored, so this page is the
+      one and only time the key is readable — give it to {{ subject.email }} over
+      something you would send a password over.</span>
+  </div>
+  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
+  <p class="muted" style="margin-bottom:0">
+    The key carries whatever roles this user has, in every team they belong to.
+  </p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2 class="with-action">Keys
+    <span class="actions">
+      <form method="post" action="/ui/users/{{ subject.id }}/keys">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <button class="subtle">Issue a key</button>
+      </form>
+    </span>
+  </h2>
+  <p class="muted" style="margin-top:0">
+    Control-plane keys that act as {{ subject.email }}. Revoke one to retire a single
+    credential — a key left on a decommissioned box, say — without cutting off the
+    others. To cut this person off entirely, use Revoke keys on the
+    <a href="/ui/users">users list</a>, which takes them all at once.
+  </p>
+  {% if keys %}
+  <table>
+    <tr><th>Name</th><th>Key ID</th><th>Created</th><th>Status</th><th class="col-actions"></th></tr>
+    {% for k in keys %}
+    <tr>
+      <td>{{ k.name or '(unnamed)' }}</td>
+      {# Keys are indistinguishable otherwise: the secret is not stored, the name
+         is optional, and several can share a day. The id is what the API's own
+         DELETE path takes, so it is the honest handle to show. #}
+      <td class="mono" style="font-size:12px">{{ k.id }}</td>
+      <td class="muted">{{ k.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td>
+        {% if k.revoked_at %}
+        <span class="badge rejected">revoked</span>
+        <span class="muted">{{ k.revoked_at.strftime('%Y-%m-%d') }}</span>
+        {% else %}<span class="badge active">active</span>{% endif %}
+      </td>
+      <td>
+        {% if not k.revoked_at %}
+        <div class="actions" style="justify-content:flex-end">
+          <form method="post" action="/ui/users/{{ subject.id }}/keys/{{ k.id }}/revoke">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <button class="subtle danger">Revoke</button>
+          </form>
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="muted">No keys — this user signs in to these pages with their password,
+    and needs a key only to reach the API.</div>
+  {% endif %}
+</div>
+{% endblock %}
