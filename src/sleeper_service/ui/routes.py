@@ -3879,6 +3879,53 @@ async def ui_create_user(
     return await _render_users(request, db, p, created=user, plaintext=plaintext, status_code=201)
 
 
+async def _render_user_keys(
+    request: Request,
+    db: AsyncSession,
+    p: UserPrincipal,
+    subject: User,
+    *,
+    plaintext: str | None = None,
+    status_code: int = 200,
+):
+    tenants = await _visible_tenants(db, p)
+    return templates.TemplateResponse(
+        request,
+        "user_keys.html",
+        _ctx(
+            request,
+            p,
+            tenant=next(iter(tenants), None),
+            tenants=tenants,
+            section="users",
+            subject=subject,
+            keys=await _user_keys(db, subject.id),
+            plaintext=plaintext,
+        ),
+        status_code=status_code,
+    )
+
+
+@router.get("/users/{user_id}/keys", response_class=HTMLResponse)
+async def user_keys_page(
+    request: Request,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    # The page that makes DELETE /v1/users/{id}/keys/{key_id} reachable without
+    # curl. The list page deliberately shows a count rather than rows — from
+    # there the question is "cut this person off" — so picking one key needs a
+    # page whose subject is one person, where a row can be told apart by its
+    # name, its id and when it was issued.
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/account", status_code=303)
+    subject = await db.get(User, user_id)
+    if subject is None:
+        return RedirectResponse("/ui/users", status_code=303)
+    return await _render_user_keys(request, db, p, subject)
+
+
 @router.post("/users/{user_id}/keys")
 async def ui_issue_user_key(
     request: Request,
@@ -3888,11 +3935,30 @@ async def ui_issue_user_key(
 ):
     if not p.user.is_superuser:
         return RedirectResponse("/ui/account", status_code=303)
-    user = await db.get(User, user_id)
-    if user is None:
+    subject = await db.get(User, user_id)
+    if subject is None:
         return RedirectResponse("/ui/users", status_code=303)
-    _key, plaintext = await _issue_user_key(db, user.id)
-    return await _render_users(request, db, p, created=user, plaintext=plaintext, status_code=201)
+    _key, plaintext = await _issue_user_key(db, subject.id)
+    # Lands on the keys page rather than back on the list: the secret is
+    # readable exactly once, and the page it renders into should be the one
+    # that also shows what this person already holds.
+    return await _render_user_keys(request, db, p, subject, plaintext=plaintext, status_code=201)
+
+
+@router.post("/users/{user_id}/keys/{key_id}/revoke")
+async def ui_revoke_user_key(
+    user_id: uuid.UUID,
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    if not p.user.is_superuser:
+        return RedirectResponse("/ui/account", status_code=303)
+    # _revoke_key scopes by user_id as well as key_id, so a key id belonging to
+    # someone else cannot be revoked by posting it under this user's path —
+    # the same pairing DELETE /v1/users/{id}/keys/{key_id} enforces.
+    await _revoke_key(db, key_id, user_id)
+    return RedirectResponse(f"/ui/users/{user_id}/keys", status_code=303)
 
 
 @router.post("/users/{user_id}/keys/revoke-all")
@@ -3904,10 +3970,9 @@ async def ui_revoke_user_keys(
 ):
     if not p.user.is_superuser:
         return RedirectResponse("/ui/account", status_code=303)
-    # Revoking one key by id is the API's shape, but from here the question is
-    # "cut this person off", and a list that shows only a count would make
-    # picking the right row guesswork. Your own keys stay on /ui/account,
-    # where they are listed individually and revoked one at a time.
+    # Kept alongside the per-key page above, because it answers a different
+    # question: "cut this person off" should not be a row-by-row chore that
+    # can be left half-done. Your own keys stay on /ui/account.
     now = datetime.now(UTC)
     for key in await _user_keys(db, user_id):
         if key.revoked_at is None:
@@ -4147,7 +4212,6 @@ async def ui_create_event_source(
         target_agent_id=agent.id,
         payload_template=template,
         dedup_key_path=dedup_key_path.strip() or None,
-        config={},
         secret_hash=hash_key(secret),
     )
     db.add(source)

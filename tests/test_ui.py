@@ -2835,13 +2835,93 @@ async def test_superuser_revokes_someone_elses_keys(client: AsyncClient, org: di
     assert r.status_code == 303
     assert (await client.get("/v1/users/me", headers=auth(bob_key))).status_code == 401
 
-    # A replacement is issuable from the same page, so cutting someone off is
-    # not the same as locking them out for good.
+    # A replacement is issuable, so cutting someone off is not the same as
+    # locking them out for good.
     r = await client.post(f"/ui/users/{bob_id}/keys", data={"_csrf_token": _csrf(page.text)})
     assert r.status_code == 201
     fresh = re.search(r"ss_user_[\w-]+", r.text).group(0)
     me = (await client.get("/v1/users/me", headers=auth(fresh))).json()
     assert me["email"] == "bob@example.com"
+
+
+async def test_superuser_revokes_one_key_of_another_user(client: AsyncClient, org: dict) -> None:
+    """The gap the parity sweep left: DELETE /v1/users/{id}/keys/{key_id} was
+    curl-only, because the users list shows a count and revokes all of them."""
+    bob_id = org["users"]["bob"]["id"]
+    first = org["users"]["bob"]["api_key"]
+    await _login(client, *ROOT)
+
+    # Bob holds two keys; the point is to retire exactly one.
+    token = _csrf((await client.get("/ui/users")).text)
+    page = await client.post(f"/ui/users/{bob_id}/keys", data={"_csrf_token": token})
+    second = re.search(r"ss_user_[\w-]+", page.text).group(0)
+    assert (await client.get("/v1/users/me", headers=auth(second))).status_code == 200
+
+    async with get_sessionmaker()() as db:
+        first_id = await db.scalar(select(ApiKey.id).where(ApiKey.key_hash == hash_key(first)))
+
+    keys_page = await client.get(f"/ui/users/{bob_id}/keys")
+    assert keys_page.status_code == 200
+    # Both are listed individually, by the id the API's own DELETE path takes —
+    # which is what makes picking the right row something other than guesswork.
+    assert str(first_id) in keys_page.text
+    assert keys_page.text.count("/revoke") == 2
+
+    r = await client.post(
+        f"/ui/users/{bob_id}/keys/{first_id}/revoke",
+        data={"_csrf_token": _csrf(keys_page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/users/{bob_id}/keys"
+
+    assert (await client.get("/v1/users/me", headers=auth(first))).status_code == 401
+    assert (await client.get("/v1/users/me", headers=auth(second))).status_code == 200, (
+        "revoking one key must not touch the others"
+    )
+    assert "revoked" in (await client.get(f"/ui/users/{bob_id}/keys")).text
+
+
+async def test_one_key_revoke_will_not_cross_users(client: AsyncClient, org: dict) -> None:
+    """The key id and the user id in the path have to agree, matching the
+    pairing revoke_user_key enforces on the API."""
+    alice_key = org["users"]["alice"]["api_key"]
+    bob_id = org["users"]["bob"]["id"]
+    await _login(client, *ROOT)
+    async with get_sessionmaker()() as db:
+        alice_key_id = await db.scalar(
+            select(ApiKey.id).where(ApiKey.key_hash == hash_key(alice_key))
+        )
+
+    page = await client.get(f"/ui/users/{bob_id}/keys")
+    r = await client.post(
+        f"/ui/users/{bob_id}/keys/{alice_key_id}/revoke",
+        data={"_csrf_token": _csrf(page.text)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get("/v1/users/me", headers=auth(alice_key))).status_code == 200
+
+
+async def test_user_keys_page_is_superuser_only(client: AsyncClient, org: dict) -> None:
+    bob_id = org["users"]["bob"]["id"]
+    bob_key = org["users"]["bob"]["api_key"]
+    await _login(client, "alice@example.com")
+
+    r = await client.get(f"/ui/users/{bob_id}/keys", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui/account"
+
+    token = _csrf((await client.get("/ui/account")).text)
+    async with get_sessionmaker()() as db:
+        bob_key_id = await db.scalar(select(ApiKey.id).where(ApiKey.key_hash == hash_key(bob_key)))
+    r = await client.post(
+        f"/ui/users/{bob_id}/keys/{bob_key_id}/revoke",
+        data={"_csrf_token": token},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert (await client.get("/v1/users/me", headers=auth(bob_key))).status_code == 200
 
 
 # --- Notification channels ---

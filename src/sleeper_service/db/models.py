@@ -262,7 +262,6 @@ class EventSource(UUIDPKMixin, CreatedAtMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
     name: Mapped[str]
-    config: Mapped[dict] = mapped_column(JSONB, default=dict)
     target_agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"))
     payload_template: Mapped[dict] = mapped_column(JSONB, default=dict)
     secret_hash: Mapped[str]

@@ -79,7 +79,7 @@ jobs           id, agent_id, agent_version_id, memory_version_id, parent_job_id,
                status, payload, output, error, tokens_in/out, cost,
                callback_url, user_ctx
 job_events     job_id, ts, type, data               -- audit trail per job
-event_sources  id, tenant_id, config, target_agent_id, payload_template,
+event_sources  id, tenant_id, target_agent_id, payload_template,
                secret, dedup_key_path              -- webhook ingress only
 notif_channels id, team_id, apprise_url_enc, events[] (dead_letter|budget|error_rate)
 memory_versions id, agent_id, version_no, content (MEMORY.md-style),
@@ -150,6 +150,7 @@ Events are just another way to create jobs — no separate streaming architectur
 
 - **Webhook ingress only**: `POST /v1/events/{source_id}` with per-source secret. Body is mapped through `payload_template` → job for `target_agent_id`.
 - **Dedup**: each source defines a `dedup_key_path` into the event body (senders retry — duplicates must not become duplicate jobs); unique index drops repeats.
+- **No per-source `config` blob** *(removed 2026-08-24)*. `event_sources.config` existed from the initial schema transcription, was written by the create endpoint and read by nothing — a source is resolved at ingest entirely through `payload_template`, `dedup_key_path` and `secret_hash`. It was dropped rather than given a use: inventing a meaning for a column would be building a feature to justify it, and once the repo is public an inert field that round-trips through `EventSourceOut` becomes something people can start storing values in. The plausible future need is per-source webhook signature verification — the ingress authenticates with a shared secret in `X-Event-Secret`, so a sender that signs the body (GitHub, Stripe) needs a shim today. When that is built it gets named, validated columns like its two siblings, not a grab-bag dict.
 - **No pollers in the platform.** Scheduling/polling is orchestration, and orchestration lives outside Sleeper Service — that's the thesis. Anything that watches a feed on a schedule (cron, n8n, Airflow) is an external caller that posts to the webhook. If demand for built-in scheduled events shows up, it becomes a separate companion service, not core.
 
 Demo that ships with the repo: a standalone poller *script* (compose `demo` profile, explicitly playing the role of the external orchestrator) watches stock prices/weather and posts events to the webhook. The `risk-analyzer` agent (structured output: `{risk_level, factors[], summary}`) delegates to a `notifier` agent over a threshold. Exercises event ingress, structured output, and delegation in one example.

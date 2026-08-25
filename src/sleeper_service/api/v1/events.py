@@ -107,7 +107,6 @@ async def create_event_source(
         target_agent_id=body.target_agent_id,
         payload_template=body.payload_template,
         dedup_key_path=body.dedup_key_path,
-        config=body.config,
         secret_hash=hash_key(secret),
     )
     db.add(source)
