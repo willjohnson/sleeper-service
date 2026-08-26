@@ -481,3 +481,11 @@ migrations against *existing data*, not DDL on an empty database.
 - [x] Bump package metadata to version 0.1.3.
 - [x] Verify the release version and existing feature test coverage.
 - [x] Commit the release and create the v0.1.3 tag.
+
+## 2026-08-26 07:34 EDT — Publish the 0.1.3 pull request
+
+### Release handoff
+
+- [x] Create a feature branch for the tagged release.
+- [x] Publish the feature branch and v0.1.3 tag.
+- [x] Open the pull request against main.
