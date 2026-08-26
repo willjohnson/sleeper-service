@@ -1,6 +1,6 @@
 [project]
 name = "sleeper-service"
-version = "0.1.2"
+version = "0.1.3"
 description = "Agents as a Service — a self-hosted platform for fleets of narrow, single-purpose AI agents exposed as API endpoints."
 readme = "README.md"
 license = "Apache-2.0"

@@ -13,6 +13,7 @@
     {% if tenant %}
     <a class="nav {% if section == 'dashboard' %}active{% endif %}" href="/ui/t/{{ tenant.id }}">Dashboard</a>
     <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
+    <a class="nav {% if section == 'inbox' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/inbox">Inbox</a>
     <a class="nav {% if section == 'connections' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/connections">Connections</a>
     <a class="nav {% if section == 'files' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/files">Files</a>
     {% if tenant_admin %}

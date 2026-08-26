@@ -1,6 +1,6 @@
 """Job execution: pre-hooks → PydanticAI loop → post-hooks, with guardrails.
 
-Statuses written here are terminal (succeeded / failed / rejected /
+Statuses written here are terminal (succeeded / escalated / failed / rejected /
 budget_exceeded / iteration_limit / timeout) except for transient provider
 failures, which raise TransientJobError so the caller decides: the arq worker
 retries with backoff (dead_letter after max tries), the sync API path fails
@@ -40,6 +40,7 @@ from sleeper_service.runtime.toolsets import (
     build_mcp_toolsets,
     build_store_toolset,
 )
+from sleeper_service.runtime.work_items import build_escalation_toolset
 
 
 class TransientJobError(Exception):
@@ -163,6 +164,11 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     delegation_toolset = build_delegation_toolset(agent, job_id)
     if delegation_toolset is not None:
         toolsets.append(delegation_toolset)
+
+    escalation_ids: list[uuid.UUID] = []
+    escalation_toolset = build_escalation_toolset(agent, job_id, escalation_ids)
+    if escalation_toolset is not None:
+        toolsets.append(escalation_toolset)
 
     memory_proposals: list[str] = []
     if memory.memory_enabled(agent_options):
@@ -290,6 +296,15 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         output, redactions = hooks.redact_pii(output)
         if redactions:
             events.append(("pii_redacted", {"count": redactions}))
+    if status == "succeeded" and escalation_ids:
+        # Escalation is an intentional, terminal handoff rather than a
+        # failure. Preserve any schema-valid agent result as supporting
+        # context and put stable work-item ids in the callback/result.
+        status = "escalated"
+        output = {
+            "work_item_ids": [str(item_id) for item_id in escalation_ids],
+            "result": output,
+        }
     if status == "succeeded" and memory_proposals:
         # Post-hook memory write: screened (poisoning defense), size-capped,
         # and pending owner approval when governance requires it

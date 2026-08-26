@@ -6,6 +6,8 @@ Sleeper Service is an open-source, self-hosted platform for running fleets of na
 
 Every agent is a function: it takes an input, does analysis (optionally using tools), and returns output in a shape you define. Your orchestrator (n8n, Airflow, Temporal, cron, plain code) treats it like any other workflow node.
 
+Sleeper Service is the agent-execution layer of [CI Everywhere](https://zero2data.substack.com/p/ci-everywhere): decompose back-office processes into small, observable and testable tasks, then use AI where the logic is teachable but not concrete enough for traditional automation. Agents do not need to impersonate whole employees; they take the specific decisions inside workflows that benefit from judgment.
+
 ## Why
 
 - **Repeatable, not autonomous.** Agents are built for processes that run over and over, where AI makes one decision or takes one action per invocation.
@@ -20,9 +22,10 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 |---|---|
 | **Tenant** | Top-level org. Holds the base system prompt every agent inherits. Multi-tenant out of the box. |
 | **Team** | Owns agents. Users join teams as owner / editor / viewer; every team keeps at least one owner. |
-| **Agent** | A named, single-purpose worker: prompt + model + tool and data store grants + output schema + options (delegation, memory, learning, spending limit). |
+| **Agent** | A named, single-purpose worker: prompt + model + tool and data store grants + output schema + options (delegation, memory, learning, human escalation, spending limit). |
 | **Version** | Immutable snapshot of an agent's configuration. Jobs pin any version or alias (`dev`/`staging`/`prod`); promotion/rollback just repoints `current` or the alias. |
 | **Job** | One invocation of one agent version. Async by default with HMAC-signed webhook callbacks; `?sync=true` for fast calls. Full event audit trail per job. |
+| **Work item** | A durable request for human attention, assigned to the agent's team. Pending memory changes and agent-raised business questions share one inbox while retaining their own approval rules and audit history. |
 | **Data store** | A registered storage backend (S3/MinIO, Azure Blob, GCS, Box, local) an agent is granted access to — path-prefix-scoped, read-only by default. Box grants pin a folder ID: credentials are downscoped to that subtree and paths resolve by name from it, so nothing outside is addressable. |
 | **Event source** | Webhook ingress that turns external events into jobs, with per-source secrets and dedup. Scheduling and polling stay in your orchestrator — Sleeper Service just receives. |
 | **Hooks** | Pre-hooks (prompt-injection screening, default on) and post-hooks (output schema validation, opt-in PII redaction) around every job. |
@@ -39,15 +42,17 @@ Every agent is a function: it takes an input, does analysis (optionally using to
 
 **Safety & spend** — Prompt-injection screening over all untrusted content (payload, files, links) with `rejected` status and audit events: on by default, tenant-tunable (add custom patterns, suppress a built-in rule that false-positives on your domain), disable-able per tenant or agent; memory writes and feedback comments pass the same screen (poisoning defense). An opt-in second tier (`hooks.injection_classifier_model`) asks a cheap model for a structured verdict on anything the heuristics pass — fail-open, hard-timeboxed, and not billed to job spend. Monthly spending limits per agent: pre-flight refusal with auditable `budget_exceeded` rows; per-job token/cost accounting via genai-prices. Provider credentials encrypted at rest (Fernet).
 
-**Events & alerting** — Webhook event sources with `{{path}}` payload templates and `dedup_key_path` dedup. Apprise notification channels per team (Slack/email/SMS/100+ services) subscribed to `dead_letter`, `budget`, `eval_regression` — deduplicated per agent per window. Channel URLs are a server-side outbound path like callbacks, so schemes are limited to a vetted set (`NOTIF_EXTRA_SCHEMES` widens it, `notif_scheme_allowlist` narrows it per tenant) and any host in one is re-resolved and rejected if it is not public.
+**Events & notifications** — Webhook event sources with `{{path}}` payload templates and `dedup_key_path` dedup. Apprise notification channels per team (Slack/email/SMS/100+ services) subscribe to operational alerts such as `dead_letter`, `budget`, and `eval_regression`, plus `human_attention` when an inbox item needs action. Repeated operational alerts are deduplicated per agent per window; every distinct work item is delivered once. Channel URLs are a server-side outbound path like callbacks, so schemes are limited to a vetted set (`NOTIF_EXTRA_SCHEMES` widens it, `notif_scheme_allowlist` narrows it per tenant) and any host in one is re-resolved and rejected if it is not public.
 
 **Delegation** — Built-in `list_agents` (the rolodex: names, descriptions, I/O schemas) and `call_agent` tools, gated per agent (none/team/tenant). Child jobs carry `parent_job_id`; `GET /v1/jobs/{id}/tree` returns the audited tree. Depth caps and cycle detection.
 
 **Memory & learning** — Opt-in memory document injected after the agent prompt; the agent proposes edits via an `update_memory` tool, applied post-run (screened, size-capped). Learning adds signed single-job feedback URLs; votes fold deterministically into memory (a − comment becomes a corrective rule) — or, opt-in per tenant, an LLM fold distills feedback into generalizable lessons and condenses over-cap memory instead of dropping oldest-first, always falling back to the deterministic path. Governance: enabling any of this requires the team owner, and `memory_approval` mode queues every memory change for owner approval — with the gating eval run's pass rate shown alongside — plus one-click rollback.
 
+**Human escalation** — Opt an agent into the built-in `escalate_to_human` tool and it can stop autonomous work with a first-class `escalated` result, recording the reason, severity, requested action, job and agent as a durable work item. The owning team is notified through its `human_attention` channels. Editors or owners resolve business escalations; memory changes remain owner-only. Resolution is audited back onto the source job, and the job callback carries the work-item ID so the external orchestrator can route the human branch.
+
 **Evals** — Cases are saved inputs + checks (`equals`, `contains`, `in_range`, `matches_regex`, `is_valid`); grading is deterministic and free. For logic beyond assertions, a `code` check runs an editor-supplied `grade(output)` function in a hard-capped sandbox — in-process [Pydantic Monty](https://github.com/pydantic/monty) by default (wall-clock/memory/recursion limits, no imports, filesystem, or network), or a hardened throwaway Docker container per call (real CPython with packages, no network, capabilities dropped) where the operator has enabled the `docker` runner backend. Runs execute through the normal pipeline (hooks and tracing apply) against any version, excluded from production spend. Pending memory versions auto-trigger a gated run; regressions alert the team.
 
-**Admin UI** — Ships in the api container (server-rendered, no node toolchain): per-tenant dashboard with live-agent count, success rate, spend, and jobs/tokens charts; teams → agents with option badges and budget meters; version promotion and rollback; the memory approval queue with gating-eval pass rates against baseline; eval run history; job detail with payload, output, audit events, the delegation tree, and one-click dead-letter retry. Session login with the same users and RBAC as the API; optional per-tenant OIDC SSO (Keycloak/Authentik/any discovery-speaking IdP) sits alongside — configure it at `PUT /v1/tenants/{id}/oidc` and a "Continue with … SSO" button appears on the login page. Local auth always keeps working, and SSO users must already exist (no just-in-time provisioning).
+**Admin UI** — Ships in the api container (server-rendered, no node toolchain): per-tenant dashboard with live-agent count, success rate, spend, and jobs/tokens charts; teams → agents with option badges and budget meters; a unified human-work inbox for memory approvals and agent escalations; version promotion and rollback; gating-eval pass rates against baseline; eval run history; job detail with payload, output, audit events, the delegation tree, and one-click dead-letter retry. Session login with the same users and RBAC as the API; optional per-tenant OIDC SSO (Keycloak/Authentik/any discovery-speaking IdP) sits alongside — configure it at `PUT /v1/tenants/{id}/oidc` and a "Continue with … SSO" button appears on the login page. Local auth always keeps working, and SSO users must already exist (no just-in-time provisioning).
 
 **Observability** — Langfuse (self-hosted, opt-in compose profile) ingests every agent run via OTLP — prompts, responses, tokens, tool calls. The seam is plain OpenTelemetry, so any OTLP backend works.
 
@@ -230,6 +235,7 @@ Other things people build with this pattern: accounts-receivable agents matching
 - [x] Admin UI: dashboard, promotion, memory approvals, job trees *(Phase 4)*
 - [x] OIDC login, version aliases, sandboxed code runners (in-process + docker) *(Phase 4)*
 - [x] Opt-in LLM tiers: injection classifier, memory fold & compaction
+- [x] Unified human-work inbox, agent escalation, and human-attention notifications
 - [ ] Hosted sandbox backends (E2B / Modal) — drop-in registry extension, if ever needed
 
 See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for the full plan, data model, and decision log.

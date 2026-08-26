@@ -24,6 +24,7 @@
     {% if agent.options.get('memory') %}<span class="badge opt">memory</span>{% endif %}
     {% if agent.options.get('learning') %}<span class="badge opt">learning</span>{% endif %}
     {% if agent.options.get('memory_approval') %}<span class="badge opt">memory approval</span>{% endif %}
+    {% if agent.options.get('human_escalation') %}<span class="badge opt">human escalation</span>{% endif %}
   </div>
   {% if spending_limit %}
   <p class="mono" style="margin-bottom:4px">month spend ${{ '%.4f'|format(spend) }} of ${{ '%.2f'|format(spending_limit) }}</p>

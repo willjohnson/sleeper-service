@@ -65,6 +65,7 @@ from sleeper_service.db.models import (
     Tenant,
     User,
     VersionAlias,
+    WorkItem,
 )
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
@@ -81,6 +82,11 @@ from sleeper_service.runtime.outbound import (
 )
 from sleeper_service.runtime.providers import SUPPORTED_PROVIDERS
 from sleeper_service.runtime.retention import file_expiry
+from sleeper_service.runtime.work_items import (
+    WorkItemConflict,
+    ensure_memory_approval_item,
+    resolve_work_item,
+)
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -426,7 +432,11 @@ async def _clean_agent_fields(
 
 
 def _options_from_form(
-    delegation: str, memory: bool, learning: bool, memory_approval: bool
+    delegation: str,
+    memory: bool,
+    learning: bool,
+    memory_approval: bool,
+    human_escalation: bool,
 ) -> dict:
     options: dict = {}
     if delegation in ("team", "tenant"):
@@ -435,6 +445,7 @@ def _options_from_form(
         ("memory", memory),
         ("learning", learning),
         ("memory_approval", memory_approval),
+        ("human_escalation", human_escalation),
     ):
         if value:
             options[key] = True
@@ -845,6 +856,75 @@ async def agents_page(
     )
 
 
+@router.get("/t/{tenant_id}/inbox", response_class=HTMLResponse)
+async def inbox_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    state: str = "open",
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+    if state not in ("open", "closed", "all"):
+        state = "open"
+    team_ids = await visible_team_ids(db, p, tenant.id)
+    stmt = select(WorkItem).where(WorkItem.tenant_id == tenant.id, WorkItem.team_id.in_(team_ids))
+    if state == "open":
+        stmt = stmt.where(WorkItem.status == "open")
+    elif state == "closed":
+        stmt = stmt.where(WorkItem.status.in_(("resolved", "dismissed")))
+    items = list(await db.scalars(stmt.order_by(WorkItem.created_at.desc()).limit(200)))
+
+    views = []
+    for item in items:
+        agent = await db.get(Agent, item.agent_id)
+        team = await db.get(Team, item.team_id)
+        role = await _team_role(db, p, item.team_id)
+        memory_version = (
+            await db.get(MemoryVersion, item.memory_version_id) if item.memory_version_id else None
+        )
+        gate = None
+        if memory_version is not None:
+            gate = await db.scalar(
+                select(EvalRun)
+                .where(EvalRun.memory_version_id == memory_version.id)
+                .order_by(EvalRun.created_at.desc())
+                .limit(1)
+            )
+        resolver = (
+            await db.get(User, item.resolved_by_user_id) if item.resolved_by_user_id else None
+        )
+        views.append(
+            {
+                "item": item,
+                "agent": agent,
+                "team": team,
+                "memory_version": memory_version,
+                "eval_run": gate,
+                "resolver": resolver,
+                "can_act": role == Role.OWNER
+                if item.kind == "memory_approval"
+                else role in (Role.OWNER, Role.EDITOR),
+            }
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "inbox.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="inbox",
+            items=views,
+            state=state,
+        ),
+    )
+
+
 async def _tenant_users(db: AsyncSession, tenant_id: uuid.UUID, me: User) -> list[User]:
     """Users who already belong to a team in this tenant.
 
@@ -1241,6 +1321,7 @@ async def ui_create_agent(
     memory: bool = Form(False),
     learning: bool = Form(False),
     memory_approval: bool = Form(False),
+    human_escalation: bool = Form(False),
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
 ):
@@ -1263,6 +1344,7 @@ async def ui_create_agent(
         "memory": memory,
         "learning": learning,
         "memory_approval": memory_approval,
+        "human_escalation": human_escalation,
     }
 
     async def fail(message: str):
@@ -1284,7 +1366,7 @@ async def ui_create_agent(
     if role not in (Role.OWNER, Role.EDITOR):
         return await fail(f"You need the editor role on {team.name} to create an agent there.")
 
-    options = _options_from_form(delegation, memory, learning, memory_approval)
+    options = _options_from_form(delegation, memory, learning, memory_approval, human_escalation)
     if _governed_change({}, options) and role != Role.OWNER:
         return await fail(
             "Memory, learning and approval are owner-managed — ask an owner of "
@@ -1595,6 +1677,7 @@ async def ui_update_agent(
     memory: bool = Form(False),
     learning: bool = Form(False),
     memory_approval: bool = Form(False),
+    human_escalation: bool = Form(False),
     db: AsyncSession = Depends(get_db),
     p: UserPrincipal = Depends(ui_user),
 ):
@@ -1609,6 +1692,7 @@ async def ui_update_agent(
         "memory": memory,
         "learning": learning,
         "memory_approval": memory_approval,
+        "human_escalation": human_escalation,
     }
 
     async def fail(message: str):
@@ -1620,7 +1704,7 @@ async def ui_update_agent(
     if redirect is not None:
         return redirect
 
-    options = _options_from_form(delegation, memory, learning, memory_approval)
+    options = _options_from_form(delegation, memory, learning, memory_approval, human_escalation)
     if _governed_change(agent.options or {}, options) and role != Role.OWNER:
         return await fail("Memory, learning and approval are owner-managed.")
 
@@ -3988,7 +4072,14 @@ async def ui_revoke_user_keys(
 # encrypted at rest and never returned — the list shows what a channel is
 # subscribed to, not where it points.
 
-NOTIF_EVENTS = ("dead_letter", "budget", "error_rate", "eval_regression", "callback_failed")
+NOTIF_EVENTS = (
+    "dead_letter",
+    "budget",
+    "error_rate",
+    "eval_regression",
+    "callback_failed",
+    "human_attention",
+)
 
 
 async def _team_channels(db: AsyncSession, team_id: uuid.UUID) -> list[NotifChannel]:
@@ -4616,9 +4707,59 @@ async def ui_memory_action(
             )
         )
         if version is not None and version.status == "pending":
-            version.status = "active" if action == "approve" else "rejected"
+            item = await ensure_memory_approval_item(db, agent, version)
+            await resolve_work_item(
+                db,
+                item,
+                resolution="approved" if action == "approve" else "rejected",
+                response=None,
+                resolved_by_user_id=p.user.id,
+            )
             await db.commit()
     return RedirectResponse(f"/ui/agents/{agent_id}", status_code=303)
+
+
+@router.post("/work-items/{item_id}/resolve")
+async def ui_resolve_work_item(
+    request: Request,
+    item_id: uuid.UUID,
+    resolution: str = Form(""),
+    response: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    item = await db.get(WorkItem, item_id)
+    if item is None:
+        return RedirectResponse("/ui", status_code=303)
+    role = await _team_role(db, p, item.team_id)
+    can_act = (
+        role == Role.OWNER
+        if item.kind == "memory_approval"
+        else role
+        in (
+            Role.OWNER,
+            Role.EDITOR,
+        )
+    )
+    target = f"/ui/t/{item.tenant_id}/inbox"
+    if not can_act:
+        return RedirectResponse(target, status_code=303)
+    item = await db.scalar(select(WorkItem).where(WorkItem.id == item_id).with_for_update())
+    if item is None:
+        return RedirectResponse(target, status_code=303)
+    try:
+        await resolve_work_item(
+            db,
+            item,
+            resolution=resolution,
+            response=response,
+            resolved_by_user_id=p.user.id,
+        )
+        await db.commit()
+    except WorkItemConflict as e:
+        await db.rollback()
+        _flash(request, str(e))
+    return RedirectResponse(target, status_code=303)
 
 
 @router.post("/agents/{agent_id}/memory/rollback")

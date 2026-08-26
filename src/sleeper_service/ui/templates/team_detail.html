@@ -109,7 +109,7 @@
     {% endfor %}
   </table>
   {% else %}
-  <div class="muted">No channels — failures land in the job trail and nowhere else.</div>
+  <div class="muted">No channels — failures stay in the job trail and human work stays in the inbox, but neither is pushed elsewhere.</div>
   {% endif %}
 
   <form method="post" action="/ui/teams/{{ team.id }}/notif-channels" class="form-grid">

@@ -19,6 +19,11 @@ from sleeper_service.auth.rbac import require_role
 from sleeper_service.constants import Role
 from sleeper_service.db.models import EvalRun, MemoryVersion
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime.work_items import (
+    WorkItemConflict,
+    ensure_memory_approval_item,
+    resolve_work_item,
+)
 
 router = APIRouter(prefix="/agents/{agent_id}/memory", tags=["memory-governance"])
 
@@ -82,7 +87,17 @@ async def approve_memory(
     version = await _get_version(db, agent_id, version_no)
     if version.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Version is {version.status}")
-    version.status = "active"
+    item = await ensure_memory_approval_item(db, agent, version)
+    try:
+        await resolve_work_item(
+            db,
+            item,
+            resolution="approved",
+            response=None,
+            resolved_by_user_id=principal.user.id,
+        )
+    except WorkItemConflict as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
     await db.commit()
     await db.refresh(version)
     return version
@@ -100,7 +115,17 @@ async def reject_memory(
     version = await _get_version(db, agent_id, version_no)
     if version.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Version is {version.status}")
-    version.status = "rejected"
+    item = await ensure_memory_approval_item(db, agent, version)
+    try:
+        await resolve_work_item(
+            db,
+            item,
+            resolution="rejected",
+            response=None,
+            resolved_by_user_id=principal.user.id,
+        )
+    except WorkItemConflict as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
     await db.commit()
     await db.refresh(version)
     return version

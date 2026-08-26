@@ -77,6 +77,7 @@ pre { padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .badge.running { background: var(--info); }
 .badge.queued { background: var(--idle); }
 .badge.budget_exceeded { background: #9333ea; }
+.badge.escalated { background: #c2410c; }
 .badge.active { background: var(--ok); }
 .badge.pending { background: var(--warn); }
 .badge.completed { background: var(--ok); }

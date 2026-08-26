@@ -36,9 +36,14 @@
       {% endfor %}
     </select>
 
+    <label>Workflow options</label>
+    <div class="inline-fields">
+      <label class="check"><input type="checkbox" name="human_escalation" value="1" {% if form.human_escalation %}checked{% endif %}> may escalate to a human</label>
+    </div>
+
     {% set governable = creatable_teams | selectattr('can_govern') | list %}
     {% if governable %}
-    <label>Options</label>
+    <label>Memory options</label>
     <div class="inline-fields">
       <label class="check"><input type="checkbox" name="memory" value="1" {% if form.memory %}checked{% endif %}> memory</label>
       <label class="check"><input type="checkbox" name="learning" value="1" {% if form.learning %}checked{% endif %}> learning</label>

@@ -22,7 +22,14 @@ from sleeper_service.runtime.outbound import (
 
 router = APIRouter(prefix="/teams/{team_id}/notif-channels", tags=["notif-channels"])
 
-VALID_EVENTS = {"dead_letter", "budget", "error_rate", "eval_regression", "callback_failed"}
+VALID_EVENTS = {
+    "dead_letter",
+    "budget",
+    "error_rate",
+    "eval_regression",
+    "callback_failed",
+    "human_attention",
+}
 
 
 async def _gate(team_id: uuid.UUID, db: AsyncSession, principal: UserPrincipal) -> Team:
