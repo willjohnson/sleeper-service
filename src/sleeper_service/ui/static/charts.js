@@ -3,7 +3,7 @@
 // in the scope the server aggregated over.
 const STATUS_COLORS = {succeeded: "#16a34a", failed: "#dc2626", dead_letter: "#991b1b",
   rejected: "#d97706", timeout: "#f59e0b", iteration_limit: "#f59e0b",
-  budget_exceeded: "#9333ea", running: "#2563eb", queued: "#6b7280"};
+  budget_exceeded: "#9333ea", escalated: "#c2410c", running: "#2563eb", queued: "#6b7280"};
 
 function jobsPerDayChart(canvasId, data) {
   return new Chart(document.getElementById(canvasId), {

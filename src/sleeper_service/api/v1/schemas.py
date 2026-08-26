@@ -469,6 +469,32 @@ class AgentMemoryOut(BaseModel):
     versions: list[MemoryVersionOut]
 
 
+# --- Human work inbox ---
+
+
+class WorkItemOut(OrmModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    team_id: uuid.UUID
+    agent_id: uuid.UUID
+    job_id: uuid.UUID | None
+    memory_version_id: uuid.UUID | None
+    kind: str
+    status: str
+    title: str
+    details: dict
+    resolution: str | None
+    response: dict | None
+    resolved_by_user_id: uuid.UUID | None
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+class WorkItemResolve(BaseModel):
+    resolution: str = Field(min_length=1, max_length=40)
+    response: str | None = Field(default=None, max_length=10_000)
+
+
 # --- Eval harness ---
 
 

@@ -309,6 +309,43 @@ class MemoryVersion(UUIDPKMixin, Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class WorkItem(UUIDPKMixin, Base):
+    """A piece of human attention produced by an agent workflow.
+
+    The domain object remains authoritative (for example, a pending
+    ``MemoryVersion``); this row is the shared inbox projection that adds
+    assignment, lifecycle, resolution, and notification semantics.
+    """
+
+    __tablename__ = "work_items"
+    __table_args__ = (
+        CheckConstraint("kind IN ('memory_approval', 'human_escalation')", name="kind_valid"),
+        CheckConstraint("status IN ('open', 'resolved', 'dismissed')", name="status_valid"),
+        UniqueConstraint("memory_version_id"),
+        Index("ix_work_items_tenant_status_created", "tenant_id", "status", "created_at"),
+        Index("ix_work_items_team_status", "team_id", "status"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    memory_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_versions.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str]
+    status: Mapped[str] = mapped_column(default="open", server_default="open")
+    title: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    resolution: Mapped[str | None]
+    response: Mapped[dict | None] = mapped_column(JSONB)
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    resolved_at: Mapped[datetime | None]
+
+
 class Feedback(UUIDPKMixin, CreatedAtMixin, Base):
     __tablename__ = "feedback"
     __table_args__ = (CheckConstraint("vote IN (-1, 1)", name="vote_valid"),)

@@ -134,6 +134,12 @@ async def write_memory(
             status="pending" if pending else "active",
         )
         db.add(version)
+        await db.flush()
+        work_item = None
+        if pending and agent is not None:
+            from sleeper_service.runtime.work_items import add_memory_approval_item
+
+            work_item = add_memory_approval_item(db, agent, version)
         if source_job_id is not None:
             db.add(
                 JobEvent(
@@ -147,6 +153,9 @@ async def write_memory(
 
     if pending:
         from sleeper_service.runtime.evals import maybe_trigger_memory_eval
+        from sleeper_service.runtime.work_items import notify_created
 
         await maybe_trigger_memory_eval(agent_id, version_id)
+        if work_item is not None and agent is not None:
+            await notify_created(work_item, agent.name)
     return version_id

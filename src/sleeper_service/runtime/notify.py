@@ -1,8 +1,9 @@
-"""Team alerting via Apprise (BUILD_PLAN § Notifications & alerting).
+"""Team notifications via Apprise (BUILD_PLAN § Notifications & alerting).
 
-Channels subscribe to event types (dead_letter | budget | error_rate).
-Alerts dedupe per agent+event in a 15-minute window so a broken agent
-doesn't page 500 times.
+Channels subscribe to operational alerts and human-attention events.
+Operational alerts dedupe per agent+event in a 15-minute window so a broken
+agent doesn't page 500 times; work items supply their own unique dedup key so
+each request for human attention is delivered once.
 """
 
 import logging
@@ -26,11 +27,18 @@ logger = logging.getLogger(__name__)
 DEDUP_WINDOW_S = 900
 
 
-async def notify(agent_id: uuid.UUID, event_type: str, title: str, body: str) -> None:
+async def notify(
+    agent_id: uuid.UUID,
+    event_type: str,
+    title: str,
+    body: str,
+    *,
+    dedup_key: str | None = None,
+) -> None:
     """Alert the owning team's channels subscribed to event_type."""
     redis = get_redis()
-    dedup_key = f"alert:{agent_id}:{event_type}"
-    if not await redis.set(dedup_key, 1, nx=True, ex=DEDUP_WINDOW_S):
+    redis_key = f"alert:{dedup_key}" if dedup_key else f"alert:{agent_id}:{event_type}"
+    if not await redis.set(redis_key, 1, nx=True, ex=DEDUP_WINDOW_S):
         return  # already alerted inside the window
 
     from sqlalchemy import select

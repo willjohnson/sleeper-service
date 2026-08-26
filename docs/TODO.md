@@ -453,3 +453,31 @@ migrations against *existing data*, not DDL on an empty database.
   the Dockerfile legacy-builder-compatible).
 - `scripts/screenshots.py` recaptures the README screenshots against a
   running stack (Playwright chromium is a dev dep).
+
+## 2026-08-26 06:42 EDT — Human work inbox and escalation
+
+### Architecture
+
+- [x] Inspect existing memory approval, notification, job, API, and UI flows.
+- [x] Define unified work-item states, permissions, and escalation semantics.
+
+### Implementation
+
+- [x] Add work-item persistence and migration.
+- [x] Create work items for pending memory versions and keep approval actions synchronized.
+- [x] Add first-class agent-to-human escalation with team notifications.
+- [x] Add unified work-item API and admin inbox UI.
+
+### Verification and documentation
+
+- [x] Add or update API, runtime, migration, and UI tests.
+- [x] Update README with the human inbox/escalation feature and CI Everywhere link.
+- [x] Run focused and full verification suites.
+
+## 2026-08-26 07:30 EDT — Release 0.1.3
+
+### Release
+
+- [x] Bump package metadata to version 0.1.3.
+- [x] Verify the release version and existing feature test coverage.
+- [x] Commit the release and create the v0.1.3 tag.

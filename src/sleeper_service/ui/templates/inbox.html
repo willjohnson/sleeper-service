@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Inbox · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}Human work inbox{% endblock %}
+{% block actions %}
+<div class="actions">
+  <a class="btn {{ 'subtle' if state != 'open' }}" href="/ui/t/{{ tenant.id }}/inbox?state=open">Open</a>
+  <a class="btn {{ 'subtle' if state != 'closed' }}" href="/ui/t/{{ tenant.id }}/inbox?state=closed">Closed</a>
+  <a class="btn {{ 'subtle' if state != 'all' }}" href="/ui/t/{{ tenant.id }}/inbox?state=all">All</a>
+</div>
+{% endblock %}
+{% block content %}
+<div class="panel">
+  <p class="muted" style="margin-top:0">
+    Memory changes and agent escalations arrive here as one queue. The underlying
+    job, agent, memory version, and human decision remain linked in the audit trail.
+  </p>
+  {% if items %}
+    {% for row in items %}
+    {% set item = row.item %}
+    <div class="subpanel" style="display:block">
+      <div class="with-action">
+        <div>
+          <span class="badge {{ 'pending' if item.status == 'open' else 'completed' }}">{{ item.status }}</span>
+          <span class="badge {{ 'opt' if item.kind == 'memory_approval' else 'escalated' }}">{{ item.kind|replace('_', ' ') }}</span>
+          <strong style="margin-left:6px">{{ item.title }}</strong>
+        </div>
+        <span class="muted">{{ item.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+      </div>
+      <p class="muted">
+        {% if row.team %}{{ row.team.name }} · {% endif %}
+        {% if row.agent %}<a href="/ui/agents/{{ row.agent.id }}">{{ row.agent.name }}</a>{% endif %}
+        {% if item.job_id %} · <a class="mono" href="/ui/jobs/{{ item.job_id }}">job {{ item.job_id|string|truncate(8, true, '') }}</a>{% endif %}
+      </p>
+
+      {% if item.kind == 'memory_approval' and row.memory_version %}
+        <pre style="white-space:pre-wrap">{{ row.memory_version.content }}</pre>
+        {% if row.eval_run and row.eval_run.pass_rate is not none %}
+          <p>Gating eval: <a href="/ui/eval-runs/{{ row.eval_run.id }}"><strong>{{ '%.0f%%'|format(row.eval_run.pass_rate * 100) }}</strong></a></p>
+        {% elif row.eval_run %}<p>Gating eval: <span class="badge running">{{ row.eval_run.status }}</span></p>
+        {% else %}<p class="muted">No eval suite.</p>{% endif %}
+      {% elif item.kind == 'human_escalation' %}
+        <p><strong>Why:</strong> {{ item.details.get('reason', '') }}</p>
+        <p><strong>Requested action:</strong> {{ item.details.get('requested_action', '') }}</p>
+        <p><strong>Severity:</strong> <span class="badge {{ 'failed' if item.details.get('severity') == 'high' else 'pending' }}">{{ item.details.get('severity', 'medium') }}</span></p>
+      {% endif %}
+
+      {% if item.status == 'open' and row.can_act %}
+        {% if item.kind == 'memory_approval' %}
+        <div class="actions">
+          <form method="post" action="/ui/work-items/{{ item.id }}/resolve">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="resolution" value="approved">
+            <button class="subtle">Approve</button>
+          </form>
+          <form method="post" action="/ui/work-items/{{ item.id }}/resolve">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="resolution" value="rejected">
+            <button class="subtle danger">Reject</button>
+          </form>
+        </div>
+        {% else %}
+        <form method="post" action="/ui/work-items/{{ item.id }}/resolve" class="form-grid" style="margin-top:10px">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <label for="response-{{ item.id }}">Response</label>
+          <textarea id="response-{{ item.id }}" name="response" rows="3" placeholder="Decision, answer, or handoff notes"></textarea>
+          <div class="form-actions actions">
+            <button name="resolution" value="resolved">Resolve</button>
+            <button class="subtle" name="resolution" value="dismissed">Dismiss</button>
+          </div>
+        </form>
+        {% endif %}
+      {% elif item.status == 'open' %}
+        <p class="muted">You can view this item, but your team role cannot resolve it.</p>
+      {% else %}
+        <p class="muted">
+          {{ item.resolution }}{% if row.resolver %} by {{ row.resolver.email }}{% endif %}
+          {% if item.response %} — {{ item.response.get('text', '') }}{% endif %}
+        </p>
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">No {{ state }} work items.</div>
+  {% endif %}
+</div>
+{% endblock %}

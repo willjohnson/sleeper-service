@@ -31,7 +31,16 @@
       {% endfor %}
     </select>
 
-    <label>Options</label>
+    <label>Workflow options</label>
+    <div class="inline-fields">
+      <label class="check">
+        <input type="checkbox" name="human_escalation" value="1"
+               {% if form.get('human_escalation', agent.options.get('human_escalation')) %}checked{% endif %}>
+        may escalate to a human
+      </label>
+    </div>
+
+    <label>Memory options</label>
     <div class="inline-fields">
       {% for field, text in [('memory', 'memory'), ('learning', 'learning'), ('memory_approval', 'approval')] %}
       <label class="check">
