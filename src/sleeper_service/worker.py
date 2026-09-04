@@ -143,4 +143,5 @@ class WorkerSettings:
     job_serializer = staticmethod(job_serializer)
     job_deserializer = staticmethod(job_deserializer)
     max_tries = max(get_settings().job_max_tries, get_settings().callback_max_tries)
+    poll_delay = get_settings().worker_poll_delay_s
     job_timeout = 3700  # > max version timeout_s; the runner enforces the real cap

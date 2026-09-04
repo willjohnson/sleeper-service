@@ -1,5 +1,7 @@
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +27,17 @@ class Settings(BaseSettings):
     job_max_tries: int = 4  # arq attempts before dead-letter
     callback_max_tries: int = 5
     sync_job_timeout_s: int = 120  # cap for ?sync=true regardless of version timeout
+
+    # How often the worker asks Redis for queued work. arq has no push wakeup,
+    # so this is both the worst-case delay before an async job is picked up and
+    # the worker's entire idle Redis traffic — one ZRANGEBYSCORE per tick,
+    # about 5.2M commands a month at 0.5s. That is free against a Redis you
+    # host and a real line item against a per-command managed one, so small
+    # deployments can trade pickup latency for cost by raising it. `?sync=true`
+    # never touches the queue, so its latency is unaffected either way.
+    # Deferred work (callback delivery, the hourly retention cron) fires within
+    # one tick of its due time, so keep this well under a minute.
+    worker_poll_delay_s: float = 1.0
 
     # Cap on request bodies. FastAPI buffers the whole body into memory
     # before content-type inspection or auth, so this bounds request memory
@@ -91,6 +104,29 @@ class Settings(BaseSettings):
     langfuse_host: str | None = None  # e.g. http://langfuse-web:3000
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
+
+    @field_validator("database_url")
+    @classmethod
+    def _asyncpg_url(cls, v: str) -> str:
+        """Accept the libpq-shaped URLs managed Postgres providers hand out.
+
+        Render, Neon and RDS all emit `postgresql://...` (or the legacy
+        `postgres://`), frequently carrying libpq's `sslmode` query parameter.
+        This app is async end to end, and SQLAlchemy's asyncpg dialect forwards
+        query arguments untouched to `asyncpg.connect()`, which understands
+        `ssl` but not `sslmode`. Rewriting here covers both the app engine and
+        alembic, since each reads this one setting.
+        """
+        parts = urlsplit(v)
+        if parts.scheme not in {"postgres", "postgresql", "postgresql+asyncpg"}:
+            return v
+        query = [
+            ("ssl", value) if key == "sslmode" else (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        ]
+        return urlunsplit(
+            ("postgresql+asyncpg", parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )
 
 
 @lru_cache

@@ -1,0 +1,118 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploys the four services sleeper-service needs: the API (web), the arq
+# worker, Postgres and Key Value (Redis). Object storage is NOT declared here:
+# Render has no S3-compatible service, so payload files live in Cloudflare R2
+# (or any S3 endpoint) and its credentials arrive through the env var group
+# below. See docs/DEPLOY.md.
+#
+# Every service pins the same region on purpose — Render's private networking,
+# and therefore the internal database and Key Value URLs, only spans one region.
+
+databases:
+  - name: sleeper-db
+    plan: 0.1c-256mb
+    region: oregon
+    postgresMajorVersion: "17"
+    databaseName: sleeper
+    user: sleeper
+    # Reached only over Render's private network by api and worker.
+    ipAllowList: []
+
+envVarGroups:
+  # Shared so api and worker agree on every value. SECRET_KEY especially:
+  # provider credentials are Fernet-encrypted with a key derived from it, and
+  # the api writes rows the worker must decrypt. Two independently generated
+  # values would encrypt fine and fail to decrypt.
+  - name: sleeper-shared
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+
+      # Cloudflare R2 (or any S3 endpoint) for job payload files.
+      # ENDPOINT looks like https://<account-id>.r2.cloudflarestorage.com
+      - key: MINIO_ENDPOINT
+        sync: false
+      - key: MINIO_ACCESS_KEY
+        sync: false
+      - key: MINIO_SECRET_KEY
+        sync: false
+      - key: MINIO_BUCKET
+        value: sleeper-files
+      # R2 has no regions but botocore demands one; "auto" is R2's own answer.
+      - key: AWS_DEFAULT_REGION
+        value: auto
+
+      # Set to the api's https:// URL after the first deploy. It is baked into
+      # signed feedback links, which the worker generates — so the worker needs
+      # it too, and RENDER_EXTERNAL_URL is only injected into web services.
+      - key: PUBLIC_BASE_URL
+        sync: false
+
+      # Render terminates TLS at exactly one proxy hop in front of the app.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
+      - key: SESSION_HTTPS_ONLY
+        value: "true"
+
+      # Monty only. The "docker" backend needs a mounted Docker socket, which
+      # is root-equivalent on the host and unavailable on Render regardless.
+      - key: RUNNER_BACKENDS
+        value: monty
+
+services:
+  - name: sleeper-api
+    type: web
+    runtime: docker
+    plan: 0.5c-512mb
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # /healthz is a readiness check: it round-trips Postgres and Redis, so a
+    # deploy is only promoted once both backing services actually answer.
+    healthCheckPath: /healthz
+    # Runs once per deploy, before any traffic shifts. Declared on the api
+    # alone so two services never race the same migration.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - fromGroup: sleeper-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sleeper-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sleeper-kv
+          property: connectionString
+
+  - name: sleeper-worker
+    type: worker
+    runtime: docker
+    plan: 0.5c-512mb
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: arq sleeper_service.worker.WorkerSettings
+    envVars:
+      - fromGroup: sleeper-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sleeper-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sleeper-kv
+          property: connectionString
+
+  - name: sleeper-kv
+    type: keyvalue
+    plan: 256mb
+    region: oregon
+    # This is the job queue, not a cache. Under memory pressure an eviction
+    # policy would silently drop queued jobs — arq would never run them and
+    # nothing would surface as a failure. Refuse writes instead.
+    maxmemoryPolicy: noeviction
+    # Empty list = no external connections; api and worker reach it privately.
+    ipAllowList: []
