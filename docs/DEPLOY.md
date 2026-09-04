@@ -5,15 +5,19 @@ that declares the whole stack: the API, the arq worker, Postgres, and Key Value
 (Render's managed Redis). Object storage is the one piece Render does not
 offer, so payload files go to Cloudflare R2.
 
-Roughly **$30/month**:
+Roughly **$31.50/month**:
 
 | Service | Plan | Cost |
 |---|---|---|
-| `sleeper-api` (web) | `0.5c-512mb` | $7 |
-| `sleeper-worker` (background worker) | `0.5c-512mb` | $7 |
-| `sleeper-db` (Postgres 17) | `0.1c-256mb` | $6 |
-| `sleeper-kv` (Key Value) | `256mb` | $10 |
-| Cloudflare R2 | 10 GB free tier | $0 |
+| `sleeper-api` (web) | `0.5c-512mb` | $7.00 |
+| `sleeper-worker` (background worker) | `0.5c-512mb` | $7.00 |
+| `sleeper-db` (Postgres 17) | `0.1c-256mb` + 5GB disk | $7.50 |
+| `sleeper-kv` (Key Value) | `256mb` | $10.00 |
+| Cloudflare R2 | 10 GB free tier | $0.00 |
+
+Database storage is billed separately from database compute, at $0.30 per
+provisioned GB — so the `diskSizeGB` in the blueprint is a real line item, and
+one that can only ever be raised.
 
 Stay on an individual (free) workspace — per-service billing is identical, and
 the $25/month Pro plan only adds team seats.

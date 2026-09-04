@@ -16,6 +16,13 @@ databases:
     postgresMajorVersion: "17"
     databaseName: sleeper
     user: sleeper
+    # Storage is billed per provisioned GB and Render defaults to 15. Payload
+    # files live in object storage, so Postgres holds only rows — jobs, events,
+    # versions, memory documents — which retention prunes on a TTL. Sized down
+    # accordingly, but not to the 1GB minimum: a database that fills its disk
+    # is suspended, and storage only ever grows, in 5GB steps, with a six-hour
+    # wait between increases.
+    diskSizeGB: 5
     # Reached only over Render's private network by api and worker.
     ipAllowList: []
 
