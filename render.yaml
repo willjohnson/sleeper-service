@@ -33,28 +33,17 @@ envVarGroups:
   # values would encrypt fine and fail to decrypt.
   - name: sleeper-shared
     envVars:
+      # Generated once by Render and shared, so the api encrypts provider
+      # credentials with the key the worker decrypts them with. `generateValue`
+      # is valid in a group; `sync: false` is not — see the services below.
       - key: SECRET_KEY
         generateValue: true
 
-      # Cloudflare R2 (or any S3 endpoint) for job payload files.
-      # ENDPOINT looks like https://<account-id>.r2.cloudflarestorage.com
-      - key: MINIO_ENDPOINT
-        sync: false
-      - key: MINIO_ACCESS_KEY
-        sync: false
-      - key: MINIO_SECRET_KEY
-        sync: false
       - key: MINIO_BUCKET
         value: sleeper-files
       # R2 has no regions but botocore demands one; "auto" is R2's own answer.
       - key: AWS_DEFAULT_REGION
         value: auto
-
-      # Set to the api's https:// URL after the first deploy. It is baked into
-      # signed feedback links, which the worker generates — so the worker needs
-      # it too, and RENDER_EXTERNAL_URL is only injected into web services.
-      - key: PUBLIC_BASE_URL
-        sync: false
 
       # Render terminates TLS at exactly one proxy hop in front of the app.
       - key: TRUSTED_PROXY_HOPS
@@ -83,6 +72,21 @@ services:
     preDeployCommand: alembic upgrade head
     envVars:
       - fromGroup: sleeper-shared
+      # Render ignores `sync: false` inside an environment group — it prompts
+      # only for variables declared on a service — so these are declared on the
+      # api and the worker alike, and both must be given the same values.
+      # ENDPOINT looks like https://<account-id>.r2.cloudflarestorage.com
+      - key: MINIO_ENDPOINT
+        sync: false
+      - key: MINIO_ACCESS_KEY
+        sync: false
+      - key: MINIO_SECRET_KEY
+        sync: false
+      # The api's own https:// URL, set after the first deploy. It is baked
+      # into signed feedback links, which the worker generates — so the worker
+      # needs it too, and RENDER_EXTERNAL_URL only reaches web services.
+      - key: PUBLIC_BASE_URL
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: sleeper-db
@@ -103,6 +107,21 @@ services:
     dockerCommand: arq sleeper_service.worker.WorkerSettings
     envVars:
       - fromGroup: sleeper-shared
+      # Render ignores `sync: false` inside an environment group — it prompts
+      # only for variables declared on a service — so these are declared on the
+      # api and the worker alike, and both must be given the same values.
+      # ENDPOINT looks like https://<account-id>.r2.cloudflarestorage.com
+      - key: MINIO_ENDPOINT
+        sync: false
+      - key: MINIO_ACCESS_KEY
+        sync: false
+      - key: MINIO_SECRET_KEY
+        sync: false
+      # The api's own https:// URL, set after the first deploy. It is baked
+      # into signed feedback links, which the worker generates — so the worker
+      # needs it too, and RENDER_EXTERNAL_URL only reaches web services.
+      - key: PUBLIC_BASE_URL
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: sleeper-db
