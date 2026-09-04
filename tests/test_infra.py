@@ -301,3 +301,67 @@ def test_init_warns_on_placeholder_langfuse_keys(
     monkeypatch.setattr(get_settings(), "langfuse_secret_key", "sk-lf-real-key")
     init(tenant_name="x", email="a@b.c", password="password-123")
     assert "well-known dev keys" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        # Render's fromDatabase connectionString, and the legacy scheme Heroku
+        # -era providers still emit.
+        (
+            "postgresql://sleeper:pw@dpg-abc-a/sleeper",
+            "postgresql+asyncpg://sleeper:pw@dpg-abc-a/sleeper",
+        ),
+        ("postgres://u:p@host:5432/db", "postgresql+asyncpg://u:p@host:5432/db"),
+        # libpq's sslmode is meaningless to asyncpg, which spells it "ssl".
+        (
+            "postgresql://u:p@host/db?sslmode=require",
+            "postgresql+asyncpg://u:p@host/db?ssl=require",
+        ),
+        # Percent-encoded credentials survive; unrelated parameters are kept.
+        (
+            "postgresql://u:p%40x@host/db?sslmode=verify-full&application_name=sleeper",
+            "postgresql+asyncpg://u:p%40x@host/db?ssl=verify-full&application_name=sleeper",
+        ),
+        # Already correct, and therefore untouched.
+        (
+            "postgresql+asyncpg://sleeper:sleeper@localhost:5432/sleeper",
+            "postgresql+asyncpg://sleeper:sleeper@localhost:5432/sleeper",
+        ),
+    ],
+)
+def test_managed_postgres_urls_are_normalized(given: str, expected: str) -> None:
+    """Managed providers hand out libpq URLs; this app is asyncpg end to end.
+
+    Both the request engine and alembic read this one setting, so normalizing
+    on the way in is what lets a Render/Neon/RDS connection string be pasted
+    into DATABASE_URL unedited.
+    """
+    from sleeper_service.config import Settings
+
+    s = Settings(
+        secret_key="test-secret-key-long-enough",
+        minio_access_key="a",
+        minio_secret_key="b",
+        database_url=given,
+    )
+    assert s.database_url == expected
+
+
+def test_worker_poll_delay_is_configurable() -> None:
+    """arq has no push wakeup, so this interval is the worker's whole idle
+    Redis traffic — the one knob that makes a per-command managed Redis
+    affordable. Guards the wiring, which is easy to drop since WorkerSettings
+    reads it once at import."""
+    from sleeper_service.config import Settings
+    from sleeper_service.worker import WorkerSettings
+
+    assert WorkerSettings.poll_delay == get_settings().worker_poll_delay_s
+
+    s = Settings(
+        secret_key="test-secret-key-long-enough",
+        minio_access_key="a",
+        minio_secret_key="b",
+        worker_poll_delay_s=5.0,
+    )
+    assert s.worker_poll_delay_s == 5.0
