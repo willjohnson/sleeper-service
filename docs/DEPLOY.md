@@ -117,10 +117,11 @@ known until after the first deploy, and hardcoding one deployment's URL would
 hand every other person deploying this blueprint a set of feedback links
 pointing at someone else's server.
 
-The environment page is under the **service's own** left nav (Events / Logs /
-Metrics / Shell / **Environment** / Settings) — not the workspace-level nav,
-where Blueprints and Environment Groups live. The most direct route is by URL,
-appending `/env` to the service page:
+The environment page is under the **service's own** left nav — not the
+workspace-level nav, where Blueprints and Environment Groups live. Render's
+promotional cards can also push the lower nav entries out of view. Addressing
+the sub-pages by URL sidesteps both problems, and works the same way for
+`/env`, `/shell`, `/logs` and `/settings`:
 
 ```
 https://dashboard.render.com/web/srv-XXXXXXXX/env       # sleeper-api
@@ -133,15 +134,31 @@ services.
 
 ## 5. Bootstrap the first tenant
 
-Open a shell on `sleeper-api` (service page → **Shell**):
+This has to run **inside the api container**, not on your own machine. The
+blueprint gives `sleeper-db` an empty `ipAllowList`, so the database accepts no
+external connections at all — only `sleeper-api` and `sleeper-worker` reach it,
+over Render's private network. Running the CLI locally would bootstrap whatever
+`DATABASE_URL` your local `.env` names, which is not this deployment.
+
+Use the service's **Shell** tab. It sits under `MANAGE` in the service's own
+left nav, where Render's promotional cards can push it out of view; the direct
+URL avoids the hunt, using the Service ID shown on the service page:
+
+```
+https://dashboard.render.com/web/srv-XXXXXXXX/shell
+```
+
+Then:
 
 ```
 sleeper init --tenant-name default --email you@example.com
 ```
 
-It prompts for a password and prints a bootstrap API key — save it, it is shown
-once. `init` refuses to run against a placeholder `SECRET_KEY`, which the
-Render-generated value satisfies.
+`sleeper` is on `PATH` in the container — the Dockerfile puts `/app/.venv/bin`
+first — so no `uv run` or venv activation is needed. It prompts for a password
+and prints a bootstrap API key: copy it before closing the tab, since keys are
+hashed at rest and never shown again. `init` refuses to run against a
+placeholder `SECRET_KEY`, which the Render-generated value satisfies.
 
 ## 6. Smoke-test
 
