@@ -760,6 +760,71 @@ async def test_create_agent_validates_prompt_and_model(
     assert r.status_code == 400 and "between 1 and 100" in r.text
 
 
+async def test_create_agent_takes_grants_params_and_input_schema(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap, seeded_models: None
+) -> None:
+    """The first version is a real version, not a stub.
+
+    An agent whose whole job is reading a data store is not runnable without
+    the grant, so creating it without one and publishing a second version to
+    add it is the only way to get a working agent — which defeats the point of
+    creating the version here. Everything the version form takes, this takes.
+    """
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    r = await client.post(
+        f"/v1/tenants/{tenant_id}/data-stores",
+        headers=root,
+        json={
+            "name": "reference",
+            "type": "s3",
+            "config": {"bucket": "acme-reference"},
+            "credentials": {"access_key": "a", "secret_key": "s"},
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/t/{tenant_id}/agents/new")
+    assert "reference" in page.text  # the store is offered on the create form
+    url = f"/ui/t/{tenant_id}/agents"
+    common = {
+        "_csrf_token": _csrf(page.text),
+        "team_id": org["team"]["id"],
+        "name": "reader",
+        "model": "test:default",
+        "prompt": "read the playbook",
+    }
+
+    # a grant naming a store this tenant does not have is refused, by the same
+    # rule the version form applies
+    r = await client.post(url, data={**common, "grant_store": "nope", "grant_mode": "ro"})
+    assert r.status_code == 400 and "No data store named" in r.text
+
+    r = await client.post(
+        url,
+        data={
+            **common,
+            "params": '{"max_tokens": 64000}',
+            "input_schema": '{"type": "object", "properties": {"path": {"type": "string"}}}',
+            "grant_store": "reference",
+            "grant_prefix": "basic/",
+            "grant_mode": "ro",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+
+    agents = (await client.get("/v1/agents", headers=root)).json()
+    agent = next(a for a in agents if a["name"] == "reader")
+    versions = (await client.get(f"/v1/agents/{agent['id']}/versions", headers=root)).json()
+    assert len(versions) == 1, "the first version should already be the runnable one"
+    v = versions[0]
+    assert v["params"] == {"max_tokens": 64000}
+    assert v["input_schema"]["properties"] == {"path": {"type": "string"}}
+    assert v["data_store_grants"] == [{"store": "reference", "prefix": "basic", "mode": "ro"}]
+
+
 async def test_create_version_from_agent_page(client: AsyncClient, risk_agent: dict) -> None:
     agent_id = risk_agent["agent"]["id"]
     await _login(client, "bob@example.com")  # editor

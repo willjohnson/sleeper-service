@@ -26,8 +26,15 @@
            placeholder="What this agent is for" value="{{ form.description or '' }}">
 
     <label for="na-limit">Spending limit</label>
-    <input id="na-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
-           placeholder="no limit" value="{{ form.spending_limit or '' }}">
+    <div>
+      <input id="na-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
+             placeholder="no limit" value="{{ form.spending_limit or '' }}">
+      <div class="muted" style="font-size:12px">
+        US dollars per calendar month, across every version of this agent — not
+        tokens. Checked before a job starts and again mid-run, so an exhausted
+        budget refuses the job rather than truncating it. Blank for no limit.
+      </div>
+    </div>
 
     <label for="na-deleg">Delegation</label>
     <select id="na-deleg" name="delegation">
@@ -79,9 +86,91 @@
                 placeholder='{"type": "object", "properties": {"risk_level": {"type": "string"}}, "required": ["risk_level"]}'>{{ form.output_schema or '' }}</textarea>
       <div class="muted" style="font-size:12px">
         Optional JSON Schema. Set one and the model must return JSON matching it, which
-        is what makes the agent usable as a workflow node rather than a chat box. Input
-        schema and model params are set when publishing a version.
+        is what makes the agent usable as a workflow node rather than a chat box.
       </div>
+    </div>
+
+    <label for="na-in">Input schema</label>
+    <div>
+      <textarea id="na-in" name="input_schema" rows="5" class="mono"
+                placeholder='{"type": "object", "properties": {"borrower": {"type": "string"}}, "required": ["borrower"]}'>{{ form.input_schema or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Optional JSON Schema a job payload must match. Rejected before the model runs.
+      </div>
+    </div>
+
+    <label for="na-params">Params</label>
+    <div>
+      <textarea id="na-params" name="params" rows="3" class="mono"
+                placeholder='{"temperature": 0.2, "max_tokens": 8000}'>{{ form.params or '' }}</textarea>
+      <div class="muted" style="font-size:12px">
+        Passed through to the provider for this version. <code>max_tokens</code> caps
+        the response, not the input.
+      </div>
+    </div>
+
+    <div class="form-section">Grants</div>
+
+    <label>Data stores</label>
+    <div>
+      {% if show_store_grid %}
+      <div class="check-row check-head"><span>Store</span><span>Prefix</span><span>Mode</span></div>
+      {% for store, prefix, mode in store_rows %}
+      <div class="check-row">
+        <select name="grant_store">
+          <option value="">—</option>
+          {% for s in stores %}
+          <option value="{{ s }}" {% if store == s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="grant_prefix" value="{{ prefix }}"
+               placeholder="{{ 'reports/2026' if loop.first else '' }}">
+        <select name="grant_mode">
+          {% for m in store_modes %}
+          <option value="{{ m }}" {% if mode == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        The version gets <code>list_files</code> and <code>read_file</code> beneath the
+        prefix, plus <code>write_file</code> at <code>rw</code>. Nothing outside it is
+        reachable; a blank prefix grants the whole store.
+      </div>
+      {% else %}
+      <div class="muted" style="font-size:12px">
+        No data stores registered in this tenant —
+        <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
+      </div>
+      {% endif %}
+    </div>
+
+    <label>MCP servers</label>
+    <div>
+      {% if show_tool_grid %}
+      <div class="check-row check-head"><span>Server</span><span>Tools</span><span></span></div>
+      {% for server, tools in tool_rows %}
+      <div class="check-row">
+        <select name="grant_server">
+          <option value="">—</option>
+          {% for m in servers %}
+          <option value="{{ m }}" {% if server == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="grant_tools" value="{{ tools }}"
+               placeholder="{{ 'search, fetch' if loop.first else '' }}">
+        <span></span>
+      </div>
+      {% endfor %}
+      <div class="muted" style="font-size:12px">
+        Comma-separated tool names; blank grants every tool the server offers.
+      </div>
+      {% else %}
+      <div class="muted" style="font-size:12px">
+        No MCP servers registered in this tenant —
+        <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
+      </div>
+      {% endif %}
     </div>
 
     <div class="form-actions">
