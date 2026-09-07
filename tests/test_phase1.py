@@ -526,6 +526,18 @@ async def test_models_registry_permissions(
     r = await client.get("/v1/models", headers=alice)
     assert len(r.json()) == 1
 
+    # The API enforces the same registry rule as the UI: `provider` selects the
+    # stored credential and the model string selects the client, so a row where
+    # they disagree would authenticate one vendor against another's SDK.
+    r = await client.post(
+        "/v1/models",
+        headers=root,
+        json={"provider": "openrouter", "name": "y", "model_string": "anthropic:claude-opus-5"},
+    )
+    assert r.status_code == 422, r.text
+    assert "but the row says" in r.text
+    assert len((await client.get("/v1/models", headers=root)).json()) == 1
+
 
 async def test_rejected_callback_destination_is_not_retried(
     client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch

@@ -80,7 +80,10 @@ from sleeper_service.runtime.outbound import (
     validate_callback_url,
     validate_mcp_url,
 )
-from sleeper_service.runtime.providers import SUPPORTED_PROVIDERS
+from sleeper_service.runtime.providers import (
+    SUPPORTED_PROVIDERS,
+    validate_model_registration,
+)
 from sleeper_service.runtime.retention import file_expiry
 from sleeper_service.runtime.work_items import (
     WorkItemConflict,
@@ -1966,6 +1969,9 @@ async def _render_models(
             tenants=tenants,
             section="models",
             models=list(await db.scalars(select(Model).order_by(Model.provider, Model.name))),
+            # Includes "test", unlike PROVIDER_CHOICES: the keyless test
+            # provider is a legitimate registry entry, it just takes no key.
+            providers=sorted(SUPPORTED_PROVIDERS),
             can_manage=p.user.is_superuser,
             error=error,
             form=form or {},
@@ -2002,6 +2008,9 @@ async def ui_create_model(
     provider, name, model_string = provider.strip(), name.strip(), model_string.strip()
     if not provider or not name or not model_string:
         return await fail("Provider, name and model string are all required.")
+    error = validate_model_registration(provider, model_string)
+    if error is not None:
+        return await fail(error)
     dup = await db.scalar(select(Model).where(Model.provider == provider, Model.name == name))
     if dup is not None:
         return await fail(f"{provider}/{name} is already registered.")
