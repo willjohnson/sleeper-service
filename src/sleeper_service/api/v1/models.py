@@ -14,6 +14,7 @@ from sleeper_service.api.v1.schemas import ModelCreate, ModelOut
 from sleeper_service.auth.principal import UserPrincipal, get_user_principal
 from sleeper_service.db.models import Model
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime.providers import validate_model_registration
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -26,6 +27,9 @@ async def create_model(
 ) -> Model:
     if not principal.is_superuser:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only superusers manage models")
+    error = validate_model_registration(body.provider, body.model_string)
+    if error is not None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
     dup = await db.scalar(
         select(Model).where(Model.provider == body.provider, Model.name == body.name)
     )

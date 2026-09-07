@@ -44,8 +44,16 @@
 
     <label for="m-provider">Provider</label>
     <div>
-      <input id="m-provider" type="text" name="provider" required
-             value="{{ form.provider or '' }}" placeholder="anthropic">
+      <select id="m-provider" name="provider" required>
+        <option value="" disabled {{ 'selected' if not form.provider }}>Pick a provider</option>
+        {% for prov in providers %}
+        <option value="{{ prov }}" {{ 'selected' if form.provider == prov }}>{{ prov }}</option>
+        {% endfor %}
+      </select>
+      <div class="muted" style="font-size:12px">
+        Which SDK runs it, and which stored API key it uses. Must match the
+        prefix of the model string below.
+      </div>
     </div>
 
     <label for="m-name">Name</label>

@@ -18,6 +18,31 @@ from sleeper_service.db.models import Agent, ProviderCred
 SUPPORTED_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "test"}
 
 
+def validate_model_registration(provider: str, model_string: str) -> str | None:
+    """Check a registry row before it is written. Returns an error, or None.
+
+    The two fields drive different things at run time and neither validates
+    the other: `resolve_api_key` looks the credential up by the `provider`
+    column, while `build_model` picks the SDK from the model string's own
+    prefix. A row where they disagree fetches one vendor's key and hands it to
+    another vendor's client — an authentication failure at job time, with
+    nothing in the message pointing back at the registry. So they have to
+    agree here, where the mistake is still visible.
+    """
+    prefix, sep, _ = model_string.partition(":")
+    if provider not in SUPPORTED_PROVIDERS:
+        return f"Unknown provider {provider!r}; one of {sorted(SUPPORTED_PROVIDERS)}"
+    if not sep:
+        return f"Model string {model_string!r} must be 'provider:model', e.g. {provider}:some-model"
+    if prefix != provider:
+        return (
+            f"Model string {model_string!r} names provider {prefix!r}, but the row says "
+            f"{provider!r} — the credential is looked up by the latter and the client built "
+            "from the former, so they must match"
+        )
+    return None
+
+
 async def resolve_api_key(db: AsyncSession, agent: Agent, provider: str) -> str | None:
     for scope, scope_id in (
         (KeyScope.AGENT, agent.id),

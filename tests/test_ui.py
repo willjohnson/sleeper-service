@@ -2045,7 +2045,12 @@ async def test_models_registry_page(client: AsyncClient, org: dict, bootstrap: B
     # would make the version form's dropdown ambiguous
     for data, expected in [
         (
-            {"provider": "anthropic", "name": "claude-sonnet-5", "model_string": "x:y"},
+            # a valid string, so this reaches the provider/name duplicate check
+            {
+                "provider": "anthropic",
+                "name": "claude-sonnet-5",
+                "model_string": "anthropic:claude-opus-5",
+            },
             "already registered",
         ),
         (
@@ -2057,6 +2062,25 @@ async def test_models_registry_page(client: AsyncClient, org: dict, bootstrap: B
             "already registered as anthropic/claude-sonnet-5",
         ),
         ({"provider": "", "name": "n", "model_string": "s"}, "all required"),
+        # provider and model string drive different things at run time — the
+        # credential lookup and the client — so a row where they disagree is
+        # refused rather than left to fail as an auth error mid-job
+        (
+            {
+                "provider": "openrouter",
+                "name": "mismatched",
+                "model_string": "anthropic:claude-opus-5",
+            },
+            "but the row says",
+        ),
+        (
+            {"provider": "anthropic", "name": "no-prefix", "model_string": "claude-opus-5"},
+            "must be 'provider:model'",
+        ),
+        (
+            {"provider": "openrouer", "name": "typo", "model_string": "openrouer:x"},
+            "Unknown provider",
+        ),
     ]:
         r = await client.post("/ui/models", data={"_csrf_token": token, **data})
         assert r.status_code == 400, expected
