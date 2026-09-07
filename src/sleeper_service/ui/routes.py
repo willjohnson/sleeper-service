@@ -131,6 +131,26 @@ def client_ip(request: Request) -> str:
         return peer
 
 
+def oidc_callback_url(request: Request, tenant_id: uuid.UUID) -> str:
+    """The OIDC redirect URI: where the IdP sends the browser back.
+
+    Built on `public_base_url` rather than the incoming request. Behind a
+    TLS-terminating proxy the app is reached over plain HTTP, so
+    `request.url_for` yields an `http://` callback — which the settings page
+    then tells an operator to register with their IdP, and which the login
+    flow then sends as `redirect_uri`. Providers reject a redirect that is
+    not https, or that does not match the registered one exactly, so both
+    sites have to agree on the deployment's real external address. That is
+    what `public_base_url` already is, and what signed feedback links are
+    built from.
+
+    The path still comes from the route table, so it follows the route if it
+    ever moves; only the scheme and host are taken from configuration.
+    """
+    path = request.url_for("oidc_callback", tenant_id=tenant_id).path
+    return f"{get_settings().public_base_url.rstrip('/')}{path}"
+
+
 def rotate_csrf_token(request: Request) -> str:
     """Mint a fresh CSRF token, discarding any prior one.
 
@@ -3466,7 +3486,7 @@ async def _render_settings(
             # What the IdP must have registered as the redirect URI — it is
             # built from the same route the callback is served on, so it
             # cannot drift from where the flow actually returns.
-            redirect_uri=str(request.url_for("oidc_callback", tenant_id=tenant.id)),
+            redirect_uri=oidc_callback_url(request, tenant.id),
             # The form re-renders with what was typed on an error and with the
             # stored values otherwise, so a rejected edit is corrected rather
             # than retyped.
