@@ -354,6 +354,28 @@ def _store_grants_from_form(stores: list[str], prefixes: list[str], modes: list[
     return grants
 
 
+async def _check_grants(
+    db: AsyncSession, tenant_id: uuid.UUID, store_grants: list, tool_grants: list
+) -> str | None:
+    """Refuse grants naming something this tenant does not have, or naming the
+    same thing twice. A grant that cannot resolve would fail every job the
+    version runs, so it is caught at publish rather than at dispatch — and both
+    the create-agent and new-version forms answer to the same rule."""
+    known_stores = {s.name for s in await _tenant_stores(db, tenant_id)}
+    for g in store_grants:
+        if g["store"] not in known_stores:
+            return f"No data store named {g['store']!r} in this tenant."
+    known_servers = {m.name for m in await _tenant_mcp_servers(db, tenant_id)}
+    for g in tool_grants:
+        if g["server"] not in known_servers:
+            return f"No MCP server named {g['server']!r} in this tenant."
+    if len({g["store"] for g in store_grants}) != len(store_grants):
+        return "Each data store may be granted once — merge the duplicate rows."
+    if len({g["server"] for g in tool_grants}) != len(tool_grants):
+        return "Each MCP server may be granted once — merge the duplicate rows."
+    return None
+
+
 def _tool_grants_from_form(servers: list[str], tools: list[str]) -> list:
     """Grant rows -> tool_grants: {"server", "tools"}. An empty tool list means
     every tool the server offers, so it is omitted rather than sent as []."""
@@ -1299,6 +1321,14 @@ async def _render_new_agent(
     if not creatable:
         return RedirectResponse(f"/ui/t/{tenant.id}/agents", status_code=303)
 
+    form = form or {}
+    stores = [row.name for row in await _tenant_stores(db, tenant.id)]
+    servers = [row.name for row in await _tenant_mcp_servers(db, tenant.id)]
+    # Nothing to inherit on a create, so the rows are whatever a failed submit
+    # is carrying, padded out to the usual blanks.
+    store_rows = _grant_rows(form.get("store_grant_rows"), ("store", "prefix", "mode"), GRANT_ROWS)
+    tool_rows = _grant_rows(form.get("tool_grant_rows"), ("server", "tools"), GRANT_ROWS)
+
     return templates.TemplateResponse(
         request,
         "agent_new.html",
@@ -1310,8 +1340,15 @@ async def _render_new_agent(
             section="agents",
             creatable_teams=creatable,
             models=await _model_strings(db),
+            stores=stores,
+            servers=servers,
+            store_modes=STORE_MODES,
+            store_rows=store_rows,
+            tool_rows=tool_rows,
+            show_store_grid=bool(stores),
+            show_tool_grid=bool(servers),
             error=error,
-            form=form or {},
+            form=form,
         ),
         status_code=status_code,
     )
@@ -1340,6 +1377,13 @@ async def ui_create_agent(
     max_iterations: str = Form("10"),
     timeout_s: str = Form("300"),
     output_schema: str = Form(""),
+    input_schema: str = Form(""),
+    params: str = Form(""),
+    grant_store: list[str] = Form(default_factory=list),
+    grant_prefix: list[str] = Form(default_factory=list),
+    grant_mode: list[str] = Form(default_factory=list),
+    grant_server: list[str] = Form(default_factory=list),
+    grant_tools: list[str] = Form(default_factory=list),
     delegation: str = Form("none"),
     memory: bool = Form(False),
     learning: bool = Form(False),
@@ -1351,7 +1395,11 @@ async def ui_create_agent(
     """Create an agent and its first version in one step.
 
     The API splits these across two calls, but an agent with no version cannot
-    run a job, so the UI only ever produces runnable agents.
+    run a job, so the UI only ever produces runnable agents. That first version
+    takes everything the version form takes, including grants: an agent whose
+    whole purpose is reading a data store is not runnable without one, and
+    making the operator publish a throwaway version to add it defeats the point
+    of creating the version here at all.
     """
     form = {
         "team_id": team_id,
@@ -1363,6 +1411,12 @@ async def ui_create_agent(
         "max_iterations": max_iterations,
         "timeout_s": timeout_s,
         "output_schema": output_schema,
+        "input_schema": input_schema,
+        "params": params,
+        # Re-rendered on failure as rows, so a rejected submit comes back with
+        # the grants still picked.
+        "store_grant_rows": _store_grants_from_form(grant_store, grant_prefix, grant_mode),
+        "tool_grant_rows": _tool_grants_from_form(grant_server, grant_tools),
         "delegation": delegation,
         "memory": memory,
         "learning": learning,
@@ -1412,9 +1466,20 @@ async def ui_create_agent(
     out_schema, err = _form_json_object(output_schema, "Output schema", as_schema=True)
     if err:
         return await fail(err)
+    in_schema, err = _form_json_object(input_schema, "Input schema", as_schema=True)
+    if err:
+        return await fail(err)
+    model_params, err = _form_json_object(params, "Params")
+    if err:
+        return await fail(err)
     model_row = await db.scalar(select(Model).where(Model.model_string == model))
     if model_row is None:
         return await fail(f"Unknown model {model!r} — register it under Models first.")
+    store_grants = _store_grants_from_form(grant_store, grant_prefix, grant_mode)
+    tool_grants = _tool_grants_from_form(grant_server, grant_tools)
+    err = await _check_grants(db, tenant.id, store_grants, tool_grants)
+    if err:
+        return await fail(err)
 
     agent = Agent(
         tenant_id=tenant.id,
@@ -1435,6 +1500,10 @@ async def ui_create_agent(
         max_iterations=iterations,
         timeout_s=timeout,
         output_schema=out_schema,
+        input_schema=in_schema,
+        params=model_params,
+        data_store_grants=store_grants,
+        tool_grants=tool_grants,
     )
     await db.commit()
     return RedirectResponse(f"/ui/agents/{agent.id}", status_code=303)
@@ -2804,18 +2873,9 @@ async def ui_create_version(
 
     # A grant naming something the tenant does not have is a GrantError on
     # every job the version runs, so it is refused here rather than at dispatch.
-    known_stores = {s.name for s in await _tenant_stores(db, agent.tenant_id)}
-    for g in store_grants:
-        if g["store"] not in known_stores:
-            return await fail(f"No data store named {g['store']!r} in this tenant.")
-    known_servers = {m.name for m in await _tenant_mcp_servers(db, agent.tenant_id)}
-    for g in tool_grants:
-        if g["server"] not in known_servers:
-            return await fail(f"No MCP server named {g['server']!r} in this tenant.")
-    if len({g["store"] for g in store_grants}) != len(store_grants):
-        return await fail("Each data store may be granted once — merge the duplicate rows.")
-    if len({g["server"] for g in tool_grants}) != len(tool_grants):
-        return await fail("Each MCP server may be granted once — merge the duplicate rows.")
+    err = await _check_grants(db, agent.tenant_id, store_grants, tool_grants)
+    if err:
+        return await fail(err)
 
     await _new_version(
         db,
