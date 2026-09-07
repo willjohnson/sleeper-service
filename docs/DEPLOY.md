@@ -160,6 +160,24 @@ and prints a bootstrap API key: copy it before closing the tab, since keys are
 hashed at rest and never shown again. `init` refuses to run against a
 placeholder `SECRET_KEY`, which the Render-generated value satisfies.
 
+Choose the tenant name deliberately. It is the org label across the dashboard,
+and nothing renames it afterwards: `TenantUpdate` carries only `system_prompt`
+and `settings`, and the admin UI's tenant form is the same two fields, so
+changing it later means a direct `UPDATE` against a database that accepts no
+external connections.
+
+Then register the starter models, in the same shell:
+
+```
+sleeper seed-models
+```
+
+`init` does not do this — the models table starts empty, which leaves the
+create-agent form with nothing to select and 422s version creation on
+`resolve_model`. The command is idempotent and adds five, including the
+keyless `test/default` and the always-failing `test/flaky` used for
+retry and dead-letter demos.
+
 ## 6. Smoke-test
 
 ```
