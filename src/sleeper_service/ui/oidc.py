@@ -25,7 +25,7 @@ from sleeper_service.runtime.outbound import (
     validate_callback_target,
     validate_callback_url,
 )
-from sleeper_service.ui.routes import render_login, rotate_csrf_token
+from sleeper_service.ui.routes import oidc_callback_url, render_login, rotate_csrf_token
 
 router = APIRouter(prefix="/ui/oidc", include_in_schema=False)
 
@@ -120,7 +120,7 @@ async def oidc_login(
         return await render_login(
             request, db, "SSO failed: the identity provider could not be validated", status_code=400
         )
-    redirect_uri = str(request.url_for("oidc_callback", tenant_id=tenant_id))
+    redirect_uri = oidc_callback_url(request, tenant_id)
     return await _client(config, metadata).authorize_redirect(request, redirect_uri)
 
 

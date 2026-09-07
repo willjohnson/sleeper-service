@@ -108,7 +108,11 @@ async def _start_sso(client: AsyncClient, tenant_id: str, issuer: str) -> tuple[
     assert location.startswith(f"{issuer}/authorize?")
     qs = parse_qs(urlsplit(location).query)
     assert qs["client_id"] == [CLIENT_ID]
-    assert qs["redirect_uri"] == [f"http://test/ui/oidc/{tenant_id}/callback"]
+    # Built on public_base_url, not the request: behind a TLS-terminating proxy
+    # the request arrives as plain HTTP and would yield an http:// redirect_uri
+    # that no IdP accepts.
+    base = get_settings().public_base_url.rstrip("/")
+    assert qs["redirect_uri"] == [f"{base}/ui/oidc/{tenant_id}/callback"]
     return qs["state"][0], qs["nonce"][0]
 
 
@@ -223,6 +227,43 @@ async def test_oidc_config_rejects_private_issuer(
 
 
 # --- Login flow (e2e against the stub IdP) ---
+
+
+async def test_redirect_uri_comes_from_public_base_url(
+    client: AsyncClient, org: dict, bootstrap, idp: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The callback the IdP is sent must not inherit the request's scheme.
+
+    A TLS-terminating proxy reaches the app over plain HTTP, so deriving the
+    redirect from the request produces an http:// URI — which providers refuse,
+    and which the settings page would tell an operator to register. Both the
+    login flow and that page read the deployment's configured address instead.
+    """
+    root = auth(bootstrap.superuser_key)
+    tenant_id = org["tenant"]["id"]
+    await _configure(client, root, tenant_id, idp["issuer"])
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://sleeper.example.com/")
+
+    r = await client.get(f"/ui/oidc/{tenant_id}/login", follow_redirects=False)
+    assert r.status_code == 302, r.text
+    qs = parse_qs(urlsplit(r.headers["location"]).query)
+    # https, the configured host, and no doubled slash from the trailing one
+    assert qs["redirect_uri"] == [f"https://sleeper.example.com/ui/oidc/{tenant_id}/callback"]
+
+    # The settings page must advertise exactly what the flow sends, or the
+    # operator registers a URI that will not match at sign-in. Needs a browser
+    # session, and tenant settings are admin-only.
+    login = await client.get("/ui/login")
+    csrf = re.search(r'name="_csrf_token" value="([^"]+)"', login.text).group(1)
+    r = await client.post(
+        "/ui/login",
+        data={"email": "root@example.com", "password": "root-password", "_csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    page = await client.get(f"/ui/t/{tenant_id}/settings")
+    assert page.status_code == 200, page.text
+    assert f"https://sleeper.example.com/ui/oidc/{tenant_id}/callback" in page.text
 
 
 async def test_oidc_login_end_to_end(client: AsyncClient, org: dict, bootstrap, idp: dict) -> None:
