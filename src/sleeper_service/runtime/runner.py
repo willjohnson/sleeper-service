@@ -9,6 +9,7 @@ the job immediately.
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -42,6 +43,8 @@ from sleeper_service.runtime.toolsets import (
     build_store_toolset,
 )
 from sleeper_service.runtime.work_items import build_escalation_toolset
+
+logger = logging.getLogger(__name__)
 
 
 class TransientJobError(Exception):
@@ -119,13 +122,25 @@ def _tool_call_events(messages: list) -> list[tuple[str, dict]]:
     return [("tool_call", calls[key]) for key in order]
 
 
-def _calc_cost(usage: RunUsage, model_name: str) -> Decimal:
+def _calc_cost(usage: RunUsage, model_name: str) -> tuple[Decimal, bool]:
+    """Returns (cost, priced). An unpriced model costs 0 and says so.
+
+    genai-prices covers the vendors it knows; a model it has no entry for
+    raises, and treating that as free is not harmless. Monthly spending limits
+    are enforced against accumulated cost, so an unpriced model spends real
+    money against a budget that never moves and never refuses a job — the
+    limit is silently inert for exactly the models nobody has checked.
+
+    Still returns zero rather than failing the job: a gap in a pricing table
+    is not a reason to refuse work. The caller records that the number is
+    unknown instead of merely low.
+    """
     try:
         from genai_prices import calc_price
 
-        return Decimal(str(calc_price(usage, model_ref=model_name).total_price))
+        return Decimal(str(calc_price(usage, model_ref=model_name).total_price)), True
     except Exception:
-        return Decimal(0)
+        return Decimal(0), False
 
 
 async def _load_file_content(payload: dict, tenant_id: uuid.UUID) -> tuple[list, list[str]]:
@@ -322,7 +337,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
                     run_messages = agent_run.all_messages()
                     if remaining_budget is None:
                         continue
-                    run_cost = _calc_cost(agent_run.usage, model_row.name)
+                    run_cost, _priced = _calc_cost(agent_run.usage, model_row.name)
                     if run_cost >= remaining_budget:
                         usage = agent_run.usage
                         raise _BudgetExceededMidRun(
@@ -397,6 +412,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         error=error,
         usage=usage,
         model_name=model_row.name,
+        provider=model_row.provider,
         extra_events=events,
     )
     if status == "budget_exceeded":
@@ -417,6 +433,7 @@ async def _finalize(
     error: str | None = None,
     usage: RunUsage | None = None,
     model_name: str | None = None,
+    provider: str | None = None,
     extra_events: list[tuple[str, dict]] | None = None,
 ) -> None:
     async with get_sessionmaker()() as db:
@@ -430,7 +447,22 @@ async def _finalize(
         if usage is not None and model_name is not None:
             job.tokens_in = usage.input_tokens or 0
             job.tokens_out = usage.output_tokens or 0
-            job.cost = _calc_cost(usage, model_name)
+            job.cost, priced = _calc_cost(usage, model_name)
+            # The keyless test provider is free on purpose, not unpriced.
+            if not priced and provider != "test":
+                logger.warning(
+                    "no price for model %r — job %s cost recorded as 0, and this "
+                    "agent's spending limit will not bind for it",
+                    model_name,
+                    job.id,
+                )
+                db.add(
+                    JobEvent(
+                        job_id=job.id,
+                        type="cost_unpriced",
+                        data={"model": model_name, "provider": provider},
+                    )
+                )
         for event_type, data in extra_events or []:
             db.add(JobEvent(job_id=job.id, type=event_type, data=data))
         db.add(

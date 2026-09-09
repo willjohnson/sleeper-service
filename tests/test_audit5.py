@@ -415,7 +415,11 @@ async def test_eval_job_mid_run_budget(
 
     monkeypatch.setattr(runner, "build_model", chatty_model)
     monkeypatch.setattr(
-        runner, "_calc_cost", lambda usage, model_name: Decimal("0.03") * usage.requests
+        runner,
+        "_calc_cost",
+        # (cost, priced) — priced True, so a stubbed price is not reported as
+        # a pricing gap.
+        lambda usage, model_name: (Decimal("0.03") * usage.requests, True),
     )
 
     async with get_sessionmaker()() as db:

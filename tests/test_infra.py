@@ -270,6 +270,84 @@ async def test_healthz_checks_dependencies(client: AsyncClient) -> None:
     assert body["redis"] == "ok"
 
 
+async def test_unpriced_model_is_recorded_not_silently_free(
+    client: AsyncClient, risk_agent: dict, bootstrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model genai-prices has no entry for must not read as costing nothing.
+
+    Spending limits are enforced against accumulated cost, so an unpriced
+    model spends real money against a budget that never moves — the limit is
+    inert for exactly the models nobody has checked. Cost still records as 0
+    (a gap in a pricing table is no reason to refuse work), but the job says
+    the number is unknown rather than merely low.
+    """
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def unpriced(*_args, **_kwargs):
+        raise LookupError("Unable to find model")
+
+    monkeypatch.setattr("genai_prices.calc_price", unpriced)
+
+    # A real vendor, not the keyless test provider — that one is free on
+    # purpose, and reporting it as a pricing gap would put an event on every
+    # job the test suite runs.
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        "/v1/models",
+        headers=root,
+        json={
+            "provider": "anthropic",
+            "name": "not-in-the-price-table",
+            "model_string": "anthropic:not-in-the-price-table",
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{risk_agent['agent']['id']}/versions",
+        headers=bob,
+        json={
+            "prompt": "assess",
+            "model": "anthropic:not-in-the-price-table",
+            "output_schema": risk_agent["version"]["output_schema"],
+        },
+    )
+    assert r.status_code == 201, r.text
+    version_no = r.json()["version_no"]
+
+    def priced_model(*_args) -> FunctionModel:
+        def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="final_result",
+                        args={"risk_level": "low", "factors": ["a"], "summary": "a"},
+                    )
+                ]
+            )
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", priced_model)
+    # Pinned: publishing does not promote, so the current version is still
+    # the test-provider one the fixture created.
+    r = await _submit(client, bob, risk_agent["agent"]["id"], version_no=version_no)
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+    assert float(job["cost"]) == 0.0
+    assert job["tokens_out"] > 0, "tokens were spent even though cost is zero"
+
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    unpriced_events = [e for e in events if e["type"] == "cost_unpriced"]
+    assert len(unpriced_events) == 1, [e["type"] for e in events]
+    assert unpriced_events[0]["data"]["model"]
+
+
 def test_init_refuses_placeholder_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     import typer
 
