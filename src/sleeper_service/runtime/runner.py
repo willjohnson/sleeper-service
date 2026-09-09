@@ -8,6 +8,7 @@ the job immediately.
 """
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -53,6 +54,69 @@ class _BudgetExceededMidRun(Exception):
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+# A tool call's arguments and result are model-controlled and unbounded — a
+# write_file can carry a whole document — so the trail records their shape, not
+# their content. Enough to answer "did it read the source, and did that work".
+TOOL_EVENT_ARG_CHARS = 300
+
+try:  # pragma: no cover - exercised only when pydantic-ai moves the constant
+    from pydantic_ai._output import DEFAULT_OUTPUT_TOOL_NAME as _OUTPUT_TOOL_NAME
+except ImportError:
+    _OUTPUT_TOOL_NAME = "final_result"
+
+
+def _tool_call_events(messages: list) -> list[tuple[str, dict]]:
+    """One `tool_call` event per call the model made, in order.
+
+    The job trail records lifecycle only, so a finished job cannot answer
+    whether the model used its tools at all — and an agent that never called
+    `read_file` still returns confident, plausible output. Only a tool *error*
+    surfaced anywhere, and only because the exception text reached the job's
+    error field.
+
+    Outcomes are paired back onto their call by tool_call_id: a ToolReturnPart
+    means it succeeded, a RetryPromptPart means the tool refused and the model
+    was asked to try again (a bad path, a schema violation), which is a
+    different thing from the job failing and worth seeing separately.
+    """
+    from pydantic_ai.messages import RetryPromptPart, ToolCallPart, ToolReturnPart
+
+    calls: dict[str, dict] = {}
+    order: list[str] = []
+    for message in messages:
+        for part in getattr(message, "parts", []):
+            if isinstance(part, ToolCallPart):
+                # Structured output is delivered through pydantic-ai's own
+                # output tool. That is the mechanism by which the model returns
+                # its answer, not a tool it chose to use, and its arguments are
+                # the job's whole output — already stored on the job. Recording
+                # it would put noise in every schema'd job's trail and bury the
+                # calls someone is actually looking for.
+                if part.tool_name == _OUTPUT_TOOL_NAME:
+                    continue
+                key = part.tool_call_id or f"{part.tool_name}:{len(order)}"
+                raw_args = part.args
+                args = raw_args if isinstance(raw_args, str) else json.dumps(raw_args, default=str)
+                calls[key] = {
+                    "tool": part.tool_name,
+                    "args": args[:TOOL_EVENT_ARG_CHARS],
+                    "args_truncated": len(args) > TOOL_EVENT_ARG_CHARS,
+                    "outcome": "pending",
+                }
+                order.append(key)
+            elif isinstance(part, ToolReturnPart) and part.tool_call_id in calls:
+                content = part.content
+                calls[part.tool_call_id]["outcome"] = "ok"
+                calls[part.tool_call_id]["result_chars"] = len(
+                    content if isinstance(content, str) else json.dumps(content, default=str)
+                )
+            elif isinstance(part, RetryPromptPart) and part.tool_call_id in calls:
+                detail = part.content
+                calls[part.tool_call_id]["outcome"] = "retry"
+                calls[part.tool_call_id]["detail"] = str(detail)[:TOOL_EVENT_ARG_CHARS]
+    return [("tool_call", calls[key]) for key in order]
 
 
 def _calc_cost(usage: RunUsage, model_name: str) -> Decimal:
@@ -241,6 +305,10 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     error: str | None = None
     usage: RunUsage | None = None
     events: list[tuple[str, dict]] = []
+    # Held outside the `async with` so the tool trail survives an exception
+    # raised inside it — a job that dies in a tool is exactly the one whose
+    # tool calls you need to see.
+    run_messages: list = []
     try:
         async with asyncio.timeout(timeout_s):
             # iter() instead of run(): between model calls, check the cost
@@ -248,6 +316,10 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
             # runaway job is bounded by $ and not only by iterations/timeout.
             async with pai_agent.iter(user_content, usage_limits=limits) as agent_run:
                 async for _node in agent_run:
+                    # Refreshed before the budget guard, not after: with no
+                    # spending limit that guard `continue`s, which is the
+                    # common case and would leave the trail empty.
+                    run_messages = agent_run.all_messages()
                     if remaining_budget is None:
                         continue
                     run_cost = _calc_cost(agent_run.usage, model_row.name)
@@ -258,6 +330,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
                             f"budget {remaining_budget}"
                         )
                 result = agent_run.result
+                run_messages = agent_run.all_messages()
         raw = result.output
         output = raw if isinstance(raw, dict) else {"text": raw}
         usage = result.usage
@@ -286,6 +359,8 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         raise TransientJobError(str(e)) from e
     except Exception as e:
         status, error = "failed", f"{type(e).__name__}: {e}"
+
+    events += _tool_call_events(run_messages)
 
     # Post-hooks
     if status == "succeeded" and version.output_schema:

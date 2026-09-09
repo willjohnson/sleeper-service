@@ -382,6 +382,83 @@ async def test_mcp_grant_with_tool_filter(
     assert not (tmp_path / "forbidden").exists()
 
 
+async def test_tool_calls_are_recorded_in_the_job_trail(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finished job must answer "did it use its tools, and did they work".
+
+    Without this the trail is lifecycle only, so an agent that never called
+    its data store still returns confident, plausible output and nothing
+    distinguishes that from a real run.
+    """
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+    calls = {"n": 0}
+
+    def tool_calling_model(*_args) -> FunctionModel:
+        def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ModelResponse(
+                    parts=[ToolCallPart(tool_name="escalate_to_human", args={"reason": "x" * 500})]
+                )
+            return ModelResponse(parts=[TextPart("done")])
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", tool_calling_model)
+    r = await _submit(client, bob, agent_id)
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    tool_events = [e for e in events if e["type"] == "tool_call"]
+    assert len(tool_events) == 1, [e["type"] for e in events]
+    data = tool_events[0]["data"]
+    assert data["tool"] == "escalate_to_human"
+    assert data["outcome"] in ("ok", "retry")
+    # Arguments are model-controlled and unbounded, so the trail keeps their
+    # shape, not their content — a write_file would otherwise put a whole
+    # document in an event row.
+    assert len(data["args"]) <= runner.TOOL_EVENT_ARG_CHARS
+    assert data["args_truncated"] is True
+
+
+async def test_tool_calls_are_recorded_when_the_job_fails(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing run is the one whose tool calls matter most.
+
+    The call happens inside the `async with` that the exception unwinds, so
+    the messages have to be reachable from the except clause or the trail is
+    empty for exactly the jobs being debugged.
+    """
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    agent_id = risk_agent["agent"]["id"]
+
+    def exploding_model(*_args) -> FunctionModel:
+        def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            if not any(
+                isinstance(part, ToolCallPart)
+                for message in messages
+                for part in getattr(message, "parts", [])
+            ):
+                return ModelResponse(parts=[ToolCallPart(tool_name="escalate_to_human", args={})])
+            raise RuntimeError("model blew up after the tool call")
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", exploding_model)
+    r = await _submit(client, bob, agent_id)
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "failed"
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert [e["data"]["tool"] for e in events if e["type"] == "tool_call"] == ["escalate_to_human"]
+
+
 # --- Data store tools ---
 
 
