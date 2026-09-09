@@ -1,6 +1,7 @@
 """Operational infrastructure: retention, concurrency caps, alerting gaps,
 job listing/retry, health."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
@@ -268,6 +269,79 @@ async def test_healthz_checks_dependencies(client: AsyncClient) -> None:
     body = r.json()
     assert body["postgres"] == "ok"
     assert body["redis"] == "ok"
+
+
+def _cancelling_model(*_args):
+    """A model whose call is cancelled, as a worker shutdown cancels one.
+
+    Raised from inside the run rather than from build_model, which is called
+    before the try block that handles cancellation.
+    """
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo):
+        raise asyncio.CancelledError
+
+    return FunctionModel(respond)
+
+
+async def test_worker_shutdown_requeues_a_top_level_job(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job killed with its worker did nothing wrong and must come back.
+
+    arq already redelivers a cancelled job, but execute_job returns
+    immediately unless the row is queued or running — so marking it failed
+    made the redelivery useless and the job was dropped by our own guard.
+    Every deploy that restarts the worker used to kill whatever was mid-flight.
+    """
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+
+    monkeypatch.setattr(runner, "build_model", _cancelling_model)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "queued", "a job killed with its worker must stay runnable"
+    assert job["started_at"] is None
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert "requeued" in [e["type"] for e in events]
+
+    # ...and the redelivery actually runs, rather than being dropped by the
+    # guard at the top of execute_job. That guard is what made the old
+    # behaviour silent.
+    monkeypatch.undo()
+    await runner.execute_job(uuid.UUID(job_id))
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+
+
+async def test_cancelled_child_job_fails_rather_than_requeueing(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child cancelled by its parent has nothing to come back to.
+
+    Delegation calls execute_job directly, so a child was never on the queue —
+    nothing would redeliver it, and its parent is already gone.
+    """
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    parent = (await _submit(client, bob, risk_agent["agent"]["id"])).json()
+    child = (await _submit(client, bob, risk_agent["agent"]["id"])).json()
+
+    async with get_sessionmaker()() as db:
+        row = await db.get(Job, uuid.UUID(child["id"]))
+        row.parent_job_id = uuid.UUID(parent["id"])
+        await db.commit()
+
+    monkeypatch.setattr(runner, "build_model", _cancelling_model)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.execute_job(uuid.UUID(child["id"]))
+
+    job = (await client.get(f"/v1/jobs/{child['id']}", headers=bob)).json()
+    assert job["status"] == "failed"
+    assert "calling job ended first" in job["error"]
 
 
 async def test_unpriced_model_is_recorded_not_silently_free(
