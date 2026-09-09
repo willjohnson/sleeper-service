@@ -144,7 +144,11 @@ async def test_budget_exceeded_mid_run(
 
     monkeypatch.setattr(runner, "build_model", chatty_model)
     monkeypatch.setattr(
-        runner, "_calc_cost", lambda usage, model_name: Decimal("0.03") * usage.requests
+        runner,
+        "_calc_cost",
+        # (cost, priced) — priced True, so a stubbed price is not reported as
+        # a pricing gap.
+        lambda usage, model_name: (Decimal("0.03") * usage.requests, True),
     )
 
     r = await _submit(client, bob, agent_id)
