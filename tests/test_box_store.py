@@ -177,7 +177,10 @@ async def test_box_store_tools(client: AsyncClient, org: dict, bootstrap, box_st
 
     with pytest.raises(ModelRetry, match="read-only"):
         await ro["write_file"]("boxstore", "out.txt", "x")
-    with pytest.raises(FileNotFoundError):
+    # Handed back to the model rather than raised through it: a path the model
+    # guessed wrong is something it can correct, and FileNotFoundError would
+    # propagate out of the tool and end the job.
+    with pytest.raises(ModelRetry, match="no such path"):
         await ro["read_file"]("boxstore", "missing.txt")
 
     # the read-only grant exchanged for scopes without upload rights,

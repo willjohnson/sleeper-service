@@ -503,9 +503,21 @@ async def test_store_tools_scoping(client: AsyncClient, risk_agent: dict, bootst
     ro_fns = {name: t.function for name, t in ro.tools.items()}
     rw_fns = {name: t.function for name, t in rw.tools.items()}
 
+    # Listings and inputs share one coordinate system: relative to the grant.
+    # Returning "ref/notes.txt" here would be a path the tools cannot accept —
+    # resolve() would apply the prefix a second time and reach ref/ref/notes.txt.
     listing = await ro_fns["list_files"]("refdata", "")
-    assert "ref/notes.txt" in listing
+    assert "notes.txt" in listing
+    assert not any(entry.startswith("ref/") for entry in listing), listing
     assert await ro_fns["read_file"]("refdata", "notes.txt") == "threshold: 5%"
+
+    # A path that does not exist is the model's mistake to correct, not the
+    # job's to die on: fsspec's FileNotFoundError would propagate out of the
+    # tool and end the run.
+    with pytest.raises(ModelRetry, match="relative to the granted prefix"):
+        await ro_fns["read_file"]("refdata", "nope.txt")
+    with pytest.raises(ModelRetry, match="relative to the granted prefix"):
+        await ro_fns["list_files"]("refdata", "nope")
 
     with pytest.raises(ModelRetry, match="escapes"):
         await ro_fns["read_file"]("refdata", "../private/secret.txt")
