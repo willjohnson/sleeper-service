@@ -36,7 +36,11 @@ from sleeper_service.db.models import (
 from sleeper_service.db.session import get_sessionmaker
 from sleeper_service.runtime import hooks, links, memory, notify, spending
 from sleeper_service.runtime.delegation import build_delegation_toolset
-from sleeper_service.runtime.providers import build_model, resolve_api_key
+from sleeper_service.runtime.providers import (
+    build_model,
+    fetch_openrouter_cost,
+    resolve_api_key,
+)
 from sleeper_service.runtime.toolsets import (
     GrantError,
     build_mcp_toolsets,
@@ -373,6 +377,19 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
 
     events += _tool_call_events(run_messages)
 
+    # An aggregator's real charge is knowable only from the aggregator: it
+    # routes to whichever upstream is available and bills what that upstream
+    # cost, which no static table can predict. Asked for only when there was a
+    # run to pay for, and never allowed to affect the job's outcome.
+    cost_override: Decimal | None = None
+    if model_row.provider == "openrouter" and run_messages:
+        generation_ids = [
+            message.provider_response_id
+            for message in run_messages
+            if getattr(message, "provider_response_id", None)
+        ]
+        cost_override = await fetch_openrouter_cost(api_key or "", generation_ids)
+
     # Post-hooks
     if status == "succeeded" and version.output_schema:
         schema_error = hooks.validate_output_schema(output, version.output_schema)
@@ -409,6 +426,7 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         usage=usage,
         model_name=model_row.name,
         provider=model_row.provider,
+        cost_override=cost_override,
         extra_events=events,
     )
     if status == "budget_exceeded":
@@ -430,6 +448,7 @@ async def _finalize(
     usage: RunUsage | None = None,
     model_name: str | None = None,
     provider: str | None = None,
+    cost_override: Decimal | None = None,
     extra_events: list[tuple[str, dict]] | None = None,
 ) -> None:
     async with get_sessionmaker()() as db:
@@ -444,6 +463,9 @@ async def _finalize(
             job.tokens_in = usage.input_tokens or 0
             job.tokens_out = usage.output_tokens or 0
             job.cost, priced = _calc_cost(usage, model_name)
+            if cost_override is not None:
+                # What the provider actually billed beats what a table guessed.
+                job.cost, priced = cost_override, True
             # The keyless test provider is free on purpose, not unpriced.
             if not priced and provider != "test":
                 logger.warning(
