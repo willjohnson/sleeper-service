@@ -354,14 +354,10 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
     except TimeoutError:
         status, error = "timeout", f"Job exceeded wall-clock timeout of {timeout_s}s"
     except asyncio.CancelledError:
-        # Cancelled from outside (a delegating parent timed out, or the worker
-        # is shutting down). CancelledError is BaseException, so without this
-        # clause the job would be stranded in `running` forever. Finalize,
-        # then re-raise so the canceller's own control flow proceeds.
-        await _finalize(
-            job_id, "failed", error="cancelled: parent job timed out or worker shut down"
-        )
-        raise
+        # Cancelled from outside. CancelledError is BaseException, so without
+        # this clause the job would be stranded in `running` forever.
+        await _handle_cancellation(job_id)
+        raise  # so the canceller's own control flow proceeds
     except UsageLimitExceeded as e:
         status, error = "iteration_limit", str(e)
     except ModelHTTPError as e:
@@ -478,6 +474,45 @@ async def _finalize(
 
     if not is_eval and status in ("failed", "dead_letter", "timeout", "iteration_limit"):
         await notify.check_error_rate(agent_id)
+
+
+async def _handle_cancellation(job_id: uuid.UUID) -> None:
+    """Put a job cancelled by a worker shutdown back on the queue.
+
+    Two things cancel a job, and they want opposite outcomes. A delegated
+    child runs inside its parent's task — delegation calls execute_job
+    directly rather than enqueuing — so a parent timeout only ever cancels a
+    job that has a parent, and that child was never on the queue for anything
+    to redeliver. It failed, and its parent is gone.
+
+    A top-level job has no such canceller: only the worker going away stops
+    it. arq already redelivers that one ("cancelled, will be run again" —
+    retry_jobs defaults to True). Marking it failed made the redelivery
+    useless, because execute_job returns immediately unless the row is queued
+    or running: the job came back and was dropped by our own guard. Nothing
+    was wrong with it, so leave it runnable and let arq bring it back.
+
+    This matters wherever deploys are routine. Every push that restarts the
+    worker killed whatever was mid-flight, permanently, and the only sign was
+    a job marked failed with no error a human could act on.
+    """
+    async with get_sessionmaker()() as db:
+        job = await db.get(Job, job_id)
+        if job is None:
+            return
+        if job.parent_job_id is not None:
+            await _finalize(job_id, "failed", error="cancelled: the calling job ended first")
+            return
+        job.status = "queued"
+        job.started_at = None
+        db.add(
+            JobEvent(
+                job_id=job.id,
+                type="requeued",
+                data={"reason": "worker shut down mid-run"},
+            )
+        )
+        await db.commit()
 
 
 async def _record_event(job_id: uuid.UUID, event_type: str, data: dict) -> None:
