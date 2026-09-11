@@ -323,6 +323,7 @@ async def execute_job(
         )
         if p
     )
+
     def _build_agent(prompted: bool) -> PaiAgent:
         """The same agent, differing only in how structured output is asked for.
 
@@ -408,9 +409,7 @@ async def execute_job(
             # prose, which is worth knowing when comparing runs across models.
             # Written now, not appended: the retry finalizes the job and this
             # frame's events never reach it.
-            await _record_event(
-                job_id, "output_mode_fallback", {"from": "tool", "to": "prompted"}
-            )
+            await _record_event(job_id, "output_mode_fallback", {"from": "tool", "to": "prompted"})
             return await execute_job(job_id, sync_cap=sync_cap, prompted_output=True)
         status, error = "failed", str(e)
     except httpx.TransportError as e:
