@@ -463,6 +463,83 @@ async def test_tool_calls_are_recorded_when_the_job_fails(
     assert [e["data"]["tool"] for e in events if e["type"] == "tool_call"] == ["escalate_to_human"]
 
 
+async def test_model_rejecting_forced_tool_choice_falls_back_to_prompted_output(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that will not be forced into a tool call is still usable.
+
+    Structured output is asked for by forcing a tool call, and models that
+    refuse reject the request outright. Without a fallback, an agent with an
+    output schema cannot run on such a model at all — which is a poor answer
+    from a platform whose premise is that the model is a per-version choice.
+    """
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    attempts: list[str] = []
+
+    def fussy_model(*_args) -> FunctionModel:
+        def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            # output_tools is how the tool mode presents the schema; its
+            # absence is how the prompted mode does.
+            if info.output_tools:
+                attempts.append("tool")
+                raise ModelHTTPError(
+                    status_code=400,
+                    model_name="fussy",
+                    body={"error": {"message": 'tool_choice: type "tool" is not supported'}},
+                )
+            attempts.append("prompted")
+            return ModelResponse(
+                parts=[TextPart('{"risk_level": "low", "factors": ["a"], "summary": "a"}')]
+            )
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", fussy_model)
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+    assert job["output"]["risk_level"] == "low", "the schema still shapes the output"
+    assert attempts == ["tool", "prompted"], attempts
+
+    # Recorded, not silent: this run got its structure from parsed prose, which
+    # matters when comparing the same agent across models.
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert "output_mode_fallback" in [e["type"] for e in events]
+
+
+async def test_other_400s_still_fail_the_job(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the tool_choice rejection is retried — a 400 is otherwise final."""
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    calls = {"n": 0}
+
+    def broken_model(*_args) -> FunctionModel:
+        def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            calls["n"] += 1
+            raise ModelHTTPError(
+                status_code=400, model_name="broken", body={"error": {"message": "bad request"}}
+            )
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", broken_model)
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "failed"
+    assert calls["n"] == 1, "an unrelated 400 must not be retried"
+
+
 # --- Data store tools ---
 
 
