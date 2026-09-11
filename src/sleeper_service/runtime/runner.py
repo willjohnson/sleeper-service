@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import httpx
 from pydantic_ai import Agent as PaiAgent
-from pydantic_ai import BinaryContent, StructuredDict
+from pydantic_ai import BinaryContent, PromptedOutput, StructuredDict
 from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 from pydantic_ai.usage import RunUsage, UsageLimits
 
@@ -126,6 +126,24 @@ def _tool_call_events(messages: list) -> list[tuple[str, dict]]:
     return [("tool_call", calls[key]) for key in order]
 
 
+def _rejects_forced_tool_choice(error: ModelHTTPError) -> bool:
+    """Whether a 400 means "this model cannot be made to call a tool".
+
+    Structured output is asked for by forcing a tool call, which not every
+    model accepts — and the ones that refuse reject the request outright
+    rather than degrading. An agent with an output schema is then unusable on
+    that model entirely, which is a poor answer from a platform whose whole
+    premise is that the model is a per-version choice.
+
+    Matched on the message because providers do not give this a code of its
+    own; aggregators pass the upstream text through, so the same phrase
+    arrives whichever vendor served it.
+    """
+    if error.status_code != 400:
+        return False
+    return "tool_choice" in str(error.body or error).lower()
+
+
 def _calc_cost(usage: RunUsage, model_name: str) -> tuple[Decimal, bool]:
     """Returns (cost, priced). An unpriced model costs 0 and says so.
 
@@ -172,7 +190,9 @@ async def _load_file_content(payload: dict, tenant_id: uuid.UUID) -> tuple[list,
     return parts, texts
 
 
-async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
+async def execute_job(
+    job_id: uuid.UUID, *, sync_cap: bool = False, prompted_output: bool = False
+) -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db:
         job = await db.get(Job, job_id)
@@ -303,17 +323,31 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         )
         if p
     )
-    output_type = StructuredDict(version.output_schema) if version.output_schema else str
-    pai_agent = PaiAgent(
-        model,
-        instructions=instructions,
-        output_type=output_type,
-        model_settings=version.params or None,
-        toolsets=toolsets or None,
-        # Retries stay above the request cap so max_iterations is the binding
-        # guardrail (UsageLimitExceeded → iteration_limit, a first-class status).
-        retries=version.max_iterations,
-    )
+    def _build_agent(prompted: bool) -> PaiAgent:
+        """The same agent, differing only in how structured output is asked for.
+
+        Tool output is the better mode where it works — the schema is enforced
+        by the provider rather than by parsing prose — so it stays the default
+        and prompted output is only reached by falling back.
+        """
+        if version.output_schema:
+            schema = StructuredDict(version.output_schema)
+            output_type = PromptedOutput(schema) if prompted else schema
+        else:
+            output_type = str
+        return PaiAgent(
+            model,
+            instructions=instructions,
+            output_type=output_type,
+            model_settings=version.params or None,
+            toolsets=toolsets or None,
+            # Retries stay above the request cap so max_iterations is the
+            # binding guardrail (UsageLimitExceeded → iteration_limit, a
+            # first-class status).
+            retries=version.max_iterations,
+        )
+
+    pai_agent = _build_agent(prompted=prompted_output)
     limits = UsageLimits(request_limit=version.max_iterations)
     timeout_s = version.timeout_s
     if sync_cap:
@@ -368,6 +402,16 @@ async def execute_job(job_id: uuid.UUID, *, sync_cap: bool = False) -> None:
         if e.status_code == 429 or e.status_code >= 500:
             await _record_event(job_id, "transient_error", {"error": str(e)})
             raise TransientJobError(str(e)) from e
+        if _rejects_forced_tool_choice(e) and version.output_schema and not prompted_output:
+            # Ask for the schema in the prompt instead. Recorded rather than
+            # silent: the same agent is now getting its structure from parsed
+            # prose, which is worth knowing when comparing runs across models.
+            # Written now, not appended: the retry finalizes the job and this
+            # frame's events never reach it.
+            await _record_event(
+                job_id, "output_mode_fallback", {"from": "tool", "to": "prompted"}
+            )
+            return await execute_job(job_id, sync_cap=sync_cap, prompted_output=True)
         status, error = "failed", str(e)
     except httpx.TransportError as e:
         await _record_event(job_id, "transient_error", {"error": str(e)})
