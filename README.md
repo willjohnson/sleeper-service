@@ -183,9 +183,11 @@ docker compose exec api sleeper seed-models   # register starter models (incl. k
 > **Hosting it rather than running it locally?** `render.yaml` in the repo root
 > is a Render Blueprint for the whole stack — API, worker, Postgres, Key Value —
 > with payload files on Cloudflare R2, at roughly $31.50/month.
-> [`docs/DEPLOY.md`](docs/DEPLOY.md) walks through it. The blueprint is a
-> worked example as much as a deployment: the same shape maps onto any host
-> that runs a container plus managed Postgres and Redis.
+> [`docs/DEPLOY.md`](docs/DEPLOY.md) walks through it, and
+> [`docs/FIRST_AGENT.md`](docs/FIRST_AGENT.md) goes from a running service to a
+> working agent end to end. The blueprint is a worked example as much as a
+> deployment: the same shape maps onto any host that runs a container plus
+> managed Postgres and Redis.
 
 Create an agent, give it a version, run a job:
 

@@ -189,11 +189,23 @@ reachable; `/docs` serves the OpenAPI UI. Then log in to `/ui` with the user
 from step 5 and run a job with the `test` provider — it exercises the full
 queue → worker → callback path without needing any vendor API key.
 
+## Next: build something on it
+
+[`FIRST_AGENT.md`](FIRST_AGENT.md) picks up here — a worked example that reads a
+file from object storage, returns structured output, is driven by an external
+script, and is scored by a second agent. It is where the platform's own seams
+(grants, versions, invoke keys, the job trail) stop being abstract.
+
 ## Iterating
 
 Both services auto-deploy on push to `main`. Migrations run on each deploy
 through the pre-deploy command. Changes to `render.yaml` itself are picked up
 from the Blueprint page.
+
+A deploy restarts the worker, so a job running at that moment is interrupted. It
+goes back on the queue and runs again — the trail records a `requeued` event —
+but a long job can be restarted by an unlucky merge, and a job that is not
+idempotent should be submitted with an idempotency key.
 
 ## Deliberately not enabled
 
