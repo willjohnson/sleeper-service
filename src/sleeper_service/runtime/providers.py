@@ -6,6 +6,10 @@ environment (pydantic-ai's own env-var lookup). The `test` provider maps to
 pydantic-ai's TestModel so demos, tests, and CI run without vendor keys.
 """
 
+from decimal import Decimal
+
+import anyio
+import httpx
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models import Model as PaiModel
 from sqlalchemy import select
@@ -16,6 +20,57 @@ from sleeper_service.crypto import decrypt
 from sleeper_service.db.models import Agent, ProviderCred
 
 SUPPORTED_PROVIDERS = {"anthropic", "openai", "google", "openrouter", "test"}
+
+
+# OpenRouter records the real charge per generation, which is the only source
+# that knows what a call through an aggregator actually cost. Bounded tightly:
+# this runs on the job's finishing path and must never delay or fail it.
+OPENROUTER_COST_URL = "https://openrouter.ai/api/v1/generation"
+OPENROUTER_COST_TIMEOUT_S = 5.0
+OPENROUTER_COST_ATTEMPTS = 3
+OPENROUTER_COST_BACKOFF_S = 1.0
+
+
+async def fetch_openrouter_cost(api_key: str, generation_ids: list[str]) -> Decimal | None:
+    """Real USD charged for these generations, or None if it cannot be had.
+
+    Static price tables cannot price an aggregator: OpenRouter routes a request
+    to whichever upstream is available, and bills what that upstream charged.
+    genai-prices has no entry for most of these model refs at all, so without
+    this the cost is recorded as zero and the agent's spending limit — enforced
+    against accumulated cost — never binds.
+
+    Fails open, always. A pricing lookup is not worth failing finished work
+    over, and the caller keeps its zero-and-say-so behaviour when this returns
+    None. The record is written asynchronously by OpenRouter and is not always
+    there the instant a completion returns, hence the short retry.
+    """
+    if not api_key or not generation_ids:
+        return None
+    total = Decimal(0)
+    found = False
+    async with httpx.AsyncClient(timeout=OPENROUTER_COST_TIMEOUT_S) as http:
+        for generation_id in generation_ids:
+            for attempt in range(OPENROUTER_COST_ATTEMPTS):
+                try:
+                    response = await http.get(
+                        OPENROUTER_COST_URL,
+                        params={"id": generation_id},
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                    if response.status_code == 404:
+                        # Not written yet; give it a moment before giving up.
+                        await anyio.sleep(OPENROUTER_COST_BACKOFF_S * (attempt + 1))
+                        continue
+                    response.raise_for_status()
+                    cost = (response.json() or {}).get("data", {}).get("total_cost")
+                    if cost is not None:
+                        total += Decimal(str(cost))
+                        found = True
+                    break
+                except Exception:
+                    break
+    return total if found else None
 
 
 def validate_model_registration(provider: str, model_string: str) -> str | None:

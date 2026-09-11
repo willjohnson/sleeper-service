@@ -1,8 +1,10 @@
 """Operational infrastructure: retention, concurrency caps, alerting gaps,
 job listing/retry, health."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -268,6 +270,259 @@ async def test_healthz_checks_dependencies(client: AsyncClient) -> None:
     body = r.json()
     assert body["postgres"] == "ok"
     assert body["redis"] == "ok"
+
+
+def _routed_model(*_args):
+    """A model whose response carries a provider generation id, as an
+    aggregator's does — that id is what the cost lookup is keyed on."""
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="final_result",
+                    args={"risk_level": "low", "factors": ["a"], "summary": "a"},
+                )
+            ],
+            provider_response_id="gen-abc123",
+        )
+
+    return FunctionModel(respond)
+
+
+def _cancelling_model(*_args):
+    """A model whose call is cancelled, as a worker shutdown cancels one.
+
+    Raised from inside the run rather than from build_model, which is called
+    before the try block that handles cancellation.
+    """
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo):
+        raise asyncio.CancelledError
+
+    return FunctionModel(respond)
+
+
+async def test_worker_shutdown_requeues_a_top_level_job(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job killed with its worker did nothing wrong and must come back.
+
+    arq already redelivers a cancelled job, but execute_job returns
+    immediately unless the row is queued or running — so marking it failed
+    made the redelivery useless and the job was dropped by our own guard.
+    Every deploy that restarts the worker used to kill whatever was mid-flight.
+    """
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+
+    monkeypatch.setattr(runner, "build_model", _cancelling_model)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "queued", "a job killed with its worker must stay runnable"
+    assert job["started_at"] is None
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert "requeued" in [e["type"] for e in events]
+
+    # ...and the redelivery actually runs, rather than being dropped by the
+    # guard at the top of execute_job. That guard is what made the old
+    # behaviour silent.
+    monkeypatch.undo()
+    await runner.execute_job(uuid.UUID(job_id))
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+
+
+async def test_cancelled_child_job_fails_rather_than_requeueing(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child cancelled by its parent has nothing to come back to.
+
+    Delegation calls execute_job directly, so a child was never on the queue —
+    nothing would redeliver it, and its parent is already gone.
+    """
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    parent = (await _submit(client, bob, risk_agent["agent"]["id"])).json()
+    child = (await _submit(client, bob, risk_agent["agent"]["id"])).json()
+
+    async with get_sessionmaker()() as db:
+        row = await db.get(Job, uuid.UUID(child["id"]))
+        row.parent_job_id = uuid.UUID(parent["id"])
+        await db.commit()
+
+    monkeypatch.setattr(runner, "build_model", _cancelling_model)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.execute_job(uuid.UUID(child["id"]))
+
+    job = (await client.get(f"/v1/jobs/{child['id']}", headers=bob)).json()
+    assert job["status"] == "failed"
+    assert "calling job ended first" in job["error"]
+
+
+async def test_openrouter_cost_comes_from_the_provider(
+    client: AsyncClient, risk_agent: dict, bootstrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A price table cannot price an aggregator; the aggregator can.
+
+    OpenRouter routes to whichever upstream is available and bills what that
+    upstream charged, so the real number is only knowable by asking. Without
+    it these jobs record zero and the agent's spending limit never binds.
+    """
+    from sleeper_service.runtime import providers
+
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        "/v1/models",
+        headers=root,
+        json={
+            "provider": "openrouter",
+            "name": "routed",
+            "model_string": "openrouter:vendor/routed",
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{risk_agent['agent']['id']}/versions",
+        headers=bob,
+        json={
+            "prompt": "assess",
+            "model": "openrouter:vendor/routed",
+            "output_schema": risk_agent["version"]["output_schema"],
+        },
+    )
+    assert r.status_code == 201, r.text
+    version_no = r.json()["version_no"]
+
+    def unpriced(*_args, **_kwargs):
+        raise LookupError("Unable to find model")
+
+    monkeypatch.setattr("genai_prices.calc_price", unpriced)
+
+    async def fake_cost(api_key: str, generation_ids: list[str]):
+        assert generation_ids, "the generation id must reach the lookup"
+        return Decimal("0.0425")
+
+    monkeypatch.setattr(providers, "fetch_openrouter_cost", fake_cost)
+    monkeypatch.setattr(runner, "fetch_openrouter_cost", fake_cost)
+    monkeypatch.setattr(runner, "build_model", _routed_model)
+
+    r = await _submit(client, bob, risk_agent["agent"]["id"], version_no=version_no)
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+    assert Decimal(str(job["cost"])) == Decimal("0.0425")
+    # Priced after all, so no gap is reported.
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert "cost_unpriced" not in [e["type"] for e in events]
+
+
+async def test_openrouter_cost_lookup_failing_leaves_the_job_alone(
+    client: AsyncClient, risk_agent: dict, bootstrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pricing lookup must never cost a finished job its result."""
+    from sleeper_service.runtime import providers
+
+    async def boom(api_key: str, generation_ids: list[str]):
+        return None
+
+    monkeypatch.setattr(providers, "fetch_openrouter_cost", boom)
+    monkeypatch.setattr(runner, "fetch_openrouter_cost", boom)
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+
+
+async def test_unpriced_model_is_recorded_not_silently_free(
+    client: AsyncClient, risk_agent: dict, bootstrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model genai-prices has no entry for must not read as costing nothing.
+
+    Spending limits are enforced against accumulated cost, so an unpriced
+    model spends real money against a budget that never moves — the limit is
+    inert for exactly the models nobody has checked. Cost still records as 0
+    (a gap in a pricing table is no reason to refuse work), but the job says
+    the number is unknown rather than merely low.
+    """
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def unpriced(*_args, **_kwargs):
+        raise LookupError("Unable to find model")
+
+    monkeypatch.setattr("genai_prices.calc_price", unpriced)
+
+    # A real vendor, not the keyless test provider — that one is free on
+    # purpose, and reporting it as a pricing gap would put an event on every
+    # job the test suite runs.
+    root = auth(bootstrap.superuser_key)
+    r = await client.post(
+        "/v1/models",
+        headers=root,
+        json={
+            "provider": "anthropic",
+            "name": "not-in-the-price-table",
+            "model_string": "anthropic:not-in-the-price-table",
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await client.post(
+        f"/v1/agents/{risk_agent['agent']['id']}/versions",
+        headers=bob,
+        json={
+            "prompt": "assess",
+            "model": "anthropic:not-in-the-price-table",
+            "output_schema": risk_agent["version"]["output_schema"],
+        },
+    )
+    assert r.status_code == 201, r.text
+    version_no = r.json()["version_no"]
+
+    def priced_model(*_args) -> FunctionModel:
+        def respond(messages: list, info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="final_result",
+                        args={"risk_level": "low", "factors": ["a"], "summary": "a"},
+                    )
+                ]
+            )
+
+        return FunctionModel(respond)
+
+    monkeypatch.setattr(runner, "build_model", priced_model)
+    # Pinned: publishing does not promote, so the current version is still
+    # the test-provider one the fixture created.
+    r = await _submit(client, bob, risk_agent["agent"]["id"], version_no=version_no)
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+    assert float(job["cost"]) == 0.0
+    assert job["tokens_out"] > 0, "tokens were spent even though cost is zero"
+
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    unpriced_events = [e for e in events if e["type"] == "cost_unpriced"]
+    assert len(unpriced_events) == 1, [e["type"] for e in events]
+    assert unpriced_events[0]["data"]["model"]
 
 
 def test_init_refuses_placeholder_secret(monkeypatch: pytest.MonkeyPatch) -> None:

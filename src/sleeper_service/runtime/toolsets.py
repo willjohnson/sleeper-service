@@ -136,6 +136,18 @@ class _StoreGrant:
             raise ModelRetry(f"path escapes the granted prefix: {path!r}")
         return candidate
 
+    def relative(self, key: str, root: str) -> str:
+        """A backend key as the tools accept it: relative to the granted prefix.
+
+        Listings and inputs must share one coordinate system. Stripping only
+        the root leaves the grant prefix on every entry, so a path read out of
+        list_files and passed back to read_file resolves under the prefix a
+        second time — "basic/GAME2.BAS" becomes "basic/basic/GAME2.BAS", which
+        exists nowhere.
+        """
+        rel = key.removeprefix(root + "/")
+        return rel.removeprefix(self.prefix + "/") if self.prefix else rel
+
     def fs_and_root(self) -> tuple[Any, str]:
         """Returns (filesystem, root): a real fsspec filesystem, or for Box a
         backend duck-typing the three calls the file tools make. Runs inside
@@ -177,6 +189,21 @@ class _StoreGrant:
         raise GrantError(f"data store type {self.store.type!r} not supported yet")
 
 
+def _not_found(store_name: str, path: str) -> str:
+    """A missing path is the model's mistake to fix, not the job's to die on.
+
+    fsspec raises FileNotFoundError, which propagates out of the tool and ends
+    the run. ModelRetry hands it back instead, so the model can list and try
+    again — and the message says which coordinate system the tool wants,
+    because the usual cause is a path that already includes the grant prefix.
+    """
+    return (
+        f"no such path in {store_name!r}: {path!r}. Paths are relative to the granted "
+        "prefix, which is already applied — pass what list_files returned, without "
+        "prepending a directory."
+    )
+
+
 async def build_store_toolset(
     db: AsyncSession, tenant_id: uuid.UUID, data_store_grants: list
 ) -> AbstractToolset | None:
@@ -200,19 +227,27 @@ async def build_store_toolset(
     # the event loop
 
     async def list_files(store_name: str, path: str = "") -> list[str]:
-        """List files in a granted data store under the given path."""
+        """List files in a granted data store under the given path.
+
+        Paths are relative to the grant, and come back the same way, so an
+        entry from here can be passed straight to read_file.
+        """
         g = _grant(store_name)
         full = g.resolve(path)
 
         def _ls() -> list[str]:
             fs, root = g.fs_and_root()
             base = f"{root}/{full}" if full else root
-            return [p.removeprefix(root + "/") for p in fs.ls(base, detail=False)]
+            return [g.relative(p, root) for p in fs.ls(base, detail=False)]
 
-        return await anyio.to_thread.run_sync(_ls)
+        try:
+            return await anyio.to_thread.run_sync(_ls)
+        except FileNotFoundError:
+            raise ModelRetry(_not_found(store_name, path)) from None
 
     async def read_file(store_name: str, path: str) -> str:
-        """Read a text file from a granted data store."""
+        """Read a text file from a granted data store. The path is relative to
+        the grant, as returned by list_files."""
         g = _grant(store_name)
         full = g.resolve(path)
 
@@ -221,7 +256,10 @@ async def build_store_toolset(
             data = fs.cat_file(f"{root}/{full}")
             return data[:MAX_READ_BYTES].decode(errors="replace")
 
-        return await anyio.to_thread.run_sync(_read)
+        try:
+            return await anyio.to_thread.run_sync(_read)
+        except FileNotFoundError:
+            raise ModelRetry(_not_found(store_name, path)) from None
 
     async def write_file(store_name: str, path: str, content: str) -> str:
         """Write a text file to a granted data store (requires a read-write grant)."""
@@ -235,7 +273,8 @@ async def build_store_toolset(
             fs.pipe_file(f"{root}/{full}", content.encode())
 
         await anyio.to_thread.run_sync(_write)
-        return f"wrote {len(content)} chars to {store_name}:{full}"
+        # Reported as given, not as resolved: the caller's coordinate system.
+        return f"wrote {len(content)} chars to {store_name}:{path}"
 
     return FunctionToolset([list_files, read_file, write_file], id="data-stores")
 
