@@ -39,7 +39,7 @@ jobs:
         run: >
           docker run -d -p 9000:9000
           -e MINIO_ROOT_USER=$MINIO_ACCESS_KEY -e MINIO_ROOT_PASSWORD=$MINIO_SECRET_KEY
-          quay.io/minio/minio server /data
+          cgr.dev/chainguard/minio@sha256:e7728e37a015dcd2f2b146abc4aedc0096769ac72cb64cc9ed36b7f4183361e1 server /data
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
