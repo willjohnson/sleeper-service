@@ -292,6 +292,74 @@ def _routed_model(*_args):
     return FunctionModel(respond)
 
 
+# Verbatim from a job that died this way: OpenRouter answered 200 with
+# finish_reason "error" (choices[0].error: 504 "Upstream idle timeout
+# exceeded") and the SDK rejected the envelope.
+UPSTREAM_IDLE_TIMEOUT = (
+    "Invalid response from openrouter chat completions endpoint: "
+    "1 validation error for ChatCompletion\nchoices.0.finish_reason\n"
+    "  Input should be 'stop', 'length', 'tool_calls', 'content_filter' or "
+    "'function_call' [type=literal_error, input_value='error', input_type=str]"
+)
+
+
+def _upstream_failing_model(*_args):
+    """A provider that drops its upstream mid-generation."""
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo):
+        raise UnexpectedModelBehavior(UPSTREAM_IDLE_TIMEOUT)
+
+    return FunctionModel(respond)
+
+
+def _nonsense_model(*_args):
+    """A model that genuinely misbehaved — its own result, not a hiccup."""
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo):
+        raise UnexpectedModelBehavior("Exceeded maximum retries (1) for output validation")
+
+    return FunctionModel(respond)
+
+
+async def test_in_band_upstream_failure_is_transient(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aggregator reports a dropped upstream inside a 200, which the SDK
+    surfaces as UnexpectedModelBehavior. Retry it like any 5xx; the job did
+    nothing wrong."""
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+
+    monkeypatch.setattr(runner, "build_model", _upstream_failing_model)
+    with pytest.raises(runner.TransientJobError):
+        await runner.execute_job(uuid.UUID(job_id))
+
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert "transient_error" in [e["type"] for e in events]
+
+
+async def test_model_misbehaviour_still_fails_the_job(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the split: nonsense from the model is the run's
+    result, and retrying it would only spend the budget again."""
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+
+    monkeypatch.setattr(runner, "build_model", _nonsense_model)
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "failed"
+    assert "UnexpectedModelBehavior" in job["error"]
+
+
 def _cancelling_model(*_args):
     """A model whose call is cancelled, as a worker shutdown cancels one.
 
