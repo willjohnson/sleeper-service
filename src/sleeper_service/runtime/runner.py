@@ -431,7 +431,30 @@ async def execute_job(
             for message in run_messages
             if getattr(message, "provider_response_id", None)
         ]
-        cost_override = await fetch_openrouter_cost(api_key or "", generation_ids)
+        lookup = await fetch_openrouter_cost(api_key or "", generation_ids)
+        cost_override = lookup.total
+        if lookup.missing:
+            # A lower bound, recorded as such. Saying nothing would put a
+            # number on the job that reads like the charge and is short by
+            # whatever those generations cost — spend the limit never sees.
+            logger.warning(
+                "openrouter cost incomplete for job %s: %d of %d generations "
+                "had no record yet; %s is a lower bound",
+                job_id,
+                lookup.missing,
+                len(generation_ids),
+                lookup.total,
+            )
+            events.append(
+                (
+                    "cost_incomplete",
+                    {
+                        "missing": lookup.missing,
+                        "generations": len(generation_ids),
+                        "recorded": str(lookup.total) if lookup.total is not None else None,
+                    },
+                )
+            )
 
     # Post-hooks
     if status == "succeeded" and version.output_schema:
