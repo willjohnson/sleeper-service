@@ -115,7 +115,11 @@ services:
       retries: 10
 
   minio:
-    image: quay.io/minio/minio:latest
+    # Chainguard's rebuild, pinned by digest. MinIO archived its own
+    # repository (read-only since 2026-04) and stopped publishing community
+    # images; this one is built from a fork that still carries the CVE fixes,
+    # and is rebuilt daily. Same server, same S3 API, same flags.
+    image: cgr.dev/chainguard/minio@sha256:e7728e37a015dcd2f2b146abc4aedc0096769ac72cb64cc9ed36b7f4183361e1
     command: server /data --console-address ":9001"
     environment:
       # No compose fallbacks: these are also the credentials for the payload
@@ -243,7 +247,9 @@ services:
     command: redis-server --maxmemory-policy noeviction
 
   langfuse-minio:
-    image: quay.io/minio/minio:latest
+    # Same image as upstream Langfuse moved to, for the same reason
+    # (langfuse/langfuse#10488).
+    image: cgr.dev/chainguard/minio@sha256:e7728e37a015dcd2f2b146abc4aedc0096769ac72cb64cc9ed36b7f4183361e1
     profiles: [langfuse]
     entrypoint: sh -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
     environment:

@@ -557,7 +557,13 @@ async def test_store_tools_scoping(client: AsyncClient, risk_agent: dict, bootst
         json={
             "name": "refdata",
             "type": "s3",
-            "config": {"bucket": "sleeper-files-test", "endpoint_url": "http://localhost:9000"},
+            # From settings, not hardcoded: this store must point at the same
+            # endpoint storage.put_object just wrote to, or the test silently
+            # reads a different server that happens to be on port 9000.
+            "config": {
+                "bucket": get_settings().minio_bucket,
+                "endpoint_url": get_settings().minio_endpoint,
+            },
             "credentials": {
                 "access_key": get_settings().minio_access_key,
                 "secret_key": get_settings().minio_secret_key,
