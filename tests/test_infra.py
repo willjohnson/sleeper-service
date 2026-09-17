@@ -476,7 +476,7 @@ async def test_openrouter_cost_comes_from_the_provider(
 
     async def fake_cost(api_key: str, generation_ids: list[str]):
         assert generation_ids, "the generation id must reach the lookup"
-        return Decimal("0.0425")
+        return providers.CostLookup(Decimal("0.0425"), 0)
 
     monkeypatch.setattr(providers, "fetch_openrouter_cost", fake_cost)
     monkeypatch.setattr(runner, "fetch_openrouter_cost", fake_cost)
@@ -501,7 +501,7 @@ async def test_openrouter_cost_lookup_failing_leaves_the_job_alone(
     from sleeper_service.runtime import providers
 
     async def boom(api_key: str, generation_ids: list[str]):
-        return None
+        return providers.CostLookup(None, 0)
 
     monkeypatch.setattr(providers, "fetch_openrouter_cost", boom)
     monkeypatch.setattr(runner, "fetch_openrouter_cost", boom)
@@ -513,6 +513,88 @@ async def test_openrouter_cost_lookup_failing_leaves_the_job_alone(
 
     job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
     assert job["status"] == "succeeded", job["error"]
+
+
+async def test_partial_openrouter_cost_is_recorded_as_incomplete(
+    client: AsyncClient, risk_agent: dict, bootstrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sum missing a generation is a lower bound, and must say so.
+
+    OpenRouter writes each generation's record asynchronously, and the one
+    least likely to be there is the final, largest call. Recording that sum
+    unannounced understates the run by its most expensive part.
+    """
+    from sleeper_service.runtime import providers
+
+    async def partial(api_key: str, generation_ids: list[str]):
+        return providers.CostLookup(Decimal("0.0009"), 1)
+
+    monkeypatch.setattr(providers, "fetch_openrouter_cost", partial)
+    monkeypatch.setattr(runner, "fetch_openrouter_cost", partial)
+    monkeypatch.setattr(runner, "build_model", _routed_model)
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await client.post(
+        "/v1/models",
+        headers=auth(bootstrap.superuser_key),
+        json={
+            "provider": "openrouter",
+            "name": "partial",
+            "model_string": "openrouter:vendor/partial",
+        },
+    )
+    assert r.status_code == 201, r.text
+    r = await client.post(
+        f"/v1/agents/{risk_agent['agent']['id']}/versions",
+        headers=bob,
+        json={
+            "prompt": "assess",
+            "model": "openrouter:vendor/partial",
+            "output_schema": risk_agent["version"]["output_schema"],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    r = await _submit(client, bob, risk_agent["agent"]["id"], version_no=r.json()["version_no"])
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+    # What is known is still recorded — a lower bound beats a table's zero.
+    assert Decimal(str(job["cost"])) == Decimal("0.0009")
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    gap = [e for e in events if e["type"] == "cost_incomplete"]
+    assert gap, "a cost short by a generation must be visible on the job"
+    assert gap[0]["data"]["missing"] == 1
+
+
+async def test_cost_lookup_counts_generations_that_never_arrive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 404 path is the one that under-reports, so count it."""
+    import httpx as httpx_mod
+
+    from sleeper_service.runtime import providers
+
+    async def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        if request.url.params["id"] == "gen-late":
+            return httpx_mod.Response(404)
+        return httpx_mod.Response(200, json={"data": {"total_cost": 0.5}})
+
+    transport = httpx_mod.MockTransport(handler)
+    real_client = httpx_mod.AsyncClient
+
+    def client_with_transport(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", client_with_transport)
+    monkeypatch.setattr(providers, "OPENROUTER_COST_BACKOFF_S", 0.0)
+
+    lookup = await providers.fetch_openrouter_cost("key", ["gen-done", "gen-late"])
+    assert lookup.total == Decimal("0.5")
+    assert lookup.missing == 1
 
 
 async def test_unpriced_model_is_recorded_not_silently_free(
