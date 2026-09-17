@@ -23,6 +23,10 @@ Check format ({"path": "risk_level", "op": ..., "value": ...}):
 The eval gate: a pending memory version (memory_approval governance) with an
 eval suite triggers a run pinned to that memory; a pass rate below the last
 completed run for the same agent version alerts the owning team.
+
+A run stops early rather than reporting a rate it did not measure. Statuses:
+"completed" (graded, and the only status a baseline is taken from),
+"budget_exceeded" (the money ran out), "errored" (the provider kept failing).
 """
 
 import uuid
@@ -45,6 +49,12 @@ PATH_OPS = {"equals", "contains", "in_range", "matches_regex"}
 # Validation runs editor-supplied top-level statements at case-creation time,
 # in the API process — keep the cap tight so a hostile def can't stall a route
 GRADER_VALIDATE_LIMITS = {**runners.DEFAULT_LIMITS, "max_duration_secs": 1.0}
+
+# One retry, then stop. Eval jobs do not go through arq, so this loop is the
+# only thing standing between a provider hiccup and a pass rate that reads as
+# the agent's own score.
+EVAL_TRANSIENT_ATTEMPTS = 2
+EVAL_TRANSIENT_BACKOFF_S = 5.0
 
 # Editor-supplied patterns search model output inside a worker thread that
 # holds the GIL while matching, so the `regex` module with a checked timeout
@@ -196,6 +206,39 @@ async def _refuse_run(
     )
 
 
+async def _halt_on_provider_failure(
+    eval_run_id: uuid.UUID, agent: Agent, detail: str, results: list | None = None
+) -> None:
+    """The provider kept failing, so the suite was never measured.
+
+    The same reasoning as _refuse_run, for the other way a run can stop early.
+    A 429, a dropped upstream or a network blip says nothing about the agent,
+    but grading its cases as failed writes a pass rate that reads as one — and
+    a completed run is exactly what becomes the next run's baseline and what a
+    pending memory version is gated on. So the run ends "errored" with no pass
+    rate, and the cases that did run are kept for the look back.
+    """
+    async with get_sessionmaker()() as db:
+        run = await db.get(EvalRun, eval_run_id)
+        run.status = "errored"
+        if results:
+            run.results = results
+        run.finished_at = datetime.now(UTC)
+        await db.commit()
+    await notify.notify(
+        agent.id,
+        "eval_regression",
+        f"Sleeper Service: eval run could not finish — {agent.name}",
+        f"Eval run {eval_run_id} stopped after repeated provider failures: {detail}. "
+        "No pass rate was recorded, so no baseline changed."
+        + (
+            " This run gates a PENDING memory version, which remains unevaluated."
+            if run.memory_version_id
+            else ""
+        ),
+    )
+
+
 async def run_eval(eval_run_id: uuid.UUID) -> None:
     """Execute every case for the run's agent, grade, store results.
     Sequential on purpose: suites are small and provider-friendly.
@@ -242,10 +285,23 @@ async def run_eval(eval_run_id: uuid.UUID) -> None:
             await db.commit()
             job_id = job.id
 
-        try:
-            await runner_mod.execute_job(job_id)
-        except runner_mod.TransientJobError as e:
-            await runner_mod.mark_job(job_id, "failed", f"transient provider error: {e}")
+        # Eval jobs run outside arq, so nothing else retries them: a single
+        # hiccup would otherwise be graded as the agent's failure.
+        transient: str | None = None
+        for attempt in range(EVAL_TRANSIENT_ATTEMPTS):
+            try:
+                await runner_mod.execute_job(job_id)
+                transient = None
+                break
+            except runner_mod.TransientJobError as e:
+                transient = str(e)
+                if attempt + 1 < EVAL_TRANSIENT_ATTEMPTS:
+                    await anyio.sleep(EVAL_TRANSIENT_BACKOFF_S)
+
+        if transient is not None:
+            await runner_mod.mark_job(job_id, "failed", f"transient provider error: {transient}")
+            await _halt_on_provider_failure(eval_run_id, agent, transient, results=results)
+            return
 
         async with sessionmaker() as db:
             job = await db.get(Job, job_id)
