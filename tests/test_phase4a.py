@@ -89,6 +89,77 @@ async def eval_cases(client: AsyncClient, risk_agent: dict) -> dict:
     return risk_agent
 
 
+async def test_provider_hiccup_is_retried_not_graded(
+    client: AsyncClient, eval_cases: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One transient failure must not show up as the agent's score."""
+    from sleeper_service.runtime import evals as evals_mod
+
+    bob = auth(eval_cases["users"]["bob"]["api_key"])
+    agent_id = eval_cases["agent"]["id"]
+    real_execute = runner.execute_job
+    attempts: list[uuid.UUID] = []
+
+    async def flaky_once(job_id, **kwargs):
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            raise runner.TransientJobError("provider 503")
+        return await real_execute(job_id, **kwargs)
+
+    monkeypatch.setattr(runner, "execute_job", flaky_once)
+    monkeypatch.setattr(evals_mod, "EVAL_TRANSIENT_BACKOFF_S", 0.0)
+
+    r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={})
+    run_id = r.json()["id"]
+    await run_eval(uuid.UUID(run_id))
+
+    run = (await client.get(f"/v1/agents/{agent_id}/eval-runs/{run_id}", headers=bob)).json()
+    assert run["status"] == "completed"
+    assert float(run["pass_rate"]) == 0.5, "the retry's result is what gets graded"
+
+
+async def test_repeated_provider_failure_errors_the_run(
+    client: AsyncClient, eval_cases: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A suite that never ran has no pass rate — and must not become the
+    baseline a later real regression is measured against, nor a gate a
+    pending memory version appears to have failed."""
+    from sleeper_service.runtime import evals as evals_mod
+
+    bob = auth(eval_cases["users"]["bob"]["api_key"])
+    agent_id = eval_cases["agent"]["id"]
+
+    # A completed run first, so there is a baseline the errored run could spoil.
+    r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={})
+    good_run_id = r.json()["id"]
+    await run_eval(uuid.UUID(good_run_id))
+
+    attempts: list[uuid.UUID] = []
+
+    async def always_transient(job_id, **kwargs):
+        attempts.append(job_id)
+        raise runner.TransientJobError("upstream idle timeout")
+
+    monkeypatch.setattr(runner, "execute_job", always_transient)
+    monkeypatch.setattr(evals_mod, "EVAL_TRANSIENT_BACKOFF_S", 0.0)
+
+    r = await client.post(f"/v1/agents/{agent_id}/eval-runs", headers=bob, json={})
+    bad_run_id = r.json()["id"]
+    await run_eval(uuid.UUID(bad_run_id))
+
+    run = (await client.get(f"/v1/agents/{agent_id}/eval-runs/{bad_run_id}", headers=bob)).json()
+    assert run["status"] == "errored"
+    assert run["pass_rate"] is None, "a rate that was never measured must not be written"
+    assert len(attempts) == evals_mod.EVAL_TRANSIENT_ATTEMPTS, "one retry, then stop"
+    # The suite stops at the first case rather than burning the rest on a
+    # provider that is down.
+    assert len(run["results"]) == 0
+
+    runs = (await client.get(f"/v1/agents/{agent_id}/eval-runs", headers=bob)).json()
+    completed = [r for r in runs if r["status"] == "completed"]
+    assert [r["id"] for r in completed] == [good_run_id], "the baseline is untouched"
+
+
 async def test_eval_run_end_to_end(client: AsyncClient, eval_cases: dict) -> None:
     bob = auth(eval_cases["users"]["bob"]["api_key"])
     carol = auth(eval_cases["users"]["carol"]["api_key"])
