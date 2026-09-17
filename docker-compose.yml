@@ -115,7 +115,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       # No compose fallbacks: these are also the credentials for the payload
@@ -243,7 +243,7 @@ services:
     command: redis-server --maxmemory-policy noeviction
 
   langfuse-minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     profiles: [langfuse]
     entrypoint: sh -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
     environment:
