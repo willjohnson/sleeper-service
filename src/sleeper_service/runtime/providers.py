@@ -6,7 +6,9 @@ environment (pydantic-ai's own env-var lookup). The `test` provider maps to
 pydantic-ai's TestModel so demos, tests, and CI run without vendor keys.
 """
 
+import time
 from decimal import Decimal
+from typing import NamedTuple
 
 import anyio
 import httpx
@@ -29,10 +31,27 @@ OPENROUTER_COST_URL = "https://openrouter.ai/api/v1/generation"
 OPENROUTER_COST_TIMEOUT_S = 5.0
 OPENROUTER_COST_ATTEMPTS = 3
 OPENROUTER_COST_BACKOFF_S = 1.0
+# Whole-call ceiling. Per-generation retries alone bound nothing: a run with
+# several generations multiplies them, and this sits on the finishing path.
+OPENROUTER_COST_DEADLINE_S = 20.0
 
 
-async def fetch_openrouter_cost(api_key: str, generation_ids: list[str]) -> Decimal | None:
-    """Real USD charged for these generations, or None if it cannot be had.
+class CostLookup(NamedTuple):
+    """What the generation records could say about a run's real charge.
+
+    `total` is the sum over the generations that answered — None when none of
+    them did. `missing` counts those whose record never arrived, and is the
+    part that matters to a caller: a sum with missing generations is a lower
+    bound, not the charge, and the difference is money that no spending limit
+    will ever see.
+    """
+
+    total: Decimal | None
+    missing: int
+
+
+async def fetch_openrouter_cost(api_key: str, generation_ids: list[str]) -> CostLookup:
+    """Real USD charged for these generations, as far as it can be known.
 
     Static price tables cannot price an aggregator: OpenRouter routes a request
     to whichever upstream is available, and bills what that upstream charged.
@@ -41,17 +60,26 @@ async def fetch_openrouter_cost(api_key: str, generation_ids: list[str]) -> Deci
     against accumulated cost — never binds.
 
     Fails open, always. A pricing lookup is not worth failing finished work
-    over, and the caller keeps its zero-and-say-so behaviour when this returns
+    over, and the caller keeps its zero-and-say-so behaviour when `total` is
     None. The record is written asynchronously by OpenRouter and is not always
-    there the instant a completion returns, hence the short retry.
+    there the instant a completion returns, hence the short retry — and the
+    one most likely to be missing is the final, largest generation, the one
+    that just returned. Reporting that sum as the charge understates a run by
+    exactly its most expensive call, so a gap is counted and returned rather
+    than folded silently into a plausible-looking number.
     """
     if not api_key or not generation_ids:
-        return None
+        return CostLookup(None, 0)
+    deadline = time.monotonic() + OPENROUTER_COST_DEADLINE_S
     total = Decimal(0)
     found = False
+    missing = 0
     async with httpx.AsyncClient(timeout=OPENROUTER_COST_TIMEOUT_S) as http:
         for generation_id in generation_ids:
+            resolved = False
             for attempt in range(OPENROUTER_COST_ATTEMPTS):
+                if time.monotonic() >= deadline:
+                    break
                 try:
                     response = await http.get(
                         OPENROUTER_COST_URL,
@@ -67,10 +95,13 @@ async def fetch_openrouter_cost(api_key: str, generation_ids: list[str]) -> Deci
                     if cost is not None:
                         total += Decimal(str(cost))
                         found = True
+                        resolved = True
                     break
                 except Exception:
                     break
-    return total if found else None
+            if not resolved:
+                missing += 1
+    return CostLookup(total if found else None, missing)
 
 
 def validate_model_registration(provider: str, model_string: str) -> str | None:

@@ -292,6 +292,74 @@ def _routed_model(*_args):
     return FunctionModel(respond)
 
 
+# Verbatim from a job that died this way: OpenRouter answered 200 with
+# finish_reason "error" (choices[0].error: 504 "Upstream idle timeout
+# exceeded") and the SDK rejected the envelope.
+UPSTREAM_IDLE_TIMEOUT = (
+    "Invalid response from openrouter chat completions endpoint: "
+    "1 validation error for ChatCompletion\nchoices.0.finish_reason\n"
+    "  Input should be 'stop', 'length', 'tool_calls', 'content_filter' or "
+    "'function_call' [type=literal_error, input_value='error', input_type=str]"
+)
+
+
+def _upstream_failing_model(*_args):
+    """A provider that drops its upstream mid-generation."""
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo):
+        raise UnexpectedModelBehavior(UPSTREAM_IDLE_TIMEOUT)
+
+    return FunctionModel(respond)
+
+
+def _nonsense_model(*_args):
+    """A model that genuinely misbehaved — its own result, not a hiccup."""
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    def respond(messages: list, info: AgentInfo):
+        raise UnexpectedModelBehavior("Exceeded maximum retries (1) for output validation")
+
+    return FunctionModel(respond)
+
+
+async def test_in_band_upstream_failure_is_transient(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aggregator reports a dropped upstream inside a 200, which the SDK
+    surfaces as UnexpectedModelBehavior. Retry it like any 5xx; the job did
+    nothing wrong."""
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+
+    monkeypatch.setattr(runner, "build_model", _upstream_failing_model)
+    with pytest.raises(runner.TransientJobError):
+        await runner.execute_job(uuid.UUID(job_id))
+
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    assert "transient_error" in [e["type"] for e in events]
+
+
+async def test_model_misbehaviour_still_fails_the_job(
+    client: AsyncClient, risk_agent: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the split: nonsense from the model is the run's
+    result, and retrying it would only spend the budget again."""
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await _submit(client, bob, risk_agent["agent"]["id"])
+    job_id = r.json()["id"]
+
+    monkeypatch.setattr(runner, "build_model", _nonsense_model)
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "failed"
+    assert "UnexpectedModelBehavior" in job["error"]
+
+
 def _cancelling_model(*_args):
     """A model whose call is cancelled, as a worker shutdown cancels one.
 
@@ -408,7 +476,7 @@ async def test_openrouter_cost_comes_from_the_provider(
 
     async def fake_cost(api_key: str, generation_ids: list[str]):
         assert generation_ids, "the generation id must reach the lookup"
-        return Decimal("0.0425")
+        return providers.CostLookup(Decimal("0.0425"), 0)
 
     monkeypatch.setattr(providers, "fetch_openrouter_cost", fake_cost)
     monkeypatch.setattr(runner, "fetch_openrouter_cost", fake_cost)
@@ -433,7 +501,7 @@ async def test_openrouter_cost_lookup_failing_leaves_the_job_alone(
     from sleeper_service.runtime import providers
 
     async def boom(api_key: str, generation_ids: list[str]):
-        return None
+        return providers.CostLookup(None, 0)
 
     monkeypatch.setattr(providers, "fetch_openrouter_cost", boom)
     monkeypatch.setattr(runner, "fetch_openrouter_cost", boom)
@@ -445,6 +513,88 @@ async def test_openrouter_cost_lookup_failing_leaves_the_job_alone(
 
     job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
     assert job["status"] == "succeeded", job["error"]
+
+
+async def test_partial_openrouter_cost_is_recorded_as_incomplete(
+    client: AsyncClient, risk_agent: dict, bootstrap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sum missing a generation is a lower bound, and must say so.
+
+    OpenRouter writes each generation's record asynchronously, and the one
+    least likely to be there is the final, largest call. Recording that sum
+    unannounced understates the run by its most expensive part.
+    """
+    from sleeper_service.runtime import providers
+
+    async def partial(api_key: str, generation_ids: list[str]):
+        return providers.CostLookup(Decimal("0.0009"), 1)
+
+    monkeypatch.setattr(providers, "fetch_openrouter_cost", partial)
+    monkeypatch.setattr(runner, "fetch_openrouter_cost", partial)
+    monkeypatch.setattr(runner, "build_model", _routed_model)
+
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    r = await client.post(
+        "/v1/models",
+        headers=auth(bootstrap.superuser_key),
+        json={
+            "provider": "openrouter",
+            "name": "partial",
+            "model_string": "openrouter:vendor/partial",
+        },
+    )
+    assert r.status_code == 201, r.text
+    r = await client.post(
+        f"/v1/agents/{risk_agent['agent']['id']}/versions",
+        headers=bob,
+        json={
+            "prompt": "assess",
+            "model": "openrouter:vendor/partial",
+            "output_schema": risk_agent["version"]["output_schema"],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+    r = await _submit(client, bob, risk_agent["agent"]["id"], version_no=r.json()["version_no"])
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=bob)).json()
+    assert job["status"] == "succeeded", job["error"]
+    # What is known is still recorded — a lower bound beats a table's zero.
+    assert Decimal(str(job["cost"])) == Decimal("0.0009")
+    events = (await client.get(f"/v1/jobs/{job_id}/events", headers=bob)).json()
+    gap = [e for e in events if e["type"] == "cost_incomplete"]
+    assert gap, "a cost short by a generation must be visible on the job"
+    assert gap[0]["data"]["missing"] == 1
+
+
+async def test_cost_lookup_counts_generations_that_never_arrive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 404 path is the one that under-reports, so count it."""
+    import httpx as httpx_mod
+
+    from sleeper_service.runtime import providers
+
+    async def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        if request.url.params["id"] == "gen-late":
+            return httpx_mod.Response(404)
+        return httpx_mod.Response(200, json={"data": {"total_cost": 0.5}})
+
+    transport = httpx_mod.MockTransport(handler)
+    real_client = httpx_mod.AsyncClient
+
+    def client_with_transport(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", client_with_transport)
+    monkeypatch.setattr(providers, "OPENROUTER_COST_BACKOFF_S", 0.0)
+
+    lookup = await providers.fetch_openrouter_cost("key", ["gen-done", "gen-late"])
+    assert lookup.total == Decimal("0.5")
+    assert lookup.missing == 1
 
 
 async def test_unpriced_model_is_recorded_not_silently_free(
