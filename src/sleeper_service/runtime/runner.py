@@ -17,7 +17,7 @@ from decimal import Decimal
 import httpx
 from pydantic_ai import Agent as PaiAgent
 from pydantic_ai import BinaryContent, PromptedOutput, StructuredDict
-from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
+from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sleeper_service import storage
@@ -142,6 +142,27 @@ def _rejects_forced_tool_choice(error: ModelHTTPError) -> bool:
     if error.status_code != 400:
         return False
     return "tool_choice" in str(error.body or error).lower()
+
+
+def _is_upstream_failure(error: UnexpectedModelBehavior) -> bool:
+    """Whether the model's "misbehaviour" is really the provider falling over.
+
+    An aggregator that loses its upstream mid-generation does not answer with
+    a 5xx — it answers 200 and says so inside the envelope, as OpenRouter's
+    `finish_reason: "error"` (the detail rides in `choices[0].error`, e.g.
+    504 "Upstream idle timeout exceeded"). The SDK validates that envelope
+    against the OpenAI schema, where "error" is not a legal finish_reason, and
+    raises UnexpectedModelBehavior — the same exception it raises for a model
+    that genuinely returned nonsense.
+
+    The two need opposite handling: nonsense is the run's own result and
+    retrying it just spends the budget again, while a dropped upstream is a
+    hiccup and the job deserves the retry every 429/5xx already gets. Matched
+    on the message for the reason _rejects_forced_tool_choice is: the
+    distinction has no code of its own.
+    """
+    message = str(error)
+    return "finish_reason" in message and "input_value='error'" in message
 
 
 def _calc_cost(usage: RunUsage, model_name: str) -> tuple[Decimal, bool]:
@@ -412,6 +433,11 @@ async def execute_job(
             await _record_event(job_id, "output_mode_fallback", {"from": "tool", "to": "prompted"})
             return await execute_job(job_id, sync_cap=sync_cap, prompted_output=True)
         status, error = "failed", str(e)
+    except UnexpectedModelBehavior as e:
+        if _is_upstream_failure(e):
+            await _record_event(job_id, "transient_error", {"error": str(e)})
+            raise TransientJobError(str(e)) from e
+        status, error = "failed", f"{type(e).__name__}: {e}"
     except httpx.TransportError as e:
         await _record_event(job_id, "transient_error", {"error": str(e)})
         raise TransientJobError(str(e)) from e
