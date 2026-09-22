@@ -88,6 +88,7 @@ async def _init(tenant_name: str, email: str, password: str) -> None:
 
 
 SEED_MODELS = [
+    ("openrouter", "jev-1.13", "openrouter:typesafe/jev-1.13"),
     ("anthropic", "claude-sonnet-5", "anthropic:claude-sonnet-5"),
     ("anthropic", "claude-opus-5", "anthropic:claude-opus-5"),
     ("anthropic", "claude-haiku-4-5", "anthropic:claude-haiku-4-5-20251001"),
@@ -228,7 +229,9 @@ async def _demo_setup() -> None:
         # Model: real (OpenRouter) when a key is configured, else the test model
         use_real = bool(os.environ.get("OPENROUTER_API_KEY"))
         if use_real:
-            model = await db.scalar(select(Model).where(Model.provider == "openrouter"))
+            model = await db.scalar(
+                select(Model).where(Model.model_string == "openrouter:google/gemini-2.5-flash-lite")
+            )
             if model is None:
                 model = Model(
                     provider="openrouter",

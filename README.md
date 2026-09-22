@@ -150,6 +150,58 @@ sequenceDiagram
 
 Python / FastAPI, PydanticAI agent runtime, Postgres, Redis + arq workers, MCP for tool access, fsspec for data stores, pluggable sandboxed code runners, Langfuse for tracing.
 
+## Jev decision agents
+
+TypeSafe Jev is available through OpenRouter using `openrouter:typesafe/jev-1.13`.
+Run `sleeper seed-models` (or `docker compose exec api sleeper seed-models`) after
+updating to add it to an existing installation. Use an `openrouter` provider
+credential at the agent, team, or tenant scope, or set `OPENROUTER_API_KEY` in the
+worker/API environment. The model registry also accepts the rolling alias
+`openrouter:~typesafe/jev-latest`.
+
+Jev evaluates typed questions in one request. On the agent or version form,
+select Jev, write the task context in Prompt, leave Output schema blank, and
+put questions in Params, for example:
+
+```json
+{
+  "questions": {
+    "refund": {
+      "type": "noul",
+      "instructions": "Does the customer request a refund?"
+    },
+    "department": {
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "criteria": {"billing": "Charges and refunds", "support": "Technical problems"}
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": ["Can wait", "Needs attention today", "Urgent"]
+    }
+  }
+}
+```
+
+The version API accepts the same object in `params`. Job submission is unchanged:
+send `context.prompt` with optional text files or links. The tenant and agent
+prompts accompany that text as the decision state. Results appear under
+`output.answers`, keyed by question name: `noul` is a probability of yes;
+`choice` includes the selected label, confidence, and probabilities; `score`
+includes the expected score, confidence, probabilities, and level legend.
+These probabilities are preserved rather than converted to boolean thresholds.
+
+Jev cannot generate free text, process binary attachments, or call tools. MCP/data
+store grants, delegation, memory, learning, human escalation, custom output
+schemas, and chat parameters such as `temperature` are rejected. Injection
+screening, PII redaction, timeouts, transient-error retries, and budget pre-flight
+still apply. Each successful decision request records token usage and OpenRouter's
+reported `usage.cost`; missing pricing is explicitly recorded as unpriced.
+
+See [OpenRouter's System One integration](https://openrouter.ai/docs/guides/community/typesafe-sdk)
+and [TypeSafe's model concepts](https://docs.typesafe.ai/concepts/system-one).
+
 ## Quickstart
 
 ```bash

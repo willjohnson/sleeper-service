@@ -69,6 +69,7 @@ from sleeper_service.db.models import (
 )
 from sleeper_service.db.session import get_db
 from sleeper_service.runtime import spending
+from sleeper_service.runtime.decisions import validate_decision_config
 from sleeper_service.runtime.evals import PATH_OPS, validate_checks
 from sleeper_service.runtime.hooks import validate_hooks_settings
 from sleeper_service.runtime.learning import validate_learning_settings
@@ -1477,6 +1478,16 @@ async def ui_create_agent(
         return await fail(f"Unknown model {model!r} — register it under Models first.")
     store_grants = _store_grants_from_form(grant_store, grant_prefix, grant_mode)
     tool_grants = _tool_grants_from_form(grant_server, grant_tools)
+    err = validate_decision_config(
+        model_row.model_string,
+        model_params,
+        tool_grants=tool_grants,
+        data_store_grants=store_grants,
+        options=options,
+        output_schema=out_schema,
+    )
+    if err:
+        return await fail(err)
     err = await _check_grants(db, tenant.id, store_grants, tool_grants)
     if err:
         return await fail(err)
@@ -2873,6 +2884,16 @@ async def ui_create_version(
 
     # A grant naming something the tenant does not have is a GrantError on
     # every job the version runs, so it is refused here rather than at dispatch.
+    err = validate_decision_config(
+        model_row.model_string,
+        model_params,
+        tool_grants=tool_grants,
+        data_store_grants=store_grants,
+        options=agent.options,
+        output_schema=out_schema,
+    )
+    if err:
+        return await fail(err)
     err = await _check_grants(db, agent.tenant_id, store_grants, tool_grants)
     if err:
         return await fail(err)

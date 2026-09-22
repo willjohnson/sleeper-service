@@ -1,0 +1,10 @@
+<details class="muted" style="font-size:12px">
+  <summary>Using Jev for decisions</summary>
+  <p>Choose <code>openrouter:typesafe/jev-1.13</code> and put named questions in
+    Params. Question types are <code>noul</code> (probability of yes),
+    <code>choice</code> (named options), and <code>score</code> (ordered levels).</p>
+  <pre>{"questions": {"refund": {"type": "noul", "instructions": "Is a refund requested?"}}}</pre>
+  <p>Leave Output schema blank. Results contain <code>answers</code> keyed by
+    question name, including probabilities. Jev accepts text and does not support
+    tool grants, delegation, memory, learning, or human escalation.</p>
+</details>

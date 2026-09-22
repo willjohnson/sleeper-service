@@ -28,6 +28,7 @@ from sleeper_service.auth.rbac import require_role
 from sleeper_service.constants import Role
 from sleeper_service.db.models import Agent, AgentVersion, Model, VersionAlias
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime.decisions import validate_decision_config
 
 router = APIRouter(prefix="/agents/{agent_id}", tags=["versions"])
 
@@ -56,6 +57,16 @@ async def create_version(
     agent = await _get_visible_agent(agent_id, db, principal)
     require_role(principal, agent.team_id, Role.EDITOR)
     model = await resolve_model(db, body.model)
+    error = validate_decision_config(
+        model.model_string,
+        body.params,
+        tool_grants=body.tool_grants,
+        data_store_grants=body.data_store_grants,
+        options=agent.options,
+        output_schema=body.output_schema,
+    )
+    if error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, error)
 
     next_no = (
         await db.scalar(
