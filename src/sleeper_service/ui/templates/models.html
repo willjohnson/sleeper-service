@@ -70,8 +70,8 @@
       <input id="m-string" type="text" name="model_string" required class="mono"
              value="{{ form.model_string or '' }}" placeholder="anthropic:claude-sonnet-5">
       <div class="muted" style="font-size:12px">
-        The pydantic-ai identifier the runner passes through — <code>provider:model</code>.
-        This is what a version stores.
+        Model identifier in <code>provider:model</code> format, such as
+        <code>openrouter:typesafe/jev-1.13</code> for Jev decisions.
       </div>
     </div>
 

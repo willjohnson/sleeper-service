@@ -489,3 +489,11 @@ migrations against *existing data*, not DDL on an empty database.
 - [x] Create a feature branch for the tagged release.
 - [x] Publish the feature branch and v0.1.3 tag.
 - [x] Open the pull request against main.
+
+## 2026-09-22 — Jev support and release 0.1.5
+
+- [x] Verify Jev's OpenRouter API and agree on decision-agent configuration.
+- [x] Add Jev registration, typed questions, validation, and job execution.
+- [x] Add configuration and runtime tests; verify all 361 tests and a live Jev request.
+- [x] Document setup and bump package, runtime, and lockfile versions to 0.1.5.
+- [x] Publish [PR #30](https://github.com/willjohnson/sleeper-service/pull/30).

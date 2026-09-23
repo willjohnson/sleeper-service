@@ -34,7 +34,7 @@ from sleeper_service.db.models import (
     Tenant,
 )
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import hooks, links, memory, notify, spending
+from sleeper_service.runtime import decisions, hooks, links, memory, notify, spending
 from sleeper_service.runtime.delegation import build_delegation_toolset
 from sleeper_service.runtime.providers import (
     build_model,
@@ -267,6 +267,18 @@ async def execute_job(
         db.add(JobEvent(job_id=job.id, type="started", data={}))
         await db.commit()
 
+        config_error = decisions.validate_decision_config(
+            model_row.model_string,
+            version.params,
+            tool_grants=version.tool_grants,
+            data_store_grants=version.data_store_grants,
+            options=agent_options,
+            output_schema=version.output_schema,
+        )
+        if config_error:
+            await _finalize(job_id, "failed", error=config_error)
+            return
+
         api_key = await resolve_api_key(db, agent, model_row.provider)
         try:
             toolsets = await build_mcp_toolsets(
@@ -334,7 +346,7 @@ async def execute_job(
             )
             return
 
-    model = build_model(model_row.model_string, api_key)
+    decision_model = decisions.is_decision_model(model_row.model_string)
     instructions = "\n\n".join(
         p
         for p in (
@@ -352,6 +364,7 @@ async def execute_job(
         by the provider rather than by parsing prose — so it stays the default
         and prompted output is only reached by falling back.
         """
+        model = build_model(model_row.model_string, api_key)
         if version.output_schema:
             schema = StructuredDict(version.output_schema)
             output_type = PromptedOutput(schema) if prompted else schema
@@ -369,7 +382,7 @@ async def execute_job(
             retries=version.max_iterations,
         )
 
-    pai_agent = _build_agent(prompted=prompted_output)
+    pai_agent = None if decision_model else _build_agent(prompted=prompted_output)
     limits = UsageLimits(request_limit=version.max_iterations)
     timeout_s = version.timeout_s
     if sync_cap:
@@ -379,6 +392,7 @@ async def execute_job(
     output: dict | None = None
     error: str | None = None
     usage: RunUsage | None = None
+    cost_override: Decimal | None = None
     events: list[tuple[str, dict]] = []
     # Held outside the `async with` so the tool trail survives an exception
     # raised inside it — a job that dies in a tool is exactly the one whose
@@ -386,29 +400,38 @@ async def execute_job(
     run_messages: list = []
     try:
         async with asyncio.timeout(timeout_s):
-            # iter() instead of run(): between model calls, check the cost
-            # accrued so far against what's left of the monthly budget, so a
-            # runaway job is bounded by $ and not only by iterations/timeout.
-            async with pai_agent.iter(user_content, usage_limits=limits) as agent_run:
-                async for _node in agent_run:
-                    # Refreshed before the budget guard, not after: with no
-                    # spending limit that guard `continue`s, which is the
-                    # common case and would leave the trail empty.
+            if decision_model:
+                output, usage, cost_override = await decisions.run_decisions(
+                    model_row.model_string,
+                    api_key,
+                    instructions,
+                    user_content,
+                    version.params["questions"],
+                )
+            else:
+                # iter() instead of run(): between model calls, check the cost
+                # accrued so far against what's left of the monthly budget, so a
+                # runaway job is bounded by $ and not only by iterations/timeout.
+                async with pai_agent.iter(user_content, usage_limits=limits) as agent_run:
+                    async for _node in agent_run:
+                        # Refreshed before the budget guard, not after: with no
+                        # spending limit that guard `continue`s, which is the
+                        # common case and would leave the trail empty.
+                        run_messages = agent_run.all_messages()
+                        if remaining_budget is None:
+                            continue
+                        run_cost, _priced = _calc_cost(agent_run.usage, model_row.name)
+                        if run_cost >= remaining_budget:
+                            usage = agent_run.usage
+                            raise _BudgetExceededMidRun(
+                                f"mid-run cost {run_cost} reached the remaining monthly "
+                                f"budget {remaining_budget}"
+                            )
+                    result = agent_run.result
                     run_messages = agent_run.all_messages()
-                    if remaining_budget is None:
-                        continue
-                    run_cost, _priced = _calc_cost(agent_run.usage, model_row.name)
-                    if run_cost >= remaining_budget:
-                        usage = agent_run.usage
-                        raise _BudgetExceededMidRun(
-                            f"mid-run cost {run_cost} reached the remaining monthly "
-                            f"budget {remaining_budget}"
-                        )
-                result = agent_run.result
-                run_messages = agent_run.all_messages()
-        raw = result.output
-        output = raw if isinstance(raw, dict) else {"text": raw}
-        usage = result.usage
+                raw = result.output
+                output = raw if isinstance(raw, dict) else {"text": raw}
+                usage = result.usage
     except _BudgetExceededMidRun as e:
         status, error = "budget_exceeded", str(e)
     except TimeoutError:
@@ -450,7 +473,6 @@ async def execute_job(
     # routes to whichever upstream is available and bills what that upstream
     # cost, which no static table can predict. Asked for only when there was a
     # run to pay for, and never allowed to affect the job's outcome.
-    cost_override: Decimal | None = None
     if model_row.provider == "openrouter" and run_messages:
         generation_ids = [
             message.provider_response_id
