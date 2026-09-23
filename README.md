@@ -150,6 +150,24 @@ sequenceDiagram
 
 Python / FastAPI, PydanticAI agent runtime, Postgres, Redis + arq workers, MCP for tool access, fsspec for data stores, pluggable sandboxed code runners, Langfuse for tracing.
 
+## Starter models
+
+The starter registry includes GPT-6 Sol (`openai:gpt-6-sol`), GPT-6 Astra
+(`openai:gpt-6-astra`), GPT-6 Luna (`openai:gpt-6-luna`), and Claude Opus 5.5
+(`anthropic:claude-opus-5-5`).
+After updating an existing installation, run `sleeper seed-models` or
+`docker compose exec api sleeper seed-models` to register them. Seeding is
+idempotent and preserves existing registrations and agent model selections.
+Configure an `openai` or `anthropic` provider credential at agent, team, or
+tenant scope, or set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in the worker/API
+environment.
+
+GPT-6 uses the Responses API for reasoning and tool calls. Opus 5.5 uses native
+structured output for output schemas; it does not support disabling thinking
+or forcing tool use. See the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model)
+and [Opus 5.5 migration guide](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide)
+when configuring model-specific Params.
+
 ## Jev decision agents
 
 TypeSafe Jev is available through OpenRouter using `openrouter:typesafe/jev-1.13`.
