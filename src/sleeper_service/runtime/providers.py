@@ -166,6 +166,44 @@ def build_model(model_string: str, api_key: str | None) -> PaiModel | str:
 
         return TestModel()
 
+    if provider_name == "openai" and model_name in {"gpt-6-sol", "gpt-6-astra", "gpt-6-luna"}:
+        from pydantic_ai.models.openai import OpenAIResponsesModel
+        from pydantic_ai.profiles.openai import openai_model_profile
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        # GPT-6 tool calling with reasoning requires Responses. Reasoning items
+        # must survive subsequent requests in the agent's tool loop.
+        profile = openai_model_profile(model_name)
+        profile.update(
+            supports_thinking=True,
+            thinking_always_enabled=model_name == "gpt-6-astra",
+            openai_supports_reasoning=True,
+            openai_reasoning_enabled_by_default=True,
+            openai_supports_reasoning_effort_none=model_name != "gpt-6-astra",
+            openai_supports_encrypted_reasoning_content=True,
+            openai_supports_phase=True,
+        )
+        return OpenAIResponsesModel(
+            model_name, provider=OpenAIProvider(api_key=api_key), profile=profile
+        )
+
+    if provider_name == "anthropic" and model_name == "claude-opus-5-5":
+        from pydantic_ai.models.anthropic import AnthropicModel
+        from pydantic_ai.profiles.anthropic import anthropic_model_profile
+        from pydantic_ai.providers.anthropic import AnthropicProvider
+
+        # Opus 5.5 always reasons and rejects forced tool use, so schemas use
+        # native structured output instead of forcing an output tool.
+        profile = anthropic_model_profile(model_name)
+        profile.update(
+            thinking_always_enabled=True,
+            anthropic_supports_forced_tool_choice=False,
+            default_structured_output_mode="native",
+        )
+        return AnthropicModel(
+            model_name, provider=AnthropicProvider(api_key=api_key), profile=profile
+        )
+
     if api_key is None:
         # Let pydantic-ai resolve credentials from the environment.
         return model_string

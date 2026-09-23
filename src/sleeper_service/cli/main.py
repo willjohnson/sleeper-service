@@ -91,7 +91,11 @@ SEED_MODELS = [
     ("openrouter", "jev-1.13", "openrouter:typesafe/jev-1.13"),
     ("anthropic", "claude-sonnet-5", "anthropic:claude-sonnet-5"),
     ("anthropic", "claude-opus-5", "anthropic:claude-opus-5"),
+    ("anthropic", "claude-opus-5-5", "anthropic:claude-opus-5-5"),
     ("anthropic", "claude-haiku-4-5", "anthropic:claude-haiku-4-5-20251001"),
+    ("openai", "gpt-6-sol", "openai:gpt-6-sol"),
+    ("openai", "gpt-6-astra", "openai:gpt-6-astra"),
+    ("openai", "gpt-6-luna", "openai:gpt-6-luna"),
     ("test", "default", "test:default"),
     ("test", "flaky", "test:flaky"),  # always-503 model for DLQ/alerting demos
 ]

@@ -24,6 +24,9 @@ UI parity with the API was finished 2026-08-24; 283 tests are green.
 
 ## Remaining from the build plan
 
+- [x] Add GPT-6 Sol, GPT-6 Astra, GPT-6 Luna, and Claude Opus 5.5 to the starter model registry
+  with provider routing and structured-output support.
+
 1. **Runner tier 3 — hosted sandboxes** (BUILD_PLAN § Runner design) —
    extension point only: an E2B/Modal backend drops into the
    `runtime/runners.py` REGISTRY if an operator ever wants VM-grade
@@ -497,3 +500,10 @@ migrations against *existing data*, not DDL on an empty database.
 - [x] Add configuration and runtime tests; verify all 361 tests and a live Jev request.
 - [x] Document setup and bump package, runtime, and lockfile versions to 0.1.5.
 - [x] Publish [PR #30](https://github.com/willjohnson/sleeper-service/pull/30).
+
+## 2026-09-23 — Release 0.1.6
+
+- [x] Add GPT-6 Sol, Astra, Luna, and Claude Opus 5.5 with provider compatibility tests.
+- [x] Document model registration and bump package, runtime, and lockfile versions to 0.1.6.
+- [x] Verify the release for publication through main: 370 tests pass; lint,
+  formatting, lockfile consistency, and source/wheel builds pass.
