@@ -515,3 +515,9 @@ migrations against *existing data*, not DDL on an empty database.
 - [x] Document configuration and verify adapter, API/UI, and job lifecycle coverage.
 - [x] Full regression suite: 417 tests pass; lint, formatting, and diff checks pass.
   The suite reports 22 Starlette status-code deprecation warnings in existing code.
+
+## 2026-10-10 — Release 0.1.7
+
+- [x] Bump package, runtime, and lockfile versions to 0.1.7.
+- [x] Verify release metadata and build source/wheel distributions.
+- [x] Update PR #33 and publish the v0.1.7 release tag.
