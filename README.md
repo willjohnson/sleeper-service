@@ -220,6 +220,56 @@ reported `usage.cost`; missing pricing is explicitly recorded as unpriced.
 See [OpenRouter's System One integration](https://openrouter.ai/docs/guides/community/typesafe-sdk)
 and [TypeSafe's model concepts](https://docs.typesafe.ai/concepts/system-one).
 
+## OpenAI decision agents
+
+Select `openai:decisions/gpt-6-luna` (registry name `gpt-6-luna-decisions`)
+to use the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions).
+Run `sleeper seed-models` (or `docker compose exec api sleeper seed-models`) to
+add the entry. Use an `openai` provider credential at agent, team, or tenant
+scope, or set `OPENAI_API_KEY` in the worker/API environment.
+
+Write task context in Prompt, leave Output schema blank, and put OpenAI's native
+question list in Params:
+
+```json
+{
+  "questions": [
+    {"name": "refund", "type": "predicate", "instructions": "Is a refund requested?"},
+    {
+      "name": "department",
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "choices": [
+        {"value": "billing", "description": "Charges and refunds"},
+        {"value": "support", "description": "Technical problems"}
+      ]
+    },
+    {
+      "name": "urgency",
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "levels": [{"label": "Can wait"}, {"label": "Urgent"}]
+    }
+  ]
+}
+```
+
+The version API accepts this object in `params`. Tenant and agent prompts are
+prepended to each question's instructions. Submit jobs with `context.prompt`,
+optional text files/links, and up to 128 image attachments. Other binary files
+are rejected. `output.answers` is a list in question order, preserving names,
+probabilities, typed choices (strings or booleans), scores, and refusals.
+A refusal is returned as an answer so other answers remain available.
+Question names are optional and must be unique when supplied.
+
+Tool grants, delegation, memory, learning, human escalation, custom output
+schemas, and chat parameters are rejected. Existing injection screening, PII
+redaction, timeouts, retries, and budget pre-flight checks apply. Token usage
+includes cached tokens. When no price is available for the Decisions registry
+entry, jobs record a `cost_unpriced` event; their recorded zero cost does not
+advance monthly spending limits. The regular `openai:gpt-6-luna` entry uses
+the Responses API for general agent work.
+
 ## Quickstart
 
 ```bash

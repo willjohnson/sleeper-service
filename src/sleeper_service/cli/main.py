@@ -88,6 +88,7 @@ async def _init(tenant_name: str, email: str, password: str) -> None:
 
 
 SEED_MODELS = [
+    ("openai", "gpt-6-luna-decisions", "openai:decisions/gpt-6-luna"),
     ("openrouter", "jev-1.13", "openrouter:typesafe/jev-1.13"),
     ("anthropic", "claude-sonnet-5", "anthropic:claude-sonnet-5"),
     ("anthropic", "claude-opus-5", "anthropic:claude-opus-5"),

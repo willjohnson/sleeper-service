@@ -507,3 +507,11 @@ migrations against *existing data*, not DDL on an empty database.
 - [x] Document model registration and bump package, runtime, and lockfile versions to 0.1.6.
 - [x] Verify the release for publication through main: 370 tests pass; lint,
   formatting, lockfile consistency, and source/wheel builds pass.
+
+## 2026-10-10 — OpenAI decision agents
+
+- [x] Register GPT-6 Luna Decisions and validate native typed questions.
+- [x] Execute text/image decisions with OpenAI credentials, answer validation, and usage tracking.
+- [x] Document configuration and verify adapter, API/UI, and job lifecycle coverage.
+- [x] Full regression suite: 417 tests pass; lint, formatting, and diff checks pass.
+  The suite reports 22 Starlette status-code deprecation warnings in existing code.
