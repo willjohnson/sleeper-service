@@ -1,0 +1,14 @@
+<details class="muted" style="font-size:12px">
+  <summary>Using OpenAI Decisions</summary>
+  <p>Choose <code>openai:decisions/gpt-6-luna</code> and put a list of questions
+    in Params. Types are <code>predicate</code> (probability of yes),
+    <code>choice</code> (options in <code>choices</code>), and <code>score</code>
+    (ordered <code>levels</code>).</p>
+  <pre>{"questions": [{"name": "refund", "type": "predicate", "instructions": "Is a refund requested?"}]}</pre>
+  <p>Put task context in Prompt and leave Output schema blank. Results contain
+    an <code>answers</code> list in question order; an answer may be a
+    <code>refusal</code>. OpenAI Decisions accepts text and images, and does not
+    support tool grants, delegation, memory, learning, or human escalation.</p>
+  <p>Uses an OpenAI credential or <code>OPENAI_API_KEY</code>.
+    <a href="https://developers.openai.com/api/docs/guides/decisions">Question format and examples</a>.</p>
+</details>

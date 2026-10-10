@@ -1,4 +1,4 @@
-"""Jev's typed decisions through OpenRouter's System One API."""
+"""Typed decision routing and agent configuration validation."""
 
 import os
 from decimal import Decimal
@@ -8,6 +8,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.usage import RunUsage
+
+from sleeper_service.runtime import openai_decisions
 
 Content = str | dict | list
 Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -88,7 +90,9 @@ class DecisionUsage(BaseModel):
 
 
 def is_decision_model(model_string: str) -> bool:
-    return model_string.startswith(("openrouter:typesafe/jev-", "openrouter:~typesafe/jev-"))
+    return model_string == openai_decisions.MODEL or model_string.startswith(
+        ("openrouter:typesafe/jev-", "openrouter:~typesafe/jev-")
+    )
 
 
 def validate_decision_config(
@@ -102,22 +106,27 @@ def validate_decision_config(
 ) -> str | None:
     if not is_decision_model(model_string):
         return None
+    openai = model_string == openai_decisions.MODEL
+    label = "OpenAI Decisions" if openai else "Jev"
     params = params or {}
     if set(params) != {"questions"}:
-        return "Jev Params must contain only 'questions'; chat parameters are not supported."
+        return f"{label} Params must contain only 'questions'; chat parameters are not supported."
     try:
-        QUESTION_ADAPTER.validate_python(params["questions"])
-    except ValidationError as exc:
-        return f"Invalid Jev questions: {exc}"
+        if openai:
+            openai_decisions.parse_questions(params["questions"])
+        else:
+            QUESTION_ADAPTER.validate_python(params["questions"])
+    except (ValidationError, ValueError) as exc:
+        return f"Invalid {label} questions: {exc}"
     if tool_grants or data_store_grants:
-        return "Jev cannot call tools; remove MCP and data store grants."
+        return f"{label} cannot call tools; remove MCP and data store grants."
     options = options or {}
     if options.get("delegation") in ("team", "tenant") or any(
         options.get(key) is True for key in ("memory", "learning", "human_escalation")
     ):
-        return "Jev does not support delegation, memory, learning, or human escalation tools."
+        return f"{label} does not support delegation, memory, learning, or human escalation tools."
     if output_schema is not None:
-        return "Jev returns typed answers; leave Output schema blank and set Params.questions."
+        return f"{label} returns typed answers; leave Output schema blank and set Params.questions."
     return None
 
 
@@ -126,8 +135,10 @@ async def run_decisions(
     api_key: str | None,
     instructions: str,
     content: list,
-    questions: dict,
+    questions: dict | list,
 ) -> tuple[dict, RunUsage, Decimal | None]:
+    if model_string == openai_decisions.MODEL:
+        return await openai_decisions.run_decisions(api_key, instructions, content, questions)
     api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("Jev requires an OpenRouter credential or OPENROUTER_API_KEY.")
