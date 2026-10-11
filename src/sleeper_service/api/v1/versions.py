@@ -41,7 +41,7 @@ async def resolve_model(db: AsyncSession, model_ref: str) -> Model:
         model = await db.scalar(select(Model).where(Model.provider == provider, Model.name == name))
     if model is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Unknown model {model_ref!r} — register it in the models registry first",
         )
     return model

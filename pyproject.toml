@@ -1,12 +1,13 @@
 [project]
 name = "sleeper-service"
-version = "0.1.7"
+version = "0.1.8"
 description = "Agents as a Service — a self-hosted platform for fleets of narrow, single-purpose AI agents exposed as API endpoints."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
+    "starlette>=0.48",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -84,6 +85,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+filterwarnings = ["error::starlette.exceptions.StarletteDeprecationWarning"]
 
 [tool.uv]
 package = true

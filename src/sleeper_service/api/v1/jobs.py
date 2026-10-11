@@ -70,7 +70,7 @@ async def _resolve_version(db: AsyncSession, agent: Agent, body: JobSubmit) -> A
     if body.agent_version_id is not None:
         version = await db.get(AgentVersion, body.agent_version_id)
         if version is None or version.agent_id != agent.id:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown version")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown version")
         return version
     if body.version_no is not None:
         version = await db.scalar(
@@ -80,12 +80,12 @@ async def _resolve_version(db: AsyncSession, agent: Agent, body: JobSubmit) -> A
             )
         )
         if version is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown version")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown version")
         return version
     if body.alias is not None:
         row = await db.get(VersionAlias, (agent.id, body.alias))
         if row is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown alias")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown alias")
         return await db.get(AgentVersion, row.agent_version_id)
     return await _resolve_version_current(db, agent)
 
@@ -214,13 +214,13 @@ async def submit_job(
     if body.context.links:
         link_error = links.check_links(body.context.links, tenant.settings or {})
         if link_error is not None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, link_error)
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, link_error)
 
     if body.callback_url:
         try:
             validate_callback_url(body.callback_url, tenant.settings or {})
         except OutboundUrlError as e:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
 
     if body.context.files:
         # Files are tenant-scoped and invoke keys below the tenant have no
@@ -236,7 +236,9 @@ async def submit_job(
         for file_id in body.context.files:
             file = await db.get(File, file_id)
             if file is None or file.tenant_id != agent.tenant_id:
-                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, f"Unknown file {file_id}"
+                )
 
     job, existed = await create_job(
         db,

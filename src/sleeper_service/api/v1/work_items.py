@@ -54,11 +54,11 @@ async def list_work_items(
     stmt = select(WorkItem).where(WorkItem.tenant_id == tenant_id, WorkItem.team_id.in_(team_ids))
     if item_status != "all":
         if item_status not in ("open", "resolved", "dismissed"):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown status")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown status")
         stmt = stmt.where(WorkItem.status == item_status)
     if kind is not None:
         if kind not in ("memory_approval", "human_escalation"):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown kind")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown kind")
         stmt = stmt.where(WorkItem.kind == kind)
     return list(await db.scalars(stmt.order_by(WorkItem.created_at.desc())))
 

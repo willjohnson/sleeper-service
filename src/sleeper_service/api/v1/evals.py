@@ -43,7 +43,7 @@ async def create_eval_case(
     # thread: code-check validation executes the grader in the sandbox
     error = await anyio.to_thread.run_sync(validate_checks, body.checks)
     if error is not None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, error)
     dup = await db.scalar(
         select(EvalCase).where(EvalCase.agent_id == agent_id, EvalCase.name == body.name)
     )
@@ -109,7 +109,7 @@ async def start_eval_run(
     if body.agent_version_id is not None:
         version = await db.get(AgentVersion, body.agent_version_id)
         if version is None or version.agent_id != agent_id:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown version")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown version")
     elif body.version_no is not None:
         version = await db.scalar(
             select(AgentVersion).where(
@@ -118,7 +118,7 @@ async def start_eval_run(
             )
         )
         if version is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown version")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown version")
     else:
         if agent.current_version_id is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "Agent has no versions yet")

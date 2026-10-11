@@ -90,7 +90,7 @@ async def update_tenant(
 
         error = validate_hooks_settings(body.settings) or validate_learning_settings(body.settings)
         if error is not None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, error)
         tenant.settings = body.settings
     await db.commit()
     await db.refresh(tenant)

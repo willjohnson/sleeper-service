@@ -3373,7 +3373,7 @@ wheels = [
 
 [[package]]
 name = "sleeper-service"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "adlfs" },
@@ -3405,6 +3405,7 @@ dependencies = [
     { name = "regex" },
     { name = "s3fs" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -3450,6 +3451,7 @@ requires-dist = [
     { name = "regex", specifier = ">=2024.11.6" },
     { name = "s3fs", specifier = ">=2025.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
+    { name = "starlette", specifier = ">=0.48" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]

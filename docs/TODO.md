@@ -521,3 +521,11 @@ migrations against *existing data*, not DDL on an empty database.
 - [x] Bump package, runtime, and lockfile versions to 0.1.7.
 - [x] Verify release metadata and build source/wheel distributions.
 - [x] Update PR #33 and publish the v0.1.7 release tag.
+
+## 2026-10-11 — Dependency security updates and release 0.1.8
+
+- [x] Adopt pydantic-ai 2.53 profile key names so PR #34 passes; close all 20 Dependabot alerts.
+- [x] Use Starlette's current status-code names, require starlette>=0.48, and fail tests
+  on Starlette deprecation warnings.
+- [x] Full regression suite: 417 tests pass with no warnings; lint and formatting pass.
+- [x] Bump package, runtime, and lockfile versions to 0.1.8.

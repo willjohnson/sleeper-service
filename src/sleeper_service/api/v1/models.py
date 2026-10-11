@@ -29,7 +29,7 @@ async def create_model(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only superusers manage models")
     error = validate_model_registration(body.provider, body.model_string)
     if error is not None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, error)
     dup = await db.scalar(
         select(Model).where(Model.provider == body.provider, Model.name == body.name)
     )

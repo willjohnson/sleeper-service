@@ -92,7 +92,7 @@ async def create_event_source(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     agent = await db.get(Agent, body.target_agent_id)
     if agent is None or agent.tenant_id != tenant_id:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown target agent")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown target agent")
     require_role(principal, agent.team_id, Role.OWNER)
     dup = await db.scalar(
         select(EventSource).where(EventSource.tenant_id == tenant_id, EventSource.name == body.name)
@@ -187,7 +187,7 @@ async def ingest_event(
         context = JobContext.model_validate(rendered)
     except ValidationError as e:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"payload_template produced an invalid job context: {e.error_count()} errors",
         ) from e
 
@@ -195,12 +195,12 @@ async def ingest_event(
         tenant = await db.get(Tenant, agent.tenant_id)
         link_error = links_mod.check_links(context.links, tenant.settings or {})
         if link_error is not None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, link_error)
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, link_error)
 
     for file_id in context.files:
         file = await db.get(File, file_id)
         if file is None or file.tenant_id != agent.tenant_id:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown file {file_id}")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Unknown file {file_id}")
 
     idempotency_key = None
     if source.dedup_key_path:

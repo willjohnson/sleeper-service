@@ -33,7 +33,7 @@ async def create_team(
 
     owner_id = body.owner_user_id or principal.user.id
     if await db.get(User, owner_id) is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Owner user not found")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Owner user not found")
 
     team = Team(tenant_id=tenant_id, name=body.name)
     db.add(team)
@@ -95,7 +95,7 @@ async def set_member(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     require_role(principal, team_id, Role.OWNER)
     if await db.get(User, user_id) is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "User not found")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "User not found")
 
     member = await db.get(TeamMember, (user_id, team_id))
     if member is None:
