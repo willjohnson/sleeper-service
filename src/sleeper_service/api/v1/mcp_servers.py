@@ -51,7 +51,7 @@ async def create_mcp_server(
         try:
             validate_mcp_url(body.endpoint)
         except OutboundUrlError as e:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     dup = await db.scalar(
         select(McpServer).where(McpServer.tenant_id == tenant_id, McpServer.name == body.name)
     )

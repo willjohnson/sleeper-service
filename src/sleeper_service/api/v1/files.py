@@ -101,13 +101,13 @@ async def upload_file(
     # prevent an oversized upload from exhausting it.
     if file.size is not None and file.size > MAX_FILE_SIZE:
         raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status.HTTP_413_CONTENT_TOO_LARGE,
             f"File exceeds {MAX_FILE_SIZE} bytes",
         )
     data = await file.read()
     if len(data) > MAX_FILE_SIZE:  # backstop: size is None when unknown
         raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status.HTTP_413_CONTENT_TOO_LARGE,
             f"File exceeds {MAX_FILE_SIZE} bytes",
         )
     from pathlib import Path

@@ -45,7 +45,7 @@ async def set_oidc_config(
             label="OIDC issuer",
         )
     except OutboundUrlError as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     config = await db.scalar(select(OidcConfig).where(OidcConfig.tenant_id == tenant_id))
     if config is None:
         config = OidcConfig(tenant_id=tenant_id)

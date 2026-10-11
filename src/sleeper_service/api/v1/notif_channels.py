@@ -51,7 +51,7 @@ async def create_channel(
     invalid = set(body.events) - VALID_EVENTS
     if invalid:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"unknown events {sorted(invalid)}; valid: {sorted(VALID_EVENTS)}",
         )
     # The worker connects to whatever this URL names, so it is a server-side
@@ -61,7 +61,7 @@ async def create_channel(
     try:
         validate_apprise_url(body.apprise_url, tenant.settings if tenant else {}, **notif_policy())
     except OutboundUrlError as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     channel = NotifChannel(
         team_id=team_id,
         apprise_url_enc=encrypt(body.apprise_url),

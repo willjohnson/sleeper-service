@@ -62,12 +62,12 @@ async def create_data_store(
         )
     if body.type not in REQUIRED_CONFIG:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"data store type {body.type!r} not supported; one of {sorted(REQUIRED_CONFIG)}",
         )
     required = REQUIRED_CONFIG[body.type]
     if required not in body.config:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"config requires {required!r}")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"config requires {required!r}")
     dup = await db.scalar(
         select(DataStore).where(DataStore.tenant_id == tenant_id, DataStore.name == body.name)
     )
