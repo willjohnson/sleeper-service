@@ -178,7 +178,7 @@ def build_model(model_string: str, api_key: str | None) -> PaiModel | str:
             supports_thinking=True,
             thinking_always_enabled=model_name == "gpt-6-astra",
             openai_supports_reasoning=True,
-            openai_reasoning_enabled_by_default=True,
+            thinking_enabled_by_default=True,
             openai_supports_reasoning_effort_none=model_name != "gpt-6-astra",
             openai_supports_encrypted_reasoning_content=True,
             openai_supports_phase=True,
@@ -197,7 +197,7 @@ def build_model(model_string: str, api_key: str | None) -> PaiModel | str:
         profile = anthropic_model_profile(model_name)
         profile.update(
             thinking_always_enabled=True,
-            anthropic_supports_forced_tool_choice=False,
+            supports_forced_tool_choice=False,
             default_structured_output_mode="native",
         )
         return AnthropicModel(
