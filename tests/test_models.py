@@ -31,6 +31,7 @@ async def test_seed_models_registers_gpt6_and_opus55_once():
         assert validate_model_registration(provider, registered[provider, name]) is None
 
 
+@pytest.mark.filterwarnings("error:`ModelProfile` key")
 @pytest.mark.parametrize("name", ["gpt-6-sol", "gpt-6-astra", "gpt-6-luna"])
 @pytest.mark.parametrize("scoped_key", [None, "scoped-key"])
 def test_gpt6_uses_responses_with_scoped_or_environment_credentials(monkeypatch, name, scoped_key):
@@ -40,12 +41,14 @@ def test_gpt6_uses_responses_with_scoped_or_environment_credentials(monkeypatch,
     assert model.model_name == name
     assert model.client.api_key == (scoped_key or "environment-key")
     assert model.profile["openai_supports_reasoning"]
+    assert model.profile["thinking_enabled_by_default"]
     assert model.profile["openai_supports_encrypted_reasoning_content"]
     assert model.profile["openai_supports_phase"]
     assert model.profile["thinking_always_enabled"] == (name == "gpt-6-astra")
     assert model.profile["openai_supports_reasoning_effort_none"] == (name != "gpt-6-astra")
 
 
+@pytest.mark.filterwarnings("error:`ModelProfile` key")
 @pytest.mark.parametrize("scoped_key", [None, "scoped-key"])
 def test_opus55_uses_native_output_without_forced_tools(monkeypatch, scoped_key):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "environment-key")
@@ -56,4 +59,4 @@ def test_opus55_uses_native_output_without_forced_tools(monkeypatch, scoped_key)
     assert model.profile["default_structured_output_mode"] == "native"
     assert model.profile["supports_json_schema_output"]
     assert model.profile["thinking_always_enabled"]
-    assert not model.profile["anthropic_supports_forced_tool_choice"]
+    assert not model.profile["supports_forced_tool_choice"]
