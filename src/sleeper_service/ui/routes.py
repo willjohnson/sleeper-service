@@ -263,6 +263,14 @@ async def _visible_tenants(db: AsyncSession, p: UserPrincipal) -> list[Tenant]:
     return list(await db.scalars(stmt))
 
 
+def _session_tenant(request: Request, tenants: list[Tenant]) -> Tenant | None:
+    """The tenant the user last opened, while they can still see it, else the
+    first visible one. Pages that belong to no tenant render it in the sidebar
+    and switcher so the user stays where they were."""
+    stored = request.session.get("tenant_id")
+    return next((t for t in tenants if str(t.id) == stored), next(iter(tenants), None))
+
+
 async def _tenant_or_home(
     db: AsyncSession, p: UserPrincipal, tenant_id: uuid.UUID
 ) -> Tenant | RedirectResponse:
@@ -652,8 +660,7 @@ async def home(
     tenants = await _visible_tenants(db, p)
     if not tenants:
         return HTMLResponse("<p style='margin:40px'>No tenants visible for this account.</p>")
-    stored = request.session.get("tenant_id")
-    tenant = next((t for t in tenants if str(t.id) == stored), tenants[0])
+    tenant = _session_tenant(request, tenants)
     return RedirectResponse(f"/ui/t/{tenant.id}", status_code=303)
 
 
@@ -2065,7 +2072,7 @@ async def _render_models(
         _ctx(
             request,
             p,
-            tenant=next(iter(tenants), None),
+            tenant=_session_tenant(request, tenants),
             tenants=tenants,
             section="models",
             models=list(await db.scalars(select(Model).order_by(Model.provider, Model.name))),
@@ -3939,7 +3946,7 @@ async def _render_account(
         _ctx(
             request,
             p,
-            tenant=next(iter(tenants), None),
+            tenant=_session_tenant(request, tenants),
             tenants=tenants,
             section="account",
             keys=await _user_keys(db, p.user.id),
@@ -4009,7 +4016,7 @@ async def _render_users(
         _ctx(
             request,
             p,
-            tenant=next(iter(tenants), None),
+            tenant=_session_tenant(request, tenants),
             tenants=tenants,
             section="users",
             # Not "keys": Jinja resolves a dict's .keys to the method
@@ -4089,7 +4096,7 @@ async def _render_user_keys(
         _ctx(
             request,
             p,
-            tenant=next(iter(tenants), None),
+            tenant=_session_tenant(request, tenants),
             tenants=tenants,
             section="users",
             subject=subject,
@@ -4521,7 +4528,7 @@ async def _render_tenants(
         _ctx(
             request,
             p,
-            tenant=next(iter(tenants), None),
+            tenant=_session_tenant(request, tenants),
             tenants=tenants,
             section="tenants",
             rows=[
