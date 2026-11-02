@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Key created · {{ agent.name }} — Sleeper Service{% endblock %}
-{% block heading %}Key created <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block heading %}Key created <span class="muted text-sm">· {{ agent.name }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
   <div class="notice">
@@ -9,9 +9,9 @@
       the key and issuing another.</span>
   </div>
   <h2>{{ key.name }}</h2>
-  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
+  <pre class="mono whitespace-pre-wrap break-all text-sm">{{ plaintext }}</pre>
   <table>
-    <tr><th style="width:140px">Scope</th>
+    <tr><th class="w-35">Scope</th>
       <td>this agent only — <a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a></td></tr>
     <tr><th>Rate limit</th>
       <td>{% if key.rate_limit %}{{ key.rate_limit }} requests/minute{% else %}<span class="muted">none</span>{% endif %}</td></tr>
@@ -20,7 +20,7 @@
 
 <div class="panel">
   <h2>Using it</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Pass it as a bearer token. This submits a job against whichever version is current;
     add <code>"alias": "prod"</code> or <code>"version_no": 3</code> to pin one.
   </p>
@@ -28,7 +28,7 @@
   -H "Authorization: Bearer {{ plaintext }}" \
   -H "Content-Type: application/json" \
   -d '{"context": {"prompt": "..."}}'</pre>
-  <p class="muted" style="margin-bottom:0">
+  <p class="muted mb-0">
     Jobs run asynchronously: the response carries a job id to poll at
     <code>GET /v1/jobs/{id}</code>, or give <code>callback_url</code> and the result is
     posted back with an HMAC signature.

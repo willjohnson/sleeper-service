@@ -9,13 +9,13 @@
 {% for team in teams %}
 <div class="panel">
   <h2><a href="/ui/teams/{{ team.id }}">{{ team.name }}</a>{% if team.is_org_team %} <span class="muted">(org-wide)</span>{% endif %}
-      <span class="muted" style="font-weight:400"> · your role: {{ team.role or '—' }}</span></h2>
+      <span class="muted font-normal"> · your role: {{ team.role or '—' }}</span></h2>
   {% if team.agents %}
   <table>
     <tr><th>Agent</th><th>Description</th><th>Options</th><th>Version</th><th>Jobs · 7d</th><th>Spend / limit</th></tr>
     {% for a in team.agents %}
     <tr>
-      <td><a href="/ui/agents/{{ a.id }}"><strong>{{ a.name }}</strong></a></td>
+      <td class="whitespace-nowrap"><a href="/ui/agents/{{ a.id }}"><strong>{{ a.name }}</strong></a></td>
       <td class="muted">{{ a.description|truncate(70) }}</td>
       <td>
         <div class="pill-row">
@@ -29,9 +29,9 @@
       <td>{{ a.jobs_7d }}</td>
       <td>
         {% if a.spending_limit %}
-          <div class="mono">${{ '%.4f'|format(a.spend) }} / ${{ '%.2f'|format(a.spending_limit) }}</div>
+          <div class="mono whitespace-nowrap">${{ '%.4f'|format(a.spend) }} / ${{ '%.2f'|format(a.spending_limit) }}</div>
           <div class="meter"><div style="width: {{ [a.spend / a.spending_limit * 100, 100] | min }}%"></div></div>
-        {% else %}<span class="muted">${{ '%.4f'|format(a.spend) }} · no limit</span>{% endif %}
+        {% else %}<span class="muted whitespace-nowrap">${{ '%.4f'|format(a.spend) }} · no limit</span>{% endif %}
       </td>
     </tr>
     {% endfor %}
@@ -48,7 +48,7 @@
         <td class="muted">archived {{ a.archived_at.strftime('%Y-%m-%d') }}</td>
         <td>
           {% if team.role == 'owner' %}
-          <form method="post" action="/ui/agents/{{ a.id }}/restore" style="display:inline">
+          <form class="inline" method="post" action="/ui/agents/{{ a.id }}/restore">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle">Restore</button>
           </form>

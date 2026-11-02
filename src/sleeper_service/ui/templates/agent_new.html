@@ -3,7 +3,7 @@
 {% block heading %}New agent{% endblock %}
 {% block content %}
 <div class="panel">
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Creates the agent and its first version. The version is promoted straight away, so the
     agent is runnable as soon as you save.
   </p>
@@ -29,7 +29,7 @@
     <div>
       <input id="na-limit" class="short" type="text" name="spending_limit" inputmode="decimal"
              placeholder="no limit" value="{{ form.spending_limit or '' }}">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         US dollars per calendar month, across every version of this agent — not
         tokens. Checked before a job starts and again mid-run, so an exhausted
         budget refuses the job rather than truncating it. Blank for no limit.
@@ -84,7 +84,7 @@
     <div>
       <textarea id="na-out" name="output_schema" rows="8" class="mono"
                 placeholder='{"type": "object", "properties": {"risk_level": {"type": "string"}}, "required": ["risk_level"]}'>{{ form.output_schema or '' }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Optional JSON Schema. Set one and the model must return JSON matching it, which
         is what makes the agent usable as a workflow node rather than a chat box.
       </div>
@@ -94,7 +94,7 @@
     <div>
       <textarea id="na-in" name="input_schema" rows="5" class="mono"
                 placeholder='{"type": "object", "properties": {"borrower": {"type": "string"}}, "required": ["borrower"]}'>{{ form.input_schema or '' }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Optional JSON Schema a job payload must match. Rejected before the model runs.
       </div>
     </div>
@@ -103,7 +103,7 @@
     <div>
       <textarea id="na-params" name="params" rows="3" class="mono"
                 placeholder='{"temperature": 0.2, "max_tokens": 8000}'>{{ form.params or '' }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Passed through to the provider for this version. <code>max_tokens</code> caps
         the response, not the input.
       </div>
@@ -134,13 +134,13 @@
         </select>
       </div>
       {% endfor %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         The version gets <code>list_files</code> and <code>read_file</code> beneath the
         prefix, plus <code>write_file</code> at <code>rw</code>. Nothing outside it is
         reachable; a blank prefix grants the whole store.
       </div>
       {% else %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         No data stores registered in this tenant —
         <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
       </div>
@@ -164,11 +164,11 @@
         <span></span>
       </div>
       {% endfor %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Comma-separated tool names; blank grants every tool the server offers.
       </div>
       {% else %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         No MCP servers registered in this tenant —
         <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
       </div>

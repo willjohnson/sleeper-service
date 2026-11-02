@@ -46,4 +46,11 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      # The admin UI stylesheet is compiled from tailwind.css and the templates,
+      # then committed. Rebuilding must reproduce it exactly, or a template
+      # change shipped without its CSS.
+      - name: Check compiled stylesheet is current
+        run: |
+          scripts/build_css.sh
+          git diff --exit-code -- src/sleeper_service/ui/static/style.css
       - run: uv run pytest -q

@@ -10,8 +10,8 @@
       something you would send a password over.</span>
   </div>
   <h2>{{ created.email }}</h2>
-  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
-  <p class="muted" style="margin-bottom:0">
+  <pre class="mono whitespace-pre-wrap break-all text-sm">{{ plaintext }}</pre>
+  <p class="muted mb-0">
     The key carries whatever roles this user has. A new user has none until a team
     owner adds them to a team — until then it authenticates and can see nothing.
   </p>
@@ -20,14 +20,14 @@
 
 <div class="panel">
   <h2>Everyone</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Users are instance-wide: one account can hold roles in several tenants. Membership
     is set per team, on the team's own page. <strong>Revoke keys</strong> cuts someone
     off in one move; <strong>Keys</strong> opens their credentials one by one, to issue
     a replacement or retire a single key.
   </p>
   <table>
-    <tr><th>Email</th><th>Kind</th><th>Active keys</th><th>Created</th><th class="col-actions"></th></tr>
+    <tr><th>Email</th><th>Kind</th><th>Active keys</th><th>Created</th><th></th></tr>
     {% for row in users %}
     <tr>
       <td><strong>{{ row.user.email }}</strong>{% if row.user.id == user.id %}
@@ -37,7 +37,7 @@
       <td class="muted">{{ row.key_count }}</td>
       <td class="muted">{{ row.user.created_at.strftime('%Y-%m-%d') }}</td>
       <td>
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <a class="btn subtle" href="/ui/users/{{ row.user.id }}/keys">Keys</a>
           {% if row.key_count %}
           <form method="post" action="/ui/users/{{ row.user.id }}/keys/revoke-all">
@@ -54,7 +54,7 @@
 
 <div class="panel">
   <h2>Create a user</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     They get a password for these pages and an API key for the API, shown once. Adding
     them to a team is what gives them anything to see.
   </p>
@@ -65,7 +65,7 @@
     <div>
       <input id="u-email" type="email" name="email" required
              value="{{ form.email or '' }}" placeholder="person@example.com">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Also what an SSO login matches on, so it must be the address their IdP asserts.
       </div>
     </div>
@@ -74,14 +74,14 @@
     <div>
       <input id="u-password" type="password" name="password" required
              autocomplete="new-password" minlength="8">
-      <div class="muted" style="font-size:12px">At least 8 characters.</div>
+      <div class="muted text-xs">At least 8 characters.</div>
     </div>
 
     <label>Superuser</label>
     <div class="inline-fields">
       <label class="check"><input type="checkbox" name="is_superuser" value="true"
         {% if form.is_superuser %}checked{% endif %}> Instance superuser</label>
-      <span class="muted" style="font-size:12px">Sees and administers every tenant.</span>
+      <span class="muted text-xs">Sees and administers every tenant.</span>
     </div>
 
     <div class="form-actions">

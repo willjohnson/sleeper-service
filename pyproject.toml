@@ -51,6 +51,7 @@ dev = [
     "ruff>=0.5",
     "fastmcp>=3.4.10",
     "playwright>=1.62.0",
+    "pytailwindcss>=0.4.2",
 ]
 
 [build-system]

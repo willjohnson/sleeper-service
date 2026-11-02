@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -2982,6 +2982,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytailwindcss"
+version = "0.4.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/2c/044d8fffba8c4cd236766879a8fab6e782b8ecad285399b5b7b6c29e3836/pytailwindcss-0.4.2.tar.gz", hash = "sha256:f069bfe693aba32ffa7097ed642fc53e83db3b229449d6074a67dc900fa9c89f", size = 68086, upload-time = "2026-10-13T15:31:07.633Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6e/a8/73b554fe3fab569b6827d7fba2e0cc9a0fa6ec866263153c0daa77a8417f/pytailwindcss-0.4.2-py3-none-any.whl", hash = "sha256:55cd55394ceb747c90b92e3e2822207cb60b143996e4ccf7753d8127e7fb5246", size = 10771, upload-time = "2026-10-13T15:31:06.453Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3509,6 +3518,7 @@ dev = [
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "playwright" },
+    { name = "pytailwindcss" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -3555,6 +3565,7 @@ dev = [
     { name = "fastmcp", specifier = ">=3.4.10" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "playwright", specifier = ">=1.62.0" },
+    { name = "pytailwindcss", specifier = ">=0.4.2" },
     { name = "pytest", specifier = ">=8.2" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.5" },

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ agent.name }} v{{ version.version_no }} — Sleeper Service{% endblock %}
-{% block heading %}{{ agent.name }} <span class="muted" style="font-size:14px">· v{{ version.version_no }}</span>{% endblock %}
+{% block heading %}{{ agent.name }} <span class="muted text-sm">· v{{ version.version_no }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
   <h2 class="with-action">Version {{ version.version_no }}
@@ -11,10 +11,10 @@
     </span>
   </h2>
   <table>
-    <tr><th style="width:140px">Model</th><td class="mono">{{ model_string }}</td></tr>
+    <tr><th class="w-35">Model</th><td class="mono">{{ model_string }}</td></tr>
     <tr><th>Guardrails</th>
       <td class="mono">{{ version.max_iterations }} iterations · {{ version.timeout_s }}s timeout</td></tr>
-    {% if params %}<tr><th>Params</th><td><pre style="margin:0">{{ params }}</pre></td></tr>{% endif %}
+    {% if params %}<tr><th>Params</th><td><pre class="m-0">{{ params }}</pre></td></tr>{% endif %}
     <tr><th>Created</th>
       <td class="muted">{{ version.created_at.strftime('%Y-%m-%d %H:%M') }}{% if author %} by {{ author }}{% endif %}</td></tr>
   </table>
@@ -22,11 +22,11 @@
 
 <div class="panel">
   <h2>Prompt</h2>
-  <pre style="white-space:pre-wrap">{{ version.prompt }}</pre>
+  <pre class="whitespace-pre-wrap">{{ version.prompt }}</pre>
 </div>
 
 {% if output_schema or input_schema %}
-<div class="grid2">
+<div class="grid gap-x-6 lg:grid-cols-2">
   {% if output_schema %}
   <div class="panel">
     <h2>Output schema</h2>
@@ -58,7 +58,7 @@
   </table>
   {% endif %}
   {% if version.tool_grants %}
-  <div class="pill-row" style="margin-top:10px">
+  <div class="pill-row mt-2.5">
     {% for t in version.tool_grants %}<span class="badge opt">{{ t }}</span>{% endfor %}
   </div>
   {% endif %}

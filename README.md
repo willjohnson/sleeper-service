@@ -67,6 +67,12 @@ Sleeper Service is the agent-execution layer of [CI Everywhere](https://zero2dat
 | ![Agent detail](docs/screenshots/agent-detail.png) | ![Job with delegation tree](docs/screenshots/job-tree.png) |
 | *Versions with promote, memory approval queue with gating-eval scores* | *Job detail: typed output, audit events, delegation tree* |
 
+The pages are Jinja templates styled with [Tailwind CSS](https://tailwindcss.com), run through
+its standalone CLI (the `pytailwindcss` dev dependency), so no Node is involved. The compiled
+stylesheet is committed. After changing template markup, run `scripts/build_css.sh` (or
+`scripts/build_css.sh --watch` while editing) to regenerate
+`src/sleeper_service/ui/static/style.css`; CI fails if it is stale.
+
 ## Architecture
 
 Everything ships as one Docker Compose stack. Your orchestrator and event feeds talk to the API; workers do the thinking; everything the platform learns or decides lands in Postgres, versioned.

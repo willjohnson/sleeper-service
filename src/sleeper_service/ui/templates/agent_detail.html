@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ agent.name }} — Sleeper Service{% endblock %}
-{% block heading %}{{ agent.name }} <span class="muted" style="font-size:14px">· {{ team.name }}</span>{% endblock %}
+{% block heading %}{{ agent.name }} <span class="muted text-sm">· {{ team.name }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
   <h2>Overview</h2>
@@ -18,7 +18,7 @@
     {% endif %}
   </div>
   {% endif %}
-  <p class="muted" style="margin-top:0">{{ agent.description or "No description." }}</p>
+  <p class="muted mt-0">{{ agent.description or "No description." }}</p>
   <div class="pill-row">
     {% if agent.options.get('delegation') in ('team', 'tenant') %}<span class="badge opt">delegates: {{ agent.options['delegation'] }}</span>{% endif %}
     {% if agent.options.get('memory') %}<span class="badge opt">memory</span>{% endif %}
@@ -27,8 +27,8 @@
     {% if agent.options.get('human_escalation') %}<span class="badge opt">human escalation</span>{% endif %}
   </div>
   {% if spending_limit %}
-  <p class="mono" style="margin-bottom:4px">month spend ${{ '%.4f'|format(spend) }} of ${{ '%.2f'|format(spending_limit) }}</p>
-  <div class="meter" style="max-width:320px"><div style="width: {{ [spend / spending_limit * 100, 100] | min }}%"></div></div>
+  <p class="mono mb-1">month spend ${{ '%.4f'|format(spend) }} of ${{ '%.2f'|format(spending_limit) }}</p>
+  <div class="meter max-w-80"><div style="width: {{ [spend / spending_limit * 100, 100] | min }}%"></div></div>
   {% endif %}
 
   {% if can_edit or can_delete %}
@@ -41,23 +41,23 @@
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
       <button class="subtle danger">Delete</button>
     </form>
-    <span class="muted" style="font-size:12px">Nothing has run here yet, so this can go
+    <span class="muted text-xs">Nothing has run here yet, so this can go
       without a trace. Once it has jobs, archiving is what retiring it means.</span>
     {% endif %}
   </div>
   {% endif %}
 </div>
 
-<div class="grid2">
+<div class="grid gap-x-6 lg:grid-cols-2">
   <div class="panel">
     <h2 class="with-action">Jobs per day by status
-      <span class="muted" style="font-weight:400">{{ chart_days }} days</span>
+      <span class="muted font-normal">{{ chart_days }} days</span>
     </h2>
     <canvas id="jobsChart" height="210"></canvas>
   </div>
   <div class="panel">
     <h2 class="with-action">Tokens per day
-      <span class="muted" style="font-weight:400">
+      <span class="muted font-normal">
         {% if jobs_total %}avg {{ '{:,.0f}'.format(avg_tokens_per_job) }} tokens/job{% else %}no jobs{% endif %}
       </span>
     </h2>
@@ -71,13 +71,17 @@
     <a class="btn subtle" href="/ui/agents/{{ agent.id }}/versions/new">New version</a>
     {% endif %}
   </h2>
-  <table class="versions">
-    <tr><th>Version</th><th>Model</th><th>Prompt</th><th class="nowrap">Guardrails</th>
-      <th class="nowrap">Created</th><th class="col-actions"></th></tr>
+  {# The actions column is wide enough for Promote + the alias form on one line,
+     so the controls line up down the column instead of wrapping on some rows and
+     not others. Rows differ — the current version has no Promote — so the group
+     is right-aligned and every row's controls end on the same edge. #}
+  <table>
+    <tr><th>Version</th><th>Model</th><th>Prompt</th><th class="whitespace-nowrap">Guardrails</th>
+      <th class="whitespace-nowrap">Created</th><th class="w-78"></th></tr>
     {% for v in versions %}
     <tr>
       <td>
-        <div class="version-cell">
+        <div class="flex flex-wrap items-center gap-1.5">
           <a href="/ui/agents/{{ agent.id }}/versions/{{ v.version_no }}">v{{ v.version_no }}</a>
           {% if v.id == agent.current_version_id %}<span class="badge current">current</span>{% endif %}
           {% for a in v.aliases %}
@@ -94,10 +98,10 @@
       </td>
       <td class="mono">{{ v.model_string }}</td>
       <td class="muted"><a href="/ui/agents/{{ agent.id }}/versions/{{ v.version_no }}" class="muted">{{ v.prompt|truncate(80) }}</a></td>
-      <td class="mono nowrap">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
-      <td class="muted nowrap">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
+      <td class="mono whitespace-nowrap">iters {{ v.max_iterations }} · {{ v.timeout_s }}s</td>
+      <td class="muted whitespace-nowrap">{{ v.created_at.strftime('%m-%d %H:%M') }}</td>
       <td>
-        <div class="actions">
+        <div class="actions justify-end">
           {% if v.id != agent.current_version_id and can_promote %}
           <form method="post" action="/ui/agents/{{ agent.id }}/promote/{{ v.version_no }}">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
@@ -129,7 +133,7 @@
     {% for p in pending_memory %}
     <tr>
       <td>v{{ p.version.version_no }} <span class="badge pending">pending</span></td>
-      <td><pre style="max-width:420px; white-space:pre-wrap">{{ p.version.content|truncate(400) }}</pre></td>
+      <td><pre class="max-w-105 whitespace-pre-wrap">{{ p.version.content|truncate(400) }}</pre></td>
       <td>
         {% if p.eval_run and p.eval_run.pass_rate is not none %}
           {% set ok = p.baseline is none or p.eval_run.pass_rate >= p.baseline %}
@@ -152,29 +156,29 @@
   </table>
   {% endif %}
   {% if current_memory %}
-    <h2 style="margin-top:14px">Active memory · v{{ current_memory.version_no }}
-      {% if can_promote %}<form method="post" action="/ui/agents/{{ agent.id }}/memory/rollback" style="display:inline"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Roll back</button></form>{% endif %}
+    <h2 class="mt-3.5">Active memory · v{{ current_memory.version_no }}
+      {% if can_promote %}<form class="inline" method="post" action="/ui/agents/{{ agent.id }}/memory/rollback"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Roll back</button></form>{% endif %}
     </h2>
-    <pre style="white-space:pre-wrap">{{ current_memory.content }}</pre>
+    <pre class="whitespace-pre-wrap">{{ current_memory.content }}</pre>
   {% elif not pending_memory %}
     <div class="muted">No memory yet.</div>
   {% endif %}
   {% if memory_versions|length > 1 or (memory_versions and not current_memory) %}
   <details class="subpanel">
     <summary class="muted">History · {{ memory_versions|length }} versions</summary>
-    <table style="margin-top:10px">
-      <tr><th style="width:70px">Version</th><th style="width:90px">Status</th>
-        <th style="width:150px">Written</th><th>Content</th></tr>
+    <table class="mt-2.5">
+      <tr><th class="w-18">Version</th><th class="w-24">Status</th>
+        <th class="w-38">Written</th><th>Content</th></tr>
       {% for m in memory_versions %}
       <tr>
         <td>v{{ m.version_no }}</td>
         <td><span class="badge {{ m.status }}">{{ m.status }}</span></td>
         <td class="muted">{{ m.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-        <td><pre style="white-space:pre-wrap; margin:0">{{ m.content|truncate(300) }}</pre></td>
+        <td><pre class="whitespace-pre-wrap m-0">{{ m.content|truncate(300) }}</pre></td>
       </tr>
       {% endfor %}
     </table>
-    <p class="muted" style="font-size:12px; margin-bottom:0">
+    <p class="muted text-xs mb-0">
       The newest active version is what gets injected; rolling back retires it so the
       one before takes over. Rejected versions are never injected again.
     </p>
@@ -195,24 +199,24 @@
     </span>
     {% endif %}
   </h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     A case is a saved prompt plus the checks its output must pass. A run replays every
     case against the current version{% if agent.current_version_id %} (v{{ current_version_no }}){% endif %}.
   </p>
 
   {% if eval_cases %}
   <table>
-    <tr><th>Case</th><th>Prompt</th><th>Checks</th><th class="col-actions"></th></tr>
+    <tr><th>Case</th><th>Prompt</th><th>Checks</th><th></th></tr>
     {% for c in eval_cases %}
     <tr>
       <td><a href="/ui/agents/{{ agent.id }}/eval-cases/{{ c.id }}"><strong>{{ c.name }}</strong></a></td>
       <td class="muted">{{ c.prompt|truncate(70) }}</td>
-      <td class="mono" style="font-size:12px">
+      <td class="mono text-xs">
         {% for label in c.checks %}<div>{{ label|truncate(60) }}</div>{% endfor %}
       </td>
       <td>
         {% if can_edit %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/agents/{{ agent.id }}/eval-cases/{{ c.id }}/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Delete</button>
@@ -225,8 +229,8 @@
   </table>
   {% else %}<div class="muted">No cases yet — a run needs at least one.</div>{% endif %}
 
-  <div class="subpanel" style="display:block">
-    <h2 style="margin-bottom:8px">Runs</h2>
+  <div class="subpanel block">
+    <h2 class="mb-2">Runs</h2>
     {% if eval_runs %}
     <table>
       <tr><th>Run</th><th>Version</th><th>Status</th><th>Pass rate</th><th>When</th></tr>
@@ -253,13 +257,13 @@
     </span>
     {% endif %}
   </h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Data-plane credentials scoped to this agent: submit jobs, read results, leave
     feedback. Secrets are shown once at creation and stored only as a hash.
   </p>
   {% if invoke_keys %}
   <table>
-    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th class="col-actions"></th></tr>
+    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th></th></tr>
     {% for k in invoke_keys %}
     <tr>
       <td><strong>{{ k.name or '(unnamed)' }}</strong></td>
@@ -273,7 +277,7 @@
       </td>
       <td>
         {% if not k.revoked_at %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/agents/{{ agent.id }}/invoke-keys/{{ k.id }}/revoke">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Revoke</button>
@@ -298,23 +302,23 @@
     </span>
     {% endif %}
   </h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Webhooks that turn an external event into a job here. The sender authenticates with
     the source's own secret rather than a platform key, and a template shapes the event
     body into the job's prompt.
   </p>
   {% if event_sources %}
   <table>
-    <tr><th>Name</th><th>Endpoint</th><th>Dedup on</th><th class="col-actions"></th></tr>
+    <tr><th>Name</th><th>Endpoint</th><th>Dedup on</th><th></th></tr>
     {% for e in event_sources %}
     <tr>
       <td><strong>{{ e.name }}</strong></td>
-      <td class="mono" style="font-size:12px">/v1/events/{{ e.id }}</td>
+      <td class="mono text-xs">/v1/events/{{ e.id }}</td>
       <td class="muted">{% if e.dedup_key_path %}<code>{{ e.dedup_key_path }}</code>
         {% else %}—{% endif %}</td>
       <td>
         {% if can_manage_keys %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/agents/{{ agent.id }}/event-sources/{{ e.id }}/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Delete</button>
@@ -333,20 +337,20 @@
 {% if can_manage_keys %}
 <div class="panel">
   <h2>Provider credentials</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Vendor API keys for this agent alone, overriding the team's and the tenant's. Use
     one when this agent's spend has to land on its own bill. Stored encrypted; never
     shown again.
   </p>
   {% if agent_creds %}
-  <table style="max-width:640px">
-    <tr><th>Provider</th><th>Set</th><th class="col-actions"></th></tr>
+  <table class="max-w-2xl">
+    <tr><th>Provider</th><th>Set</th><th></th></tr>
     {% for c in agent_creds %}
     <tr>
       <td><span class="badge opt">{{ c.provider }}</span></td>
       <td class="muted">{{ c.created_at.strftime('%Y-%m-%d') }}</td>
       <td>
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/agents/{{ agent.id }}/provider-creds/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="provider" value="{{ c.provider }}">

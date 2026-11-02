@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}New version of {{ agent.name }} — Sleeper Service{% endblock %}
-{% block heading %}New version <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block heading %}New version <span class="muted text-sm">· {{ agent.name }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Saves as <strong>v{{ next_version_no }}</strong>, prefilled from the current version.
     {% if next_version_no > 1 %}It is not promoted — an owner promotes it from the agent page
     once they are happy with it.{% else %}As the first version it is promoted straight away.{% endif %}
@@ -35,7 +35,7 @@
     <div>
       <textarea id="nv-out" name="output_schema" rows="10" class="mono"
                 placeholder='{"type": "object", "properties": {"risk_level": {"type": "string"}}, "required": ["risk_level"]}'>{{ form.output_schema if form.output_schema is defined else current_output_schema }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         JSON Schema. Set one and the model must return JSON matching it — that is what
         makes the agent callable as a workflow node rather than a chat box, and what
         <code>is_valid</code> eval checks grade against. Leave blank for free text.
@@ -46,7 +46,7 @@
     <div>
       <textarea id="nv-in" name="input_schema" rows="6" class="mono"
                 placeholder="optional">{{ form.input_schema if form.input_schema is defined else current_input_schema }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Validates the job payload before the run, so a malformed caller fails fast
         instead of paying for a confused one.
       </div>
@@ -56,7 +56,7 @@
     <div>
       <textarea id="nv-params" name="params" rows="4" class="mono"
                 placeholder='{"temperature": 0.2}'>{{ form.params if form.params is defined else current_params }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Passed through to the provider for this version.
       </div>
       {% include "jev_help.html" %}
@@ -92,13 +92,13 @@
         </select>
       </div>
       {% endfor %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         The version gets <code>list_files</code> and <code>read_file</code> beneath the
         prefix, plus <code>write_file</code> at <code>rw</code>. Nothing outside it is
         reachable; a blank prefix grants the whole store.
       </div>
       {% else %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         No data stores registered in this tenant —
         <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
       </div>
@@ -125,12 +125,12 @@
         <span></span>
       </div>
       {% endfor %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Comma-separated tool names to allowlist, or blank to take everything the server
         offers.
       </div>
       {% else %}
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         No MCP servers registered in this tenant —
         <a href="/ui/t/{{ tenant.id }}/connections">add one</a> to grant it here.
       </div>

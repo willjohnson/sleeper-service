@@ -2,7 +2,7 @@
 {% block title %}{{ tenant.name }} — Sleeper Service{% endblock %}
 {% block heading %}Dashboard · {{ tenant.name }}{% endblock %}
 {% block content %}
-<div class="cards">
+<div class="mb-6 grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-4">
   <div class="card"><div class="num">{{ stats.live_agents }}</div><div class="label">Live agents</div></div>
   <div class="card"><div class="num">{{ stats.total_agents }}</div><div class="label">Total agents</div></div>
   <div class="card"><div class="num">{{ stats.jobs_7d }}</div><div class="label">Jobs · 7 days</div></div>
@@ -10,7 +10,7 @@
   <div class="card"><div class="num">${{ '%.4f'|format(stats.cost_30d) }}</div><div class="label">Spend · 30 days</div></div>
 </div>
 
-<div class="grid2">
+<div class="grid gap-x-6 lg:grid-cols-2">
   <div class="panel">
     <h2>Jobs per day by status</h2>
     <canvas id="jobsChart" height="210"></canvas>
