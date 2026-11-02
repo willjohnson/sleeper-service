@@ -119,6 +119,10 @@ services:
     # repository (read-only since 2026-04) and stopped publishing community
     # images; this one is built from a fork that still carries the CVE fixes,
     # and is rebuilt daily. Same server, same S3 API, same flags.
+    # It runs as nonroot (uid 65532). A volume first written by the older
+    # minio/minio image is owned by root, and minio exits with "file access
+    # denied"; hand the volume over once with:
+    #   docker compose run --rm --no-deps --user root --entrypoint chown minio -R 65532:65532 /data
     image: cgr.dev/chainguard/minio@sha256:e7728e37a015dcd2f2b146abc4aedc0096769ac72cb64cc9ed36b7f4183361e1
     command: server /data --console-address ":9001"
     environment:
