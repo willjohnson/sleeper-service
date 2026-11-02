@@ -5,16 +5,16 @@
 <div class="panel">
   <h2>Result <span class="badge {{ job.status }}">{{ job.status }}</span>
     {% if job.status in ('dead_letter', 'failed', 'timeout') and can_submit %}
-    <form method="post" action="/ui/jobs/{{ job.id }}/retry" style="display:inline"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Retry</button></form>
+    <form class="inline" method="post" action="/ui/jobs/{{ job.id }}/retry"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="subtle">Retry</button></form>
     {% endif %}
   </h2>
   <table>
-    <tr><th style="width:140px">Agent</th><td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a> · <a href="/ui/agents/{{ agent.id }}/versions/{{ version_no }}">v{{ version_no }}</a>{% if job.memory_version_id %} · memory pinned{% endif %}{% if job.is_eval %} · <span class="badge opt">eval</span>{% endif %}</td></tr>
+    <tr><th class="w-35">Agent</th><td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a> · <a href="/ui/agents/{{ agent.id }}/versions/{{ version_no }}">v{{ version_no }}</a>{% if job.memory_version_id %} · memory pinned{% endif %}{% if job.is_eval %} · <span class="badge opt">eval</span>{% endif %}</td></tr>
     <tr><th>Tokens / cost</th><td>{{ job.tokens_in }} in · {{ job.tokens_out }} out · ${{ '%.6f'|format(job.cost) }}</td></tr>
     <tr><th>Timing</th><td class="muted">created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if job.finished_at %} · finished {{ job.finished_at.strftime('%H:%M:%S') }}{% endif %}</td></tr>
     {% if job.error %}<tr><th>Error</th><td><code>{{ job.error }}</code></td></tr>{% endif %}
   </table>
-  <h2 style="margin-top:14px">Payload</h2>
+  <h2 class="mt-3.5">Payload</h2>
   <pre>{{ payload_json }}</pre>
   {% if job.output %}
   <h2>Output</h2>
@@ -26,18 +26,18 @@
 <div class="panel">
   <h2>Feedback</h2>
   {% if feedback %}
-  <p style="margin-top:0">
+  <p class="mt-0">
     <span class="badge {{ 'succeeded' if feedback.vote == 1 else 'failed' }}">
       {{ 'helpful' if feedback.vote == 1 else 'unhelpful' }}</span>
     <span class="muted">recorded {{ feedback.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
   </p>
-  {% if feedback.comment %}<pre style="white-space:pre-wrap">{{ feedback.comment }}</pre>{% endif %}
-  <p class="muted" style="margin-bottom:0">
+  {% if feedback.comment %}<pre class="whitespace-pre-wrap">{{ feedback.comment }}</pre>{% endif %}
+  <p class="muted mb-0">
     One vote per job. What it taught the agent shows on the
     <a href="/ui/agents/{{ agent.id }}">agent page</a> under Memory.
   </p>
   {% elif can_submit %}
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     This agent learns from feedback: a vote is folded into its memory, which
     {% if agent.options.get('memory_approval') %}an owner then approves{% else %}takes
     effect on the next run{% endif %}. Say why, and the reason is what gets learned.

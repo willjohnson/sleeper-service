@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Edit {{ agent.name }} — Sleeper Service{% endblock %}
-{% block heading %}Edit <span class="muted" style="font-size:14px">· {{ agent.name }}</span>{% endblock %}
+{% block heading %}Edit <span class="muted text-sm">· {{ agent.name }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Settings apply to the agent itself. Changing them does not create a new version —
     to change the prompt or model, <a href="/ui/agents/{{ agent.id }}/versions/new">add a version</a>.
   </p>
@@ -67,7 +67,7 @@
 {% if can_archive %}
 <div class="panel">
   <h2>Archive</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Retires this agent: it leaves the agent list and refuses new work. Jobs, versions and evals
     are untouched, and an owner can restore it from the agent page afterwards.
   </p>

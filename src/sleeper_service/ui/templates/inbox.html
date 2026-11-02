@@ -10,19 +10,19 @@
 {% endblock %}
 {% block content %}
 <div class="panel">
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Memory changes and agent escalations arrive here as one queue. The underlying
     job, agent, memory version, and human decision remain linked in the audit trail.
   </p>
   {% if items %}
     {% for row in items %}
     {% set item = row.item %}
-    <div class="subpanel" style="display:block">
+    <div class="subpanel block">
       <div class="with-action">
         <div>
           <span class="badge {{ 'pending' if item.status == 'open' else 'completed' }}">{{ item.status }}</span>
           <span class="badge {{ 'opt' if item.kind == 'memory_approval' else 'escalated' }}">{{ item.kind|replace('_', ' ') }}</span>
-          <strong style="margin-left:6px">{{ item.title }}</strong>
+          <strong class="ml-1.5">{{ item.title }}</strong>
         </div>
         <span class="muted">{{ item.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
       </div>
@@ -33,7 +33,7 @@
       </p>
 
       {% if item.kind == 'memory_approval' and row.memory_version %}
-        <pre style="white-space:pre-wrap">{{ row.memory_version.content }}</pre>
+        <pre class="whitespace-pre-wrap">{{ row.memory_version.content }}</pre>
         {% if row.eval_run and row.eval_run.pass_rate is not none %}
           <p>Gating eval: <a href="/ui/eval-runs/{{ row.eval_run.id }}"><strong>{{ '%.0f%%'|format(row.eval_run.pass_rate * 100) }}</strong></a></p>
         {% elif row.eval_run %}<p>Gating eval: <span class="badge running">{{ row.eval_run.status }}</span></p>
@@ -59,7 +59,7 @@
           </form>
         </div>
         {% else %}
-        <form method="post" action="/ui/work-items/{{ item.id }}/resolve" class="form-grid" style="margin-top:10px">
+        <form method="post" action="/ui/work-items/{{ item.id }}/resolve" class="form-grid mt-2.5">
           <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
           <label for="response-{{ item.id }}">Response</label>
           <textarea id="response-{{ item.id }}" name="response" rows="3" placeholder="Decision, answer, or handoff notes"></textarea>

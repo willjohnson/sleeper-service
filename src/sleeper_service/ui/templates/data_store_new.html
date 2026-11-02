@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}New data store · {{ tenant.name }} — Sleeper Service{% endblock %}
-{% block heading %}New data store <span class="muted" style="font-size:14px">· {{ tenant.name }}</span>{% endblock %}
+{% block heading %}New data store <span class="muted text-sm">· {{ tenant.name }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Registers a bucket or folder for this tenant. Nothing reaches it until an agent
     version is granted a prefix inside it — registering is not granting.
   </p>
@@ -14,7 +14,7 @@
     <div>
       <input id="ds-name" type="text" name="name" required autofocus maxlength="200"
              value="{{ form.name or '' }}" placeholder="reference">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         How grants refer to it. Unique within the tenant.
       </div>
     </div>
@@ -27,7 +27,7 @@
         <option value="{{ t }}" {% if form.type == t %}selected{% endif %}>{{ t }}</option>
         {% endfor %}
       </select>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         {% for t, key in required_config.items() %}<code>{{ t }}</code> needs
         <code>{{ key }}</code>{% if not loop.last %} · {% endif %}{% endfor %}.
         {% if not is_superuser %}
@@ -41,7 +41,7 @@
     <div>
       <textarea id="ds-config" name="config" rows="5" class="mono"
                 placeholder='{"bucket": "acme-reference", "endpoint_url": "https://s3.example.com"}'>{{ form.config or '' }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         JSON. Non-secret settings — bucket, container, folder id, base path, and any
         endpoint override.
       </div>
@@ -51,7 +51,7 @@
     <div>
       <textarea id="ds-creds" name="credentials" rows="5" class="mono"
                 placeholder='{"access_key": "...", "secret_key": "..."}'>{{ form.credentials or '' }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         JSON, encrypted at rest and never shown again — to change them, replace the
         store. {% if not is_superuser %}Required for <code>s3</code>, <code>gcs</code>
         and <code>azure_blob</code>: without them the store runs on the platform's own

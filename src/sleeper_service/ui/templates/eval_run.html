@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Eval run · {{ agent.name }} — Sleeper Service{% endblock %}
-{% block heading %}Eval run <span class="mono" style="font-size:14px">{{ run.id }}</span>{% endblock %}
+{% block heading %}Eval run <span class="mono text-sm">{{ run.id }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
   <h2>Result</h2>
   <table>
     <tr>
-      <th style="width:140px">Agent</th>
+      <th class="w-35">Agent</th>
       <td><a href="/ui/agents/{{ agent.id }}">{{ agent.name }}</a>
         {% if version_no %} · <a href="/ui/agents/{{ agent.id }}/versions/{{ version_no }}">v{{ version_no }}</a>{% endif %}
         {% if memory_version %} · <span class="badge pending">memory v{{ memory_version.version_no }} gate</span>{% endif %}
@@ -16,7 +16,7 @@
       <th>Status</th>
       <td><span class="badge {{ run.status }}">{{ run.status }}</span>
         {% if pass_rate is not none %}
-        <strong style="margin-left:8px">{{ '%.0f%%'|format(pass_rate * 100) }}</strong>
+        <strong class="ml-2">{{ '%.0f%%'|format(pass_rate * 100) }}</strong>
         <span class="muted">· {{ passed_cases }} of {{ cases|length }} case(s) passed</span>
         {% endif %}
       </td>
@@ -40,12 +40,12 @@
     </span>
   </h2>
   <table>
-    <tr><th>Check</th><th class="nowrap">Result</th><th>Detail</th></tr>
+    <tr><th>Check</th><th class="whitespace-nowrap">Result</th><th>Detail</th></tr>
     {% for c in case.checks %}
     <tr>
       <td>
         <span class="mono">{{ c.label }}</span>
-        {% if c.code %}<pre style="white-space:pre-wrap; margin-top:6px">{{ c.code }}</pre>{% endif %}
+        {% if c.code %}<pre class="whitespace-pre-wrap mt-1.5">{{ c.code }}</pre>{% endif %}
       </td>
       <td><span class="badge {{ 'succeeded' if c.passed else 'failed' }}">
         {{ 'pass' if c.passed else 'fail' }}</span></td>

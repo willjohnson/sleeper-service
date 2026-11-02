@@ -3,7 +3,7 @@
 {% block heading %}New team{% endblock %}
 {% block content %}
 <div class="panel">
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Teams own agents and carry the roles — owner, editor, viewer. Every team has an owner from
     the moment it is created.
   </p>
@@ -25,7 +25,7 @@
     </select>
 
     <div></div>
-    <div class="muted" style="font-size:12px; margin-top:-6px">
+    <div class="muted text-xs -mt-1.5">
       Only people already in this tenant can be made owner. Add more members to the team
       afterwards with <span class="mono">PUT /v1/teams/{team_id}/members/{user_id}</span>.
     </div>

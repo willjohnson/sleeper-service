@@ -4,14 +4,14 @@
 {% block content %}
 <div class="panel">
   <h2>Registry</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     The provider models an agent version may reference. Instance-wide, shared across
     every tenant. A version stores the model string, so removing an entry does not
     change what already-published versions run.
   </p>
   {% if models %}
   <table>
-    <tr><th>Provider</th><th>Name</th><th>Model string</th><th class="col-actions"></th></tr>
+    <tr><th>Provider</th><th>Name</th><th>Model string</th><th></th></tr>
     {% for m in models %}
     <tr>
       <td><span class="badge opt">{{ m.provider }}</span></td>
@@ -19,7 +19,7 @@
       <td class="mono">{{ m.model_string }}</td>
       <td>
         {% if can_manage %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/models/{{ m.id }}/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Delete</button>
@@ -50,7 +50,7 @@
         <option value="{{ prov }}" {{ 'selected' if form.provider == prov }}>{{ prov }}</option>
         {% endfor %}
       </select>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Which SDK runs it, and which stored API key it uses. Must match the
         prefix of the model string below.
       </div>
@@ -60,7 +60,7 @@
     <div>
       <input id="m-name" type="text" name="name" required
              value="{{ form.name or '' }}" placeholder="claude-sonnet-5">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Your label for it. Unique per provider.
       </div>
     </div>
@@ -69,7 +69,7 @@
     <div>
       <input id="m-string" type="text" name="model_string" required class="mono"
              value="{{ form.model_string or '' }}" placeholder="anthropic:claude-sonnet-5">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Model identifier in <code>provider:model</code> format, such as
         <code>openrouter:typesafe/jev-1.13</code> for Jev decisions or
         <code>openai:decisions/gpt-6-luna</code> for OpenAI Decisions.

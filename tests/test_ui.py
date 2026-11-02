@@ -3273,6 +3273,29 @@ async def test_create_tenant_via_ui(client: AsyncClient, org: dict) -> None:
     assert "already exists" in r.text
 
 
+async def test_pages_outside_a_tenant_keep_the_selected_tenant(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    # Models, account, users and tenants belong to no tenant, but the sidebar
+    # and switcher still render one. It must be the tenant the user was in, not
+    # whichever sorts first ("acme" sorts before "default").
+    await _login(client, *ROOT)
+    selected = str(bootstrap.tenant_id)
+    assert (await client.get(f"/ui/t/{selected}")).status_code == 200
+
+    for path in (
+        "/ui/models",
+        "/ui/account",
+        "/ui/users",
+        f"/ui/users/{bootstrap.superuser_id}/keys",
+        "/ui/tenants",
+    ):
+        page = await client.get(path)
+        assert page.status_code == 200, path
+        assert re.search(rf'value="{selected}"\s+selected', page.text), path
+        assert f'href="/ui/t/{selected}/agents"' in page.text, path
+
+
 async def test_tenants_page_is_superuser_only(client: AsyncClient, org: dict) -> None:
     await _login(client, "alice@example.com")
     dash = await client.get(f"/ui/t/{org['tenant']['id']}")

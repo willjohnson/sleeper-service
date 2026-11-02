@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Settings · {{ tenant.name }} — Sleeper Service{% endblock %}
-{% block heading %}Settings <span class="muted" style="font-size:14px">· {{ tenant.name }}</span>{% endblock %}
+{% block heading %}Settings <span class="muted text-sm">· {{ tenant.name }}</span>{% endblock %}
 {% block content %}
 {% if plaintext %}
 <div class="panel">
@@ -9,8 +9,8 @@
       one and only time the key is readable.</span>
   </div>
   <h2>{{ created_key.name }}</h2>
-  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
-  <p class="muted" style="margin-bottom:0">
+  <pre class="mono whitespace-pre-wrap break-all text-sm">{{ plaintext }}</pre>
+  <p class="muted mb-0">
     It can submit jobs to every agent in this tenant and read every file in it.
   </p>
 </div>
@@ -18,7 +18,7 @@
 
 <div class="panel">
   <h2>Tenant</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     The system prompt is prepended to every agent in this tenant. The settings blob is
     where injection screening, hooks, link policy, retention and learning are tuned —
     it is the whole of <code>tenants.settings</code>, so what you save here replaces
@@ -37,7 +37,7 @@
     <div>
       <textarea id="s-settings" name="settings" rows="12"
                 placeholder='{&#10;  "hooks": {"injection_patterns": [{"name": "no-exfil", "regex": "send .* to"}]},&#10;  "learning": {"fold_model": "anthropic:claude-haiku-4-5"}&#10;}'>{{ form.settings or '' }}</textarea>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         JSON object. <code>hooks</code> and <code>learning</code> are validated here;
         other keys are stored as given. Emptying the field clears every setting.
       </div>
@@ -51,20 +51,20 @@
 
 <div class="panel">
   <h2>Provider credentials</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Vendor API keys billed to this tenant. A team or agent may set its own, and the
     narrower one wins — resolution walks agent, then team, then tenant, then the
     process environment. Stored encrypted; never shown again.
   </p>
   {% if creds %}
-  <table style="max-width:640px">
-    <tr><th>Provider</th><th>Set</th><th class="col-actions"></th></tr>
+  <table class="max-w-2xl">
+    <tr><th>Provider</th><th>Set</th><th></th></tr>
     {% for c in creds %}
     <tr>
       <td><span class="badge opt">{{ c.provider }}</span></td>
       <td class="muted">{{ c.created_at.strftime('%Y-%m-%d') }}</td>
       <td>
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/t/{{ tenant.id }}/provider-creds/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="provider" value="{{ c.provider }}">
@@ -92,7 +92,7 @@
     <div>
       <input id="pc-key" type="password" name="api_key" autocomplete="off" class="mono"
              placeholder="sk-...">
-      <div class="muted" style="font-size:12px">Setting a provider that already has a
+      <div class="muted text-xs">Setting a provider that already has a
         key replaces it.</div>
     </div>
     <div class="form-actions">
@@ -103,15 +103,15 @@
 
 <div class="panel">
   <h2>Single sign-on</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Register this tenant's OIDC provider and the login page offers it alongside the
     password form. Sign-in matches the email the IdP asserts to an existing user —
     there is no just-in-time provisioning, so people must be created first. An SSO
     session carries only this tenant's roles.
   </p>
   {% if oidc %}
-  <table style="max-width:640px">
-    <tr><th style="width:110px">Issuer</th><td class="mono">{{ oidc.issuer }}</td></tr>
+  <table class="max-w-2xl">
+    <tr><th class="w-28">Issuer</th><td class="mono">{{ oidc.issuer }}</td></tr>
     <tr><th>Client ID</th><td class="mono">{{ oidc.client_id }}</td></tr>
     <tr><th>Scopes</th><td class="mono">{{ oidc.scopes }}</td></tr>
   </table>
@@ -120,7 +120,7 @@
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
       <button class="subtle danger">Remove SSO</button>
     </form>
-    <span class="muted" style="font-size:12px">Password login keeps working either way.</span>
+    <span class="muted text-xs">Password login keeps working either way.</span>
   </div>
   {% else %}
   <div class="muted">Not configured — this tenant signs in with passwords only.</div>
@@ -133,7 +133,7 @@
     <div>
       <input id="o-issuer" type="text" name="issuer" class="mono"
              value="{{ form.issuer or '' }}" placeholder="https://idp.example.com/realms/acme">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         The base URL serving <code>/.well-known/openid-configuration</code>.
       </div>
     </div>
@@ -147,7 +147,7 @@
     <label for="o-secret">Client secret</label>
     <div>
       <input id="o-secret" type="password" name="client_secret" autocomplete="off" class="mono">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Encrypted at rest and never read back, so saving any change here means entering
         it again.
       </div>
@@ -162,7 +162,7 @@
     <label>Redirect URI</label>
     <div>
       <code>{{ redirect_uri }}</code>
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Register this with the IdP as the client's allowed redirect — the flow
         returns here, and a provider that has not been told about it refuses the
         sign-in.
@@ -177,7 +177,7 @@
 
 <div class="panel">
   <h2>Invoke keys · tenant-wide</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Data-plane credentials covering every agent in this tenant, and its files: submit
     jobs, read results, leave feedback. Nothing else — they cannot edit an agent or
     publish a version. Prefer an agent-scoped key, issued on the agent's own page,
@@ -185,7 +185,7 @@
   </p>
   {% if invoke_keys %}
   <table>
-    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th class="col-actions"></th></tr>
+    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th></th></tr>
     {% for k in invoke_keys %}
     <tr>
       <td><strong>{{ k.name or '(unnamed)' }}</strong></td>
@@ -195,7 +195,7 @@
         {% else %}<span class="badge active">active</span>{% endif %}</td>
       <td>
         {% if not k.revoked_at %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/t/{{ tenant.id }}/invoke-keys/{{ k.id }}/revoke">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Revoke</button>
@@ -214,7 +214,7 @@
     <div>
       <input id="tik-name" type="text" name="name" required maxlength="200"
              placeholder="n8n production workflow">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Who or what holds it. The secret is shown once, so the name is all you will
         have to go on when deciding what to revoke.
       </div>
@@ -223,7 +223,7 @@
     <div>
       <input id="tik-rate" class="short" type="text" name="rate_limit" inputmode="numeric"
              placeholder="optional">
-      <div class="muted" style="font-size:12px">Requests per minute. Blank for no limit.</div>
+      <div class="muted text-xs">Requests per minute. Blank for no limit.</div>
     </div>
     <div class="form-actions">
       <button type="submit">Create key</button>

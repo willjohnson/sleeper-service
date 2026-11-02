@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Connections · {{ tenant.name }} — Sleeper Service{% endblock %}
-{% block heading %}Connections <span class="muted" style="font-size:14px">· {{ tenant.name }}</span>{% endblock %}
+{% block heading %}Connections <span class="muted text-sm">· {{ tenant.name }}</span>{% endblock %}
 {% block content %}
 <div class="panel">
   <h2 class="with-action">Data stores
@@ -10,24 +10,24 @@
     </span>
     {% endif %}
   </h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Buckets and folders an agent version can be granted, path-scoped. Granting one
     gives that version <code>list_files</code>, <code>read_file</code> and — at
     <code>rw</code> — <code>write_file</code> beneath its prefix.
   </p>
   {% if stores %}
   <table>
-    <tr><th>Name</th><th>Type</th><th>Config</th><th>Credentials</th><th class="col-actions"></th></tr>
+    <tr><th>Name</th><th>Type</th><th>Config</th><th>Credentials</th><th></th></tr>
     {% for s in stores %}
     <tr>
       <td><strong>{{ s.name }}</strong></td>
       <td><span class="badge opt">{{ s.type }}</span></td>
-      <td class="mono" style="font-size:12px">{{ s.config | tojson | truncate(60) }}</td>
+      <td class="mono text-xs">{{ s.config | tojson | truncate(60) }}</td>
       <td>{% if s.credentials_enc %}<span class="badge active">stored</span>
         {% else %}<span class="muted">none</span>{% endif %}</td>
       <td>
         {% if can_manage %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/t/{{ tenant.id }}/data-stores/{{ s.id }}/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Delete</button>
@@ -49,23 +49,23 @@
     </span>
     {% endif %}
   </h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Tool servers an agent version can be granted. A grant may allowlist specific tool
     names, or take everything the server offers.
   </p>
   {% if servers %}
   <table>
-    <tr><th>Name</th><th>Transport</th><th>Endpoint</th><th>Credentials</th><th class="col-actions"></th></tr>
+    <tr><th>Name</th><th>Transport</th><th>Endpoint</th><th>Credentials</th><th></th></tr>
     {% for m in servers %}
     <tr>
       <td><strong>{{ m.name }}</strong></td>
       <td><span class="badge opt">{{ m.transport }}</span></td>
-      <td class="mono" style="font-size:12px">{{ m.endpoint | truncate(60) }}</td>
+      <td class="mono text-xs">{{ m.endpoint | truncate(60) }}</td>
       <td>{% if m.credentials_enc %}<span class="badge active">stored</span>
         {% else %}<span class="muted">none</span>{% endif %}</td>
       <td>
         {% if can_manage %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/t/{{ tenant.id }}/mcp-servers/{{ m.id }}/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Delete</button>

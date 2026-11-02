@@ -7,44 +7,57 @@
   <link rel="stylesheet" href="/ui/static/style.css">
 </head>
 <body>
-<div class="layout">
-  <aside class="sidebar">
-    <div class="brand">Sleeper Service<small>agents as a service</small></div>
-    {% if tenant %}
-    <a class="nav {% if section == 'dashboard' %}active{% endif %}" href="/ui/t/{{ tenant.id }}">Dashboard</a>
-    <a class="nav {% if section == 'agents' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/agents">Agents</a>
-    <a class="nav {% if section == 'inbox' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/inbox">Inbox</a>
-    <a class="nav {% if section == 'connections' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/connections">Connections</a>
-    <a class="nav {% if section == 'files' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/files">Files</a>
-    {% if tenant_admin %}
-    <a class="nav {% if section == 'settings' %}active{% endif %}" href="/ui/t/{{ tenant.id }}/settings">Settings</a>
-    {% endif %}
-    {% endif %}
-    {% if user.is_superuser %}
-    <a class="nav {% if section == 'models' %}active{% endif %}" href="/ui/models">Models</a>
-    <a class="nav {% if section == 'users' %}active{% endif %}" href="/ui/users">Users</a>
-    <a class="nav {% if section == 'tenants' %}active{% endif %}" href="/ui/tenants">Tenants</a>
-    {% endif %}
-    <div class="spacer"></div>
-    <a class="whoami" href="/ui/account">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</a>
-    <form method="post" action="/ui/logout"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="ghost" style="width:100%">Sign out</button></form>
-  </aside>
-  <main class="main">
-    <div class="topbar">
-      <h1>{% block heading %}{% endblock %}</h1>
-      <div class="topbar-actions">{% block actions %}{% endblock %}</div>
-      {% if tenants and tenants|length > 1 %}
-      <form method="get" action="/ui/switch">
-        <select name="tenant_id" onchange="this.form.submit()">
-          {% for t in tenants %}
-          <option value="{{ t.id }}" {% if tenant and t.id == tenant.id %}selected{% endif %}>{{ t.name }}</option>
-          {% endfor %}
-        </select>
-      </form>
+{% macro nav(name, href, label) %}
+<a class="rounded-md px-3 py-2 font-medium {% if section == name %}bg-white/10 text-white{% else %}text-slate-400 hover:bg-white/5 hover:text-white{% endif %}" href="{{ href }}">{{ label }}</a>
+{% endmacro %}
+<div class="flex min-h-screen">
+  <aside class="w-60 shrink-0 bg-slate-900">
+    <div class="sticky top-0 flex h-screen flex-col gap-0.5 overflow-y-auto px-3 py-5">
+      <div class="mb-6 px-3">
+        <div class="text-base font-semibold text-white">Sleeper Service</div>
+        <div class="text-xs text-slate-400">agents as a service</div>
+      </div>
+      {% if tenant %}
+      {{ nav('dashboard', '/ui/t/' ~ tenant.id, 'Dashboard') }}
+      {{ nav('agents', '/ui/t/' ~ tenant.id ~ '/agents', 'Agents') }}
+      {{ nav('inbox', '/ui/t/' ~ tenant.id ~ '/inbox', 'Inbox') }}
+      {{ nav('connections', '/ui/t/' ~ tenant.id ~ '/connections', 'Connections') }}
+      {{ nav('files', '/ui/t/' ~ tenant.id ~ '/files', 'Files') }}
+      {% if tenant_admin %}
+      {{ nav('settings', '/ui/t/' ~ tenant.id ~ '/settings', 'Settings') }}
       {% endif %}
+      {% endif %}
+      {% if user.is_superuser %}
+      <div class="mt-6 mb-1 px-3 text-xs font-medium tracking-wider text-slate-500 uppercase">Admin</div>
+      {{ nav('models', '/ui/models', 'Models') }}
+      {{ nav('users', '/ui/users', 'Users') }}
+      {{ nav('tenants', '/ui/tenants', 'Tenants') }}
+      {% endif %}
+      <div class="flex-1"></div>
+      <div class="border-t border-white/10 px-3 pt-4">
+        <a class="block truncate text-xs text-slate-400 hover:text-white" href="/ui/account">{{ user.email }}{% if user.is_superuser %} · superuser{% endif %}</a>
+        <form method="post" action="/ui/logout" class="mt-3"><input type="hidden" name="_csrf_token" value="{{ csrf_token }}"><button class="w-full bg-white/5 text-slate-300 shadow-none ring-1 ring-white/10 ring-inset hover:bg-white/10 hover:text-white">Sign out</button></form>
+      </div>
     </div>
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    {% block content %}{% endblock %}
+  </aside>
+  <main class="min-w-0 flex-1 px-8 py-6">
+    <div class="mx-auto max-w-6xl">
+      <div class="mb-6 flex min-h-9 items-center gap-3">
+        <h1 class="mr-auto">{% block heading %}{% endblock %}</h1>
+        <div class="page-actions flex items-center gap-2">{% block actions %}{% endblock %}</div>
+        {% if tenants and tenants|length > 1 %}
+        <form method="get" action="/ui/switch">
+          <select name="tenant_id" onchange="this.form.submit()">
+            {% for t in tenants %}
+            <option value="{{ t.id }}" {% if tenant and t.id == tenant.id %}selected{% endif %}>{{ t.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+        {% endif %}
+      </div>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </div>
   </main>
 </div>
 </body>

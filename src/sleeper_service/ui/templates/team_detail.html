@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ team.name }} — Sleeper Service{% endblock %}
 {% block heading %}{{ team.name }}
-  {% if team.is_org_team %}<span class="muted" style="font-size:14px">· org-wide</span>{% endif %}
+  {% if team.is_org_team %}<span class="muted text-sm">· org-wide</span>{% endif %}
 {% endblock %}
 {% block actions %}<a class="btn subtle" href="/ui/t/{{ tenant.id }}/agents">Back to agents</a>{% endblock %}
 {% block content %}
@@ -12,8 +12,8 @@
       one and only time the key is readable.</span>
   </div>
   <h2>{{ created_key.name }}</h2>
-  <pre class="mono" style="white-space:pre-wrap; word-break:break-all; font-size:14px">{{ plaintext }}</pre>
-  <p class="muted" style="margin-bottom:0">
+  <pre class="mono whitespace-pre-wrap break-all text-sm">{{ plaintext }}</pre>
+  <p class="muted mb-0">
     It can submit jobs to every agent this team owns.
   </p>
 </div>
@@ -21,7 +21,7 @@
 
 <div class="panel">
   <h2>Members</h2>
-  <table class="members">
+  <table class="max-w-2xl">
     <tr><th>Email</th><th>Role</th><th></th></tr>
     {% for m in members %}
     <tr>
@@ -42,7 +42,7 @@
         {% if m.is_last_owner %}<span class="muted">last owner</span>{% endif %}
         {% endif %}
       </td>
-      <td>
+      <td class="text-right">
         {% if can_manage and not m.is_last_owner %}
         <form method="post" action="/ui/teams/{{ team.id }}/members/{{ m.user_id }}/remove">
           <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
@@ -55,17 +55,17 @@
   </table>
 
   {% if can_manage %}
-  <div class="subpanel" style="display:block">
-    <h3 style="margin:0 0 4px; font-size:13px">Add a member</h3>
-    <p class="muted" style="margin:0 0 10px; font-size:12px">
+  <div class="subpanel block">
+    <h3 class="mt-0 mb-1 text-[13px]">Add a member</h3>
+    <p class="muted mt-0 mb-2.5 text-xs">
       By email. People must already have an account — {% if user.is_superuser %}<a
       href="/ui/users">create one</a>{% else %}an instance superuser creates those{% endif %}.
       Adding someone who is already on the team changes their role.
     </p>
     <form method="post" action="/ui/teams/{{ team.id }}/members" class="inline-fields">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-      <input type="email" name="email" required placeholder="person@example.com"
-             list="tenant-users" style="min-width:280px">
+      <input class="min-w-70" type="email" name="email" required placeholder="person@example.com"
+             list="tenant-users">
       <datalist id="tenant-users">
         {% for email in suggestions %}<option value="{{ email }}">{% endfor %}
       </datalist>
@@ -83,14 +83,14 @@
 {% if can_manage %}
 <div class="panel">
   <h2>Alerts</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Where this team hears about trouble. Each channel is an Apprise URL subscribed to
     the event types you pick. The URL carries its own credential, so it is encrypted
     and never shown again — a channel is identified by what it is subscribed to.
   </p>
   {% if channels %}
-  <table style="max-width:640px">
-    <tr><th>Subscribed to</th><th>Added</th><th class="col-actions"></th></tr>
+  <table class="max-w-2xl">
+    <tr><th>Subscribed to</th><th>Added</th><th></th></tr>
     {% for c in channels %}
     <tr>
       <td><div class="pill-row">
@@ -98,7 +98,7 @@
       </div></td>
       <td class="muted">{{ c.created_at.strftime('%Y-%m-%d') }}</td>
       <td>
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/teams/{{ team.id }}/notif-channels/{{ c.id }}/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Delete</button>
@@ -118,7 +118,7 @@
     <div>
       <input id="n-url" type="password" name="apprise_url" autocomplete="off" class="mono"
              placeholder="slack://TokenA/TokenB/TokenC">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         The worker connects to whatever this names, so it is checked like a callback
         destination — an address on a private network is refused unless the operator
         has allowed them.
@@ -138,19 +138,19 @@
 
 <div class="panel">
   <h2>Provider credentials</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Vendor API keys for this team's agents, overriding the tenant's. An agent may
     override these in turn. Stored encrypted; never shown again.
   </p>
   {% if creds %}
-  <table style="max-width:640px">
-    <tr><th>Provider</th><th>Set</th><th class="col-actions"></th></tr>
+  <table class="max-w-2xl">
+    <tr><th>Provider</th><th>Set</th><th></th></tr>
     {% for c in creds %}
     <tr>
       <td><span class="badge opt">{{ c.provider }}</span></td>
       <td class="muted">{{ c.created_at.strftime('%Y-%m-%d') }}</td>
       <td>
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/teams/{{ team.id }}/provider-creds/delete">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="provider" value="{{ c.provider }}">
@@ -186,7 +186,7 @@
 
 <div class="panel">
   <h2>Invoke keys · this team</h2>
-  <p class="muted" style="margin-top:0">
+  <p class="muted mt-0">
     Data-plane credentials covering every agent this team owns: submit jobs, read
     results, leave feedback. Nothing else — they cannot edit an agent or publish a
     version. Prefer an agent-scoped key, issued on the agent's own page, unless the
@@ -194,7 +194,7 @@
   </p>
   {% if invoke_keys %}
   <table>
-    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th class="col-actions"></th></tr>
+    <tr><th>Name</th><th>Rate limit</th><th>Created</th><th>Status</th><th></th></tr>
     {% for k in invoke_keys %}
     <tr>
       <td><strong>{{ k.name or '(unnamed)' }}</strong></td>
@@ -204,7 +204,7 @@
         {% else %}<span class="badge active">active</span>{% endif %}</td>
       <td>
         {% if not k.revoked_at %}
-        <div class="actions" style="justify-content:flex-end">
+        <div class="actions justify-end">
           <form method="post" action="/ui/teams/{{ team.id }}/invoke-keys/{{ k.id }}/revoke">
             <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
             <button class="subtle danger">Revoke</button>
@@ -223,7 +223,7 @@
     <div>
       <input id="kik-name" type="text" name="name" required maxlength="200"
              placeholder="n8n production workflow">
-      <div class="muted" style="font-size:12px">
+      <div class="muted text-xs">
         Who or what holds it. The secret is shown once, so the name is all you will
         have to go on when deciding what to revoke.
       </div>
@@ -232,7 +232,7 @@
     <div>
       <input id="kik-rate" class="short" type="text" name="rate_limit" inputmode="numeric"
              placeholder="optional">
-      <div class="muted" style="font-size:12px">Requests per minute. Blank for no limit.</div>
+      <div class="muted text-xs">Requests per minute. Blank for no limit.</div>
     </div>
     <div class="form-actions">
       <button type="submit">Create key</button>
