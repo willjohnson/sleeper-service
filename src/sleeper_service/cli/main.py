@@ -215,6 +215,7 @@ async def _demo_setup() -> None:
         Model,
         NotifChannel,
     )
+    from sleeper_service.runtime import system_prompts
 
     settings = gs()
     await _seed_models()
@@ -222,9 +223,10 @@ async def _demo_setup() -> None:
     async with get_sessionmaker()() as db:
         tenant = await db.scalar(select(Tenant).where(Tenant.name == "demo"))
         if tenant is None:
-            tenant = Tenant(name="demo", system_prompt="Be concise and factual.")
+            tenant = Tenant(name="demo")
             db.add(tenant)
             await db.flush()
+            await system_prompts.save_system_prompt(db, tenant, "Be concise and factual.", None)
             db.add(Team(tenant_id=tenant.id, name="org", is_org_team=True))
             await db.flush()
         team = await db.scalar(

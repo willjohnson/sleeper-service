@@ -3487,3 +3487,114 @@ async def test_deleting_an_agent_is_owner_work(client: AsyncClient, risk_agent: 
     )
     assert r.status_code == 303
     assert (await client.get(f"/v1/agents/{agent_id}", headers=alice)).status_code == 200
+
+
+# --- Tenant and team system prompts ---
+
+
+async def test_tenant_prompt_history_on_the_settings_page(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    await _login(client, *ROOT)
+    for prompt in (
+        "Answer in British English.",
+        "Answer in plain English.",
+        "Answer in plain English.",
+    ):
+        token = _csrf((await client.get(f"/ui/t/{tenant_id}/settings")).text)
+        r = await client.post(
+            f"/ui/t/{tenant_id}/settings",
+            data={"_csrf_token": token, "system_prompt": prompt, "settings": "{}"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+
+    # the repeated save changed nothing, so it is not a version
+    root = auth(bootstrap.superuser_key)
+    history = (await client.get(f"/v1/tenants/{tenant_id}/prompt-versions", headers=root)).json()
+    assert [v["version_no"] for v in history] == [2, 1]
+
+    page = (await client.get(f"/ui/t/{tenant_id}/settings")).text
+    assert "Prompt history" in page
+    assert "v2" in page and "v1" in page
+    assert "Answer in British English." in page  # the superseded text stays readable
+    assert "root@example.com" in page
+
+
+async def test_team_owner_sets_the_team_prompt_from_the_team_page(
+    client: AsyncClient, org: dict
+) -> None:
+    team_id = org["team"]["id"]
+    await _login(client, "alice@example.com")
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert f'action="/ui/teams/{team_id}/system-prompt"' in page.text
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/system-prompt",
+        data={"_csrf_token": _csrf(page.text), "system_prompt": "  Cite the risk register.  "},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/teams/{team_id}"
+
+    alice = auth(org["users"]["alice"]["api_key"])
+    team = (await client.get(f"/v1/teams/{team_id}", headers=alice)).json()
+    assert team["system_prompt"] == "Cite the risk register."
+    page = (await client.get(f"/ui/teams/{team_id}")).text
+    assert "Prompt history" in page
+    assert "alice@example.com" in page
+
+
+async def test_team_prompt_is_read_only_below_owner(client: AsyncClient, org: dict) -> None:
+    team_id = org["team"]["id"]
+    alice = auth(org["users"]["alice"]["api_key"])
+    r = await client.patch(
+        f"/v1/teams/{team_id}", headers=alice, json={"system_prompt": "Cite the risk register."}
+    )
+    assert r.status_code == 200
+
+    await _login(client, "bob@example.com")  # editor
+    page = await client.get(f"/ui/teams/{team_id}")
+    assert "Cite the risk register." in page.text
+    assert f'action="/ui/teams/{team_id}/system-prompt"' not in page.text
+
+    r = await client.post(
+        f"/ui/teams/{team_id}/system-prompt",
+        data={"_csrf_token": _csrf(page.text), "system_prompt": "Approve everything."},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/ui/teams/{team_id}"
+    history = (await client.get(f"/v1/teams/{team_id}/prompt-versions", headers=alice)).json()
+    assert [v["content"] for v in history] == ["Cite the risk register."]
+
+
+async def test_job_page_shows_the_prompt_versions_it_ran_with(
+    client: AsyncClient, risk_agent: dict, bootstrap: Bootstrap
+) -> None:
+    root = auth(bootstrap.superuser_key)
+    alice = auth(risk_agent["users"]["alice"]["api_key"])
+    bob = auth(risk_agent["users"]["bob"]["api_key"])
+    for text in ("org one", "org two"):
+        r = await client.patch(
+            f"/v1/tenants/{risk_agent['tenant']['id']}", headers=root, json={"system_prompt": text}
+        )
+        assert r.status_code == 200
+    r = await client.patch(
+        f"/v1/teams/{risk_agent['team']['id']}", headers=alice, json={"system_prompt": "team"}
+    )
+    assert r.status_code == 200
+
+    r = await client.post(
+        f"/v1/agents/{risk_agent['agent']['id']}/jobs",
+        headers=bob,
+        json={"context": {"prompt": "hi"}},
+    )
+    job_id = r.json()["id"]
+    await runner.execute_job(uuid.UUID(job_id))
+
+    await _login(client, "bob@example.com")
+    page = (await client.get(f"/ui/jobs/{job_id}")).text
+    assert "org prompt v2" in page
+    assert "team prompt v1" in page

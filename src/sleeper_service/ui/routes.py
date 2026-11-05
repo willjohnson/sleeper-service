@@ -59,6 +59,7 @@ from sleeper_service.db.models import (
     Model,
     NotifChannel,
     OidcConfig,
+    PromptVersion,
     ProviderCred,
     Team,
     TeamMember,
@@ -68,7 +69,7 @@ from sleeper_service.db.models import (
     WorkItem,
 )
 from sleeper_service.db.session import get_db
-from sleeper_service.runtime import spending
+from sleeper_service.runtime import spending, system_prompts
 from sleeper_service.runtime.decisions import validate_decision_config
 from sleeper_service.runtime.evals import PATH_OPS, validate_checks
 from sleeper_service.runtime.hooks import validate_hooks_settings
@@ -1000,6 +1001,26 @@ async def _tenant_users(db: AsyncSession, tenant_id: uuid.UUID, me: User) -> lis
     return users
 
 
+async def _prompt_history(db: AsyncSession, owner: Tenant | Team) -> list[dict]:
+    """A tenant's or team's prompt versions, newest first, with who saved each."""
+    versions = await system_prompts.prompt_history(db, owner)
+    author_ids = {v.created_by for v in versions if v.created_by}
+    emails = (
+        dict((await db.execute(select(User.id, User.email).where(User.id.in_(author_ids)))).all())
+        if author_ids
+        else {}
+    )
+    return [
+        {
+            "version_no": v.version_no,
+            "content": v.content,
+            "created_at": v.created_at,
+            "author": emails.get(v.created_by),
+        }
+        for v in versions
+    ]
+
+
 async def _render_team(
     request: Request,
     team_id: uuid.UUID,
@@ -1040,6 +1061,7 @@ async def _render_team(
         for m, u in rows
     ]
     member_ids = {m["user_id"] for m in members}
+    prompt_history = await _prompt_history(db, team)
     suggestions = [
         u.email for u in await _tenant_users(db, team.tenant_id, p.user) if u.id not in member_ids
     ]
@@ -1058,6 +1080,9 @@ async def _render_team(
             suggestions=suggestions,
             can_manage=role == Role.OWNER,
             roles=[r.value for r in Role],
+            # Any member may read the team prompt: it is part of every
+            # instruction their agents run under.
+            prompt_history=prompt_history,
             # Owner-only panels, and owner-only data: an Apprise subscription
             # and the list of providers a team pays for are both things a
             # viewer has no business reading, so they are not fetched at all
@@ -1096,6 +1121,21 @@ async def _team_owner_or_redirect(
     if await _team_role(db, p, team.id) != Role.OWNER:
         return None, RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
     return team, None
+
+
+@router.post("/teams/{team_id}/system-prompt")
+async def ui_set_team_prompt(
+    team_id: uuid.UUID,
+    system_prompt: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    team, redirect = await _team_owner_or_redirect(db, p, team_id)
+    if redirect is not None:
+        return redirect
+    await system_prompts.save_system_prompt(db, team, system_prompt.strip(), p.user.id)
+    await db.commit()
+    return RedirectResponse(f"/ui/teams/{team_id}", status_code=303)
 
 
 def _valid_role(raw: str) -> Role | None:
@@ -3383,6 +3423,12 @@ async def job_detail(
             job=job,
             agent=agent,
             version_no=version.version_no if version else "?",
+            tenant_prompt=await db.get(PromptVersion, job.tenant_prompt_version_id)
+            if job.tenant_prompt_version_id
+            else None,
+            team_prompt=await db.get(PromptVersion, job.team_prompt_version_id)
+            if job.team_prompt_version_id
+            else None,
             payload_json=json.dumps(job.payload, indent=2)[:4000],
             output_json=json.dumps(job.output, indent=2)[:4000] if job.output else None,
             events=events,
@@ -3588,6 +3634,7 @@ async def _render_settings(
             # stored values otherwise, so a rejected edit is corrected rather
             # than retyped.
             form={**defaults, **(form or {})},
+            prompt_history=await _prompt_history(db, tenant),
             error=error,
         ),
         status_code=status_code,
@@ -3636,7 +3683,7 @@ async def ui_update_tenant(
     if error is not None:
         return await fail(error)
 
-    tenant.system_prompt = system_prompt.strip()
+    await system_prompts.save_system_prompt(db, tenant, system_prompt.strip(), p.user.id)
     tenant.settings = blob
     await db.commit()
     return RedirectResponse(f"/ui/t/{tenant_id}/settings", status_code=303)
@@ -4576,9 +4623,10 @@ async def ui_create_tenant(
     if await db.scalar(select(Tenant).where(Tenant.name == name)):
         return await fail(f"A tenant named {name!r} already exists.")
 
-    tenant = Tenant(name=name, system_prompt=system_prompt.strip())
+    tenant = Tenant(name=name)
     db.add(tenant)
     await db.flush()
+    await system_prompts.save_system_prompt(db, tenant, system_prompt.strip(), p.user.id)
     # Every tenant is born with its org-wide team, as api.v1.tenants does:
     # owning it is what makes someone a tenant admin, so a tenant without one
     # can only ever be administered by an instance superuser.

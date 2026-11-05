@@ -80,6 +80,30 @@
   {% endif %}
 </div>
 
+<div class="panel">
+  <h2>System prompt</h2>
+  <p class="muted mt-0">
+    Instructions for every agent this team owns. They follow the tenant's system prompt
+    and come before each agent's own prompt.{% if not can_manage %} Team owners edit them.{% endif %}
+  </p>
+  {% if can_manage %}
+  <form method="post" action="/ui/teams/{{ team.id }}/system-prompt" class="form-grid">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <label for="tp-prompt">System prompt</label>
+    <div>
+      <textarea id="tp-prompt" name="system_prompt" rows="4"
+                placeholder="Applies to every agent on this team.">{{ team.system_prompt }}</textarea>
+    </div>
+    <div class="form-actions">
+      <button type="submit">Save prompt</button>
+    </div>
+  </form>
+  {% elif not team.system_prompt %}
+  <div class="muted">None — this team's agents run under the tenant's prompt and their own.</div>
+  {% endif %}
+  {% include "prompt_history.html" %}
+</div>
+
 {% if can_manage %}
 <div class="panel">
   <h2>Alerts</h2>

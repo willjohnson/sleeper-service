@@ -32,6 +32,16 @@ class TenantOut(OrmModel):
     created_at: datetime
 
 
+class PromptVersionOut(OrmModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    team_id: uuid.UUID | None
+    version_no: int
+    content: str
+    created_by: uuid.UUID | None
+    created_at: datetime
+
+
 class OidcConfigSet(BaseModel):
     issuer: str = Field(pattern=r"^https?://", max_length=500)
     client_id: str = Field(min_length=1, max_length=500)
@@ -84,11 +94,16 @@ class TeamCreate(BaseModel):
     owner_user_id: uuid.UUID | None = None
 
 
+class TeamUpdate(BaseModel):
+    system_prompt: str | None = None
+
+
 class TeamOut(OrmModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     name: str
     is_org_team: bool
+    system_prompt: str
     created_at: datetime
 
 
@@ -291,6 +306,8 @@ class JobOut(OrmModel):
     agent_id: uuid.UUID
     agent_version_id: uuid.UUID
     memory_version_id: uuid.UUID | None = None
+    tenant_prompt_version_id: uuid.UUID | None = None
+    team_prompt_version_id: uuid.UUID | None = None
     parent_job_id: uuid.UUID | None
     status: str
     payload: dict

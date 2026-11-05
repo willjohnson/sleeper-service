@@ -170,3 +170,63 @@ async def test_migration_chain_downgrades_cleanly() -> None:
     finally:
         await admin.execute(f'drop database if exists "{_ALEMBIC_DB}"')
         await admin.close()
+
+
+def _alembic(env: dict, direction: str, target: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", direction, target],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"alembic {direction} {target} failed:\n{result.stderr}"
+
+
+async def test_tenant_system_prompts_move_into_prompt_versions_and_back() -> None:
+    """Existing tenant prompts become version 1 of their history; empty ones
+    leave no history. Downgrading restores the latest version as the column."""
+    admin = await asyncpg.connect(f"postgresql://sleeper:sleeper@localhost:{_PG}/sleeper")
+    try:
+        await _recreate(admin, _ALEMBIC_DB)
+        env = {**os.environ, "DATABASE_URL": _url(_ALEMBIC_DB)}
+        _alembic(env, "upgrade", "6e2f7a9c1b44")
+
+        conn = await asyncpg.connect(f"postgresql://sleeper:sleeper@localhost:{_PG}/{_ALEMBIC_DB}")
+        try:
+            insert = (
+                "insert into tenants (id, name, system_prompt, settings) "
+                "values (gen_random_uuid(), $1, $2, '{}') returning id"
+            )
+            prompted = await conn.fetchval(insert, "acme", "Be concise.")
+            unprompted = await conn.fetchval(insert, "globex", "")
+        finally:
+            await conn.close()
+
+        _alembic(env, "upgrade", "head")
+
+        conn = await asyncpg.connect(f"postgresql://sleeper:sleeper@localhost:{_PG}/{_ALEMBIC_DB}")
+        try:
+            rows = await conn.fetch(
+                "select tenant_id, team_id, version_no, content from prompt_versions"
+            )
+            assert [tuple(r) for r in rows] == [(prompted, None, 1, "Be concise.")]
+            await conn.execute(
+                "insert into prompt_versions (id, tenant_id, version_no, content) "
+                "values (gen_random_uuid(), $1, 2, 'Be precise.')",
+                prompted,
+            )
+        finally:
+            await conn.close()
+
+        _alembic(env, "downgrade", "-1")
+
+        conn = await asyncpg.connect(f"postgresql://sleeper:sleeper@localhost:{_PG}/{_ALEMBIC_DB}")
+        try:
+            restored = dict(await conn.fetch("select id, system_prompt from tenants"))
+        finally:
+            await conn.close()
+        assert restored == {prompted: "Be precise.", unprompted: ""}
+    finally:
+        await admin.execute(f'drop database if exists "{_ALEMBIC_DB}"')
+        await admin.close()

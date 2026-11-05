@@ -529,3 +529,14 @@ migrations against *existing data*, not DDL on an empty database.
   on Starlette deprecation warnings.
 - [x] Full regression suite: 417 tests pass with no warnings; lint and formatting pass.
 - [x] Bump package, runtime, and lockfile versions to 0.1.8.
+
+## 2026-11-05 — Versioned team-level system prompts and release 0.1.9
+
+- [x] Add the team layer to the prompt sandwich: tenant → team → agent → memory.
+- [x] Version tenant and team prompts in `prompt_versions`; pin both versions on every
+  job. Migration moves existing tenant prompts in as version 1.
+- [x] Team owners edit the team prompt (API + UI); prompt history on the tenant
+  settings and team pages; pinned versions on the job page.
+- [x] Full regression suite: 435 tests pass with no warnings; lint and formatting pass.
+- [x] Bump package, runtime, and lockfile versions to 0.1.9.
+- [x] Verify release metadata and build source/wheel distributions.

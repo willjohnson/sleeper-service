@@ -4,12 +4,20 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sleeper_service.api.v1.schemas import MemberOut, MemberSet, TeamCreate, TeamOut
+from sleeper_service.api.v1.schemas import (
+    MemberOut,
+    MemberSet,
+    PromptVersionOut,
+    TeamCreate,
+    TeamOut,
+    TeamUpdate,
+)
 from sleeper_service.auth.principal import UserPrincipal, get_user_principal
 from sleeper_service.auth.rbac import require_role, require_tenant_admin, visible_team_ids
 from sleeper_service.constants import Role
-from sleeper_service.db.models import Team, TeamMember, Tenant, User
+from sleeper_service.db.models import PromptVersion, Team, TeamMember, Tenant, User
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime import system_prompts
 
 router = APIRouter(tags=["teams"])
 
@@ -71,6 +79,32 @@ async def get_team(
     principal: UserPrincipal = Depends(get_user_principal),
 ) -> Team:
     return await _get_visible_team(team_id, db, principal)
+
+
+@router.patch("/teams/{team_id}", response_model=TeamOut)
+async def update_team(
+    team_id: uuid.UUID,
+    body: TeamUpdate,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> Team:
+    team = await _get_visible_team(team_id, db, principal)
+    require_role(principal, team.id, Role.OWNER)
+    if body.system_prompt is not None:
+        await system_prompts.save_system_prompt(db, team, body.system_prompt, principal.user.id)
+    await db.commit()
+    await db.refresh(team)
+    return team
+
+
+@router.get("/teams/{team_id}/prompt-versions", response_model=list[PromptVersionOut])
+async def list_team_prompt_versions(
+    team_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> list[PromptVersion]:
+    team = await _get_visible_team(team_id, db, principal)
+    return await system_prompts.prompt_history(db, team)
 
 
 @router.get("/teams/{team_id}/members", response_model=list[MemberOut])

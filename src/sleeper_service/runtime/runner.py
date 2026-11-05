@@ -31,10 +31,19 @@ from sleeper_service.db.models import (
     JobEvent,
     MemoryVersion,
     Model,
+    Team,
     Tenant,
 )
 from sleeper_service.db.session import get_sessionmaker
-from sleeper_service.runtime import decisions, hooks, links, memory, notify, spending
+from sleeper_service.runtime import (
+    decisions,
+    hooks,
+    links,
+    memory,
+    notify,
+    spending,
+    system_prompts,
+)
 from sleeper_service.runtime.delegation import build_delegation_toolset
 from sleeper_service.runtime.providers import (
     build_model,
@@ -222,6 +231,7 @@ async def execute_job(
         agent = await db.get(Agent, job.agent_id)
         version = await db.get(AgentVersion, job.agent_version_id)
         tenant = await db.get(Tenant, agent.tenant_id)
+        team = await db.get(Team, agent.team_id)
         model_row = await db.get(Model, version.model_id)
 
         # Budget pre-flight (re-checked here so queued backlogs can't overrun).
@@ -261,6 +271,17 @@ async def execute_job(
                 if mem_version is not None:
                     job.memory_version_id = mem_version.id
                     memory_text = mem_version.content
+
+        # Tenant and team prompts: a queued job pins the live versions. A
+        # re-entry (the worker's transient-error retry, a worker restart)
+        # finds the job already running and keeps them, so every attempt of a
+        # run gets the same instructions. A manual retry re-queues the job, so
+        # it reruns under — and records — the prompts live at that point.
+        if job.status == "queued":
+            job.tenant_prompt_version_id = tenant.system_prompt_version_id
+            job.team_prompt_version_id = team.system_prompt_version_id
+        tenant_prompt = await system_prompts.pinned_prompt(db, job.tenant_prompt_version_id)
+        team_prompt = await system_prompts.pinned_prompt(db, job.team_prompt_version_id)
 
         job.status = "running"
         job.started_at = _now()
@@ -350,7 +371,8 @@ async def execute_job(
     instructions = "\n\n".join(
         p
         for p in (
-            tenant.system_prompt.strip(),
+            tenant_prompt.strip(),
+            team_prompt.strip(),
             version.prompt.strip(),
             memory.render_memory_section(memory_text) if memory_text else "",
         )
