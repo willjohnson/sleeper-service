@@ -42,11 +42,15 @@ Docker Compose services: `api`, `worker`, `postgres`, `redis`, `minio`, `langfus
 ## Data model
 
 ```
-tenants        id, name, system_prompt, settings, created_at, updated_at
+tenants        id, name, settings, created_at, updated_at
 users          id, email, password_hash, ...      -- a user can belong to teams
                                                   -- across multiple tenants
 teams          id, tenant_id, name  (seed: one org-wide team per tenant)
 team_members   user_id, team_id, role (owner|editor|viewer)
+prompt_versions id, tenant_id, team_id (null = tenant-wide), version_no,
+               content, created_by, created_at     -- immutable; the newest
+                                                   -- version is the live
+                                                   -- tenant or team prompt
 agents         id, tenant_id, team_id, name, description, parent_agent_id,
                current_version_id, spending_limit,
                options (permissions, logging, memory, learning)
@@ -75,7 +79,8 @@ api_keys       id, kind (user|invoke),
 provider_creds id, scope (tenant|team|agent), scope_id, provider, credentials_enc
                -- vendor API keys, split from platform keys
 files          id, tenant_id, object_key (MinIO), size, content_type, ttl
-jobs           id, agent_id, agent_version_id, memory_version_id, parent_job_id,
+jobs           id, agent_id, agent_version_id, memory_version_id,
+               tenant_prompt_version_id, team_prompt_version_id, parent_job_id,
                status, payload, output, error, tokens_in/out, cost,
                callback_url, user_ctx
 job_events     job_id, ts, type, data               -- audit trail per job
@@ -92,7 +97,7 @@ Key properties:
 - **Versioning = auditability.** Any change to prompt/model/params/tools/output schema writes a new immutable `agent_versions` row; every job records the exact version it ran. Nothing versioned is ever mutated.
 - **Branching.** Cloning an agent sets `parent_agent_id` — branches for prompt/model experiments, comparable via the eval harness (Phase 4). Nestable per the note.
 - **Ownership.** Every agent belongs to a team; every team requires ≥1 owner — a responsible human per agent.
-- **Prompt sandwich.** Effective prompt = tenant system prompt + agent prompt + call context.
+- **Prompt sandwich.** Effective prompt = tenant system prompt + team system prompt + agent prompt + memory + call context. Tenant and team prompts are versioned in `prompt_versions` (tenant admins edit the tenant's, team owners their team's); a job pins the versions it ran with on its first attempt, so agent version + prompt versions + memory version reproduce its instructions.
 - **Version pinning & promotion.** Job submissions run `current_version_id` by default but may pin an explicit `agent_version_id` or an alias (`dev`/`staging`/`prod` → version). Promotion = repointing current/alias to a version (owner/editor only); rollback = repointing back. Nothing is redeployed — versions are just rows.
 - **RBAC matrix.** Roles are team-scoped: **owner** — everything, including promote/rollback versions, manage members, data stores, MCP servers, API keys, notification channels; **editor** — create/edit agents and versions, run jobs, manage eval cases; **viewer** — read agents, jobs, logs, stats. Enforced at the API from Phase 1, not just in the UI. Roles live only on `team_members`; a **user API key** evaluates against the same matrix as its user, while **invoke keys** sit outside the matrix entirely (fixed submit/read/feedback capability within their scope).
 

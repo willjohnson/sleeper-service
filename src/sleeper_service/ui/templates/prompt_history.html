@@ -1,0 +1,17 @@
+{% if prompt_history %}
+<h3 class="mt-3.5 mb-1 text-[13px]">Prompt history</h3>
+<p class="muted mt-0 text-xs">
+  Every saved change is kept, and each job records the version it ran with. To roll
+  back, save an earlier text again.
+</p>
+<table>
+  <tr><th>Version</th><th>Prompt</th><th>Saved</th></tr>
+  {% for v in prompt_history %}
+  <tr>
+    <td><span class="badge opt">v{{ v.version_no }}</span>{% if loop.first %} <span class="muted">live</span>{% endif %}</td>
+    <td>{% if v.content %}<pre class="whitespace-pre-wrap text-sm m-0">{{ v.content }}</pre>{% else %}<span class="muted">(cleared)</span>{% endif %}</td>
+    <td class="muted">{{ v.created_at.strftime('%Y-%m-%d %H:%M') }}{% if v.author %} · {{ v.author }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}

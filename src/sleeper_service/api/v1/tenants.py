@@ -4,11 +4,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sleeper_service.api.v1.schemas import TenantCreate, TenantOut, TenantUpdate
+from sleeper_service.api.v1.schemas import (
+    PromptVersionOut,
+    TenantCreate,
+    TenantOut,
+    TenantUpdate,
+)
 from sleeper_service.auth.principal import UserPrincipal, get_user_principal
 from sleeper_service.auth.rbac import require_tenant_admin, visible_team_ids
-from sleeper_service.db.models import Team, Tenant
+from sleeper_service.db.models import PromptVersion, Team, Tenant
 from sleeper_service.db.session import get_db
+from sleeper_service.runtime import system_prompts
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -23,9 +29,10 @@ async def create_tenant(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only superusers create tenants")
     if await db.scalar(select(Tenant).where(Tenant.name == body.name)):
         raise HTTPException(status.HTTP_409_CONFLICT, "Tenant name already exists")
-    tenant = Tenant(name=body.name, system_prompt=body.system_prompt)
+    tenant = Tenant(name=body.name)
     db.add(tenant)
     await db.flush()
+    await system_prompts.save_system_prompt(db, tenant, body.system_prompt, principal.user.id)
     # Every tenant is born with its org-wide team (BUILD_PLAN seed).
     db.add(Team(tenant_id=tenant.id, name="org", is_org_team=True))
     await db.commit()
@@ -83,7 +90,7 @@ async def update_tenant(
     tenant = await _get_visible_tenant(tenant_id, db, principal)
     await require_tenant_admin(db, principal, tenant_id)
     if body.system_prompt is not None:
-        tenant.system_prompt = body.system_prompt
+        await system_prompts.save_system_prompt(db, tenant, body.system_prompt, principal.user.id)
     if body.settings is not None:
         from sleeper_service.runtime.hooks import validate_hooks_settings
         from sleeper_service.runtime.learning import validate_learning_settings
@@ -95,3 +102,13 @@ async def update_tenant(
     await db.commit()
     await db.refresh(tenant)
     return tenant
+
+
+@router.get("/{tenant_id}/prompt-versions", response_model=list[PromptVersionOut])
+async def list_tenant_prompt_versions(
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    principal: UserPrincipal = Depends(get_user_principal),
+) -> list[PromptVersion]:
+    tenant = await _get_visible_tenant(tenant_id, db, principal)
+    return await system_prompts.prompt_history(db, tenant)

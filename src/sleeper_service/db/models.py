@@ -23,9 +23,10 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    select,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, column_property, mapped_column, relationship
 
 from sleeper_service.db.base import Base, CreatedAtMixin, TimestampMixin, UUIDPKMixin
 
@@ -34,7 +35,6 @@ class Tenant(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "tenants"
 
     name: Mapped[str] = mapped_column(unique=True)
-    system_prompt: Mapped[str] = mapped_column(Text, default="")
     settings: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
@@ -73,6 +73,57 @@ class TeamMember(Base):
 
     user: Mapped["User"] = relationship(back_populates="memberships")
     team: Mapped["Team"] = relationship(back_populates="members")
+
+
+class PromptVersion(UUIDPKMixin, Base):
+    """One immutable revision of a tenant's or a team's system prompt.
+
+    team_id is null for the tenant (org-wide) prompt. The newest version in a
+    scope is the live prompt, and every job pins the versions it ran with, so
+    rolling back means saving an earlier text again as a newer version.
+    """
+
+    __tablename__ = "prompt_versions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "team_id", "version_no", postgresql_nulls_not_distinct=True),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    version_no: Mapped[int]
+    content: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+def _latest_prompt_version(column, *scope):
+    """`column` of the newest prompt version in a scope, correlated to the
+    owning tenant or team row."""
+    return (
+        select(column)
+        .where(*scope)
+        .order_by(PromptVersion.version_no.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+# Read-only: the live tenant and team prompts, loaded with the row. Writes go
+# through runtime.system_prompts, which appends a version.
+_TENANT_SCOPE = (PromptVersion.tenant_id == Tenant.id, PromptVersion.team_id.is_(None))
+_TEAM_SCOPE = (PromptVersion.tenant_id == Team.tenant_id, PromptVersion.team_id == Team.id)
+Tenant.system_prompt = column_property(
+    func.coalesce(_latest_prompt_version(PromptVersion.content, *_TENANT_SCOPE), "")
+)
+Tenant.system_prompt_version_id = column_property(
+    _latest_prompt_version(PromptVersion.id, *_TENANT_SCOPE)
+)
+Team.system_prompt = column_property(
+    func.coalesce(_latest_prompt_version(PromptVersion.content, *_TEAM_SCOPE), "")
+)
+Team.system_prompt_version_id = column_property(
+    _latest_prompt_version(PromptVersion.id, *_TEAM_SCOPE)
+)
 
 
 class Agent(UUIDPKMixin, TimestampMixin, Base):
@@ -222,6 +273,12 @@ class Job(UUIDPKMixin, Base):
     agent_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_versions.id"))
     memory_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("memory_versions.id", use_alter=True, name="fk_jobs_memory_version")
+    )
+    tenant_prompt_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("prompt_versions.id")
+    )
+    team_prompt_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("prompt_versions.id")
     )
     parent_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id"), index=True)
     status: Mapped[str] = mapped_column(default="queued", index=True)

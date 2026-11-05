@@ -19,7 +19,8 @@
 <div class="panel">
   <h2>Tenant</h2>
   <p class="muted mt-0">
-    The system prompt is prepended to every agent in this tenant. The settings blob is
+    The system prompt is prepended to every agent in this tenant, ahead of each team's
+    own prompt. The settings blob is
     where injection screening, hooks, link policy, retention and learning are tuned —
     it is the whole of <code>tenants.settings</code>, so what you save here replaces
     what is stored.
@@ -47,6 +48,7 @@
       <button type="submit">Save settings</button>
     </div>
   </form>
+  {% include "prompt_history.html" %}
 </div>
 
 <div class="panel">
