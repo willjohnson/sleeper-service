@@ -93,10 +93,18 @@ SEED_MODELS = [
     ("anthropic", "claude-sonnet-5", "anthropic:claude-sonnet-5"),
     ("anthropic", "claude-opus-5", "anthropic:claude-opus-5"),
     ("anthropic", "claude-opus-5-5", "anthropic:claude-opus-5-5"),
+    ("anthropic", "claude-fable-5-1", "anthropic:claude-fable-5-1"),
+    ("anthropic", "claude-fable-5-2", "anthropic:claude-fable-5-2"),
     ("anthropic", "claude-haiku-4-5", "anthropic:claude-haiku-4-5-20251001"),
     ("openai", "gpt-6-sol", "openai:gpt-6-sol"),
     ("openai", "gpt-6-astra", "openai:gpt-6-astra"),
     ("openai", "gpt-6-luna", "openai:gpt-6-luna"),
+    ("openai", "gpt-6-terra", "openai:gpt-6-terra"),
+    ("google", "gemini-3.8-flash", "google:gemini-3.8-flash"),
+    ("google", "gemini-3.5-flash-lite", "google:gemini-3.5-flash-lite"),
+    ("google", "gemini-3.1-pro-preview", "google:gemini-3.1-pro-preview"),
+    ("google", "gemini-4-argon", "google:gemini-4-argon"),
+    ("google", "gemini-4-hydrogen", "google:gemini-4-hydrogen"),
     ("test", "default", "test:default"),
     ("test", "flaky", "test:flaky"),  # always-503 model for DLQ/alerting demos
 ]

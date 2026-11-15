@@ -25,14 +25,22 @@ async def test_seed_models_registers_gpt6_and_opus55_once():
         ("openai", "gpt-6-sol"),
         ("openai", "gpt-6-astra"),
         ("openai", "gpt-6-luna"),
+        ("openai", "gpt-6-terra"),
         ("anthropic", "claude-opus-5-5"),
+        ("anthropic", "claude-fable-5-1"),
+        ("anthropic", "claude-fable-5-2"),
+        ("google", "gemini-3.8-flash"),
+        ("google", "gemini-3.5-flash-lite"),
+        ("google", "gemini-3.1-pro-preview"),
+        ("google", "gemini-4-argon"),
+        ("google", "gemini-4-hydrogen"),
     ):
         assert registered[provider, name] == f"{provider}:{name}"
         assert validate_model_registration(provider, registered[provider, name]) is None
 
 
 @pytest.mark.filterwarnings("error:`ModelProfile` key")
-@pytest.mark.parametrize("name", ["gpt-6-sol", "gpt-6-astra", "gpt-6-luna"])
+@pytest.mark.parametrize("name", ["gpt-6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6-terra"])
 @pytest.mark.parametrize("scoped_key", [None, "scoped-key"])
 def test_gpt6_uses_responses_with_scoped_or_environment_credentials(monkeypatch, name, scoped_key):
     monkeypatch.setenv("OPENAI_API_KEY", "environment-key")

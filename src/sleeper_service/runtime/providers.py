@@ -166,7 +166,12 @@ def build_model(model_string: str, api_key: str | None) -> PaiModel | str:
 
         return TestModel()
 
-    if provider_name == "openai" and model_name in {"gpt-6-sol", "gpt-6-astra", "gpt-6-luna"}:
+    if provider_name == "openai" and model_name in {
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6-terra",
+    }:
         from pydantic_ai.models.openai import OpenAIResponsesModel
         from pydantic_ai.profiles.openai import openai_model_profile
         from pydantic_ai.providers.openai import OpenAIProvider
