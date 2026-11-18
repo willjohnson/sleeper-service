@@ -136,9 +136,7 @@ async def test_multimodal_input_encoding(monkeypatch):
         return httpx.Response(200, json={"answers": ANSWERS, "usage": USAGE})
 
     install_transport(monkeypatch, handler)
-    await decisions.run_decisions(
-        MODEL, None, "", ["Check this photo.", image], QUESTIONS
-    )
+    await decisions.run_decisions(MODEL, None, "", ["Check this photo.", image], QUESTIONS)
 
 
 async def test_http_error_raises_model_http_error(monkeypatch):

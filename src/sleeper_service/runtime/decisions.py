@@ -90,10 +90,10 @@ class DecisionUsage(BaseModel):
 
 
 def is_decision_model(model_string: str) -> bool:
-    return (
-        model_string in (openai_decisions.MODEL, gemini_decisions.MODEL)
-        or model_string.startswith(("openrouter:typesafe/jev-", "openrouter:~typesafe/jev-"))
-    )
+    return model_string in (
+        openai_decisions.MODEL,
+        gemini_decisions.MODEL,
+    ) or model_string.startswith(("openrouter:typesafe/jev-", "openrouter:~typesafe/jev-"))
 
 
 def validate_decision_config(
