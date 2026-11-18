@@ -105,6 +105,7 @@ SEED_MODELS = [
     ("google", "gemini-3.1-pro-preview", "google:gemini-3.1-pro-preview"),
     ("google", "gemini-4-argon", "google:gemini-4-argon"),
     ("google", "gemini-4-hydrogen", "google:gemini-4-hydrogen"),
+    ("google", "gemini-decision-1", "google:gemini-decision-1"),
     ("test", "default", "test:default"),
     ("test", "flaky", "test:flaky"),  # always-503 model for DLQ/alerting demos
 ]

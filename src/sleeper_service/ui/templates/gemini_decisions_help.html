@@ -1,0 +1,13 @@
+<details class="muted text-xs">
+  <summary>Using Gemini Decisions</summary>
+  <p>Choose <code>google:gemini-decision-1</code> and put named questions in
+    Params. Types are <code>noul</code> (probability of yes),
+    <code>choice</code> (options in <code>criteria</code>), and <code>score</code>
+    (ordered <code>legend</code>).</p>
+  <pre>{"questions": {"refund": {"type": "noul", "instructions": "Is a refund requested?"}}}</pre>
+  <p>Leave Output schema blank. Results contain <code>answers</code> keyed by
+    question name. Gemini Decisions accepts text, images, audio, video, and PDFs,
+    and does not support tool grants, delegation, memory, learning, or human escalation.</p>
+  <p>Uses a Google credential, <code>GEMINI_API_KEY</code>, or <code>GOOGLE_API_KEY</code>.
+    <a href="https://aistudio.google.com/docs/models/gemini-decision-1">Model documentation</a>.</p>
+</details>
