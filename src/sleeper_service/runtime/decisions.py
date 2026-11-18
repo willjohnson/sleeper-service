@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.usage import RunUsage
 
-from sleeper_service.runtime import openai_decisions
+from sleeper_service.runtime import gemini_decisions, openai_decisions
 
 Content = str | dict | list
 Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -90,9 +90,10 @@ class DecisionUsage(BaseModel):
 
 
 def is_decision_model(model_string: str) -> bool:
-    return model_string == openai_decisions.MODEL or model_string.startswith(
-        ("openrouter:typesafe/jev-", "openrouter:~typesafe/jev-")
-    )
+    return model_string in (
+        openai_decisions.MODEL,
+        gemini_decisions.MODEL,
+    ) or model_string.startswith(("openrouter:typesafe/jev-", "openrouter:~typesafe/jev-"))
 
 
 def validate_decision_config(
@@ -107,13 +108,16 @@ def validate_decision_config(
     if not is_decision_model(model_string):
         return None
     openai = model_string == openai_decisions.MODEL
-    label = "OpenAI Decisions" if openai else "Jev"
+    gemini = model_string == gemini_decisions.MODEL
+    label = "OpenAI Decisions" if openai else ("Gemini Decisions" if gemini else "Jev")
     params = params or {}
     if set(params) != {"questions"}:
         return f"{label} Params must contain only 'questions'; chat parameters are not supported."
     try:
         if openai:
             openai_decisions.parse_questions(params["questions"])
+        elif gemini:
+            gemini_decisions.parse_questions(params["questions"])
         else:
             QUESTION_ADAPTER.validate_python(params["questions"])
     except (ValidationError, ValueError) as exc:
@@ -139,6 +143,8 @@ async def run_decisions(
 ) -> tuple[dict, RunUsage, Decimal | None]:
     if model_string == openai_decisions.MODEL:
         return await openai_decisions.run_decisions(api_key, instructions, content, questions)
+    if model_string == gemini_decisions.MODEL:
+        return await gemini_decisions.run_decisions(api_key, instructions, content, questions)
     api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("Jev requires an OpenRouter credential or OPENROUTER_API_KEY.")
