@@ -36,6 +36,7 @@ async def test_seed_models_registers_gpt6_and_opus55_once():
         ("google", "gemini-3.1-pro-preview"),
         ("google", "gemini-4-argon"),
         ("google", "gemini-4-hydrogen"),
+        ("google", "gemini-4-neon"),
         ("google", "gemini-decision-1"),
     ):
         assert registered[provider, name] == f"{provider}:{name}"

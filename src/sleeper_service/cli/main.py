@@ -100,6 +100,7 @@ SEED_MODELS = [
     ("google", "gemini-3.8-flash", "google:gemini-3.8-flash"),
     ("google", "gemini-4-argon", "google:gemini-4-argon"),
     ("google", "gemini-4-hydrogen", "google:gemini-4-hydrogen"),
+    ("google", "gemini-4-neon", "google:gemini-4-neon"),
     ("google", "gemini-decision-1", "google:gemini-decision-1"),
     ("openai", "gpt-6-astra", "openai:gpt-6-astra"),
     ("openai", "gpt-6-luna", "openai:gpt-6-luna"),
