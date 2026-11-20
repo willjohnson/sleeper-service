@@ -1,0 +1,67 @@
+name: release
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Read and verify version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+
+          with open("src/sleeper_service/__init__.py") as f:
+              init_src = f.read()
+          m = re.search(r'^__version__\s*=\s*"([^"]+)"', init_src, re.MULTILINE)
+          if not m or m.group(1) != version:
+              raise SystemExit(
+                  f"Version mismatch: pyproject.toml={version!r}, "
+                  f"__init__.py={m.group(1) if m else None!r}"
+              )
+
+          tag = f"v{version}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={version}\n")
+              out.write(f"tag={tag}\n")
+          PY
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
