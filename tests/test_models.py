@@ -41,7 +41,7 @@ async def test_seed_models_registers_gpt6_and_opus55_once():
     ):
         assert registered[provider, name] == f"{provider}:{name}"
         assert validate_model_registration(provider, registered[provider, name]) is None
-    for name in ("glm-5.3", "glm-5.3-flash"):
+    for name in ("glm-5.3", "glm-5.3-flash", "glm-5.4"):
         assert registered["openrouter", name] == f"openrouter:z-ai/{name}"
         assert validate_model_registration("openrouter", registered["openrouter", name]) is None
 

@@ -109,6 +109,7 @@ SEED_MODELS = [
     ("openai", "gpt-6-terra", "openai:gpt-6-terra"),
     ("openrouter", "glm-5.3", "openrouter:z-ai/glm-5.3"),
     ("openrouter", "glm-5.3-flash", "openrouter:z-ai/glm-5.3-flash"),
+    ("openrouter", "glm-5.4", "openrouter:z-ai/glm-5.4"),
     ("openrouter", "jev-1.13", "openrouter:typesafe/jev-1.13"),
     ("test", "default", "test:default"),
     ("test", "flaky", "test:flaky"),  # always-503 model for DLQ/alerting demos
