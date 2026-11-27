@@ -1021,6 +1021,35 @@ async def _prompt_history(db: AsyncSession, owner: Tenant | Team) -> list[dict]:
     ]
 
 
+@router.get("/t/{tenant_id}/teams", response_class=HTMLResponse)
+async def teams_page(
+    request: Request,
+    tenant_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    p: UserPrincipal = Depends(ui_user),
+):
+    tenant = await _tenant_or_home(db, p, tenant_id)
+    if isinstance(tenant, RedirectResponse):
+        return tenant
+    team_ids = await visible_team_ids(db, p, tenant.id)
+    teams = await db.scalars(
+        select(Team).where(Team.id.in_(team_ids)).order_by(Team.is_org_team.desc(), Team.name)
+    )
+    return templates.TemplateResponse(
+        request,
+        "teams.html",
+        _ctx(
+            request,
+            p,
+            tenant=tenant,
+            tenants=await _visible_tenants(db, p),
+            section="teams",
+            teams=[(team, await _team_role(db, p, team.id)) for team in teams],
+            can_create_team=await is_tenant_admin(db, p, tenant.id),
+        ),
+    )
+
+
 async def _render_team(
     request: Request,
     team_id: uuid.UUID,
@@ -1074,7 +1103,7 @@ async def _render_team(
             p,
             tenant=await db.get(Tenant, team.tenant_id),
             tenants=await _visible_tenants(db, p),
-            section="agents",
+            section="teams",
             team=team,
             members=members,
             suggestions=suggestions,
@@ -1272,7 +1301,7 @@ async def _render_new_team(
             p,
             tenant=tenant,
             tenants=await _visible_tenants(db, p),
-            section="agents",
+            section="teams",
             candidates=await _tenant_users(db, tenant.id, p.user),
             error=error,
             form=form or {},
@@ -1335,7 +1364,7 @@ async def ui_create_team(
     await db.flush()
     db.add(TeamMember(user_id=owner.id, team_id=team.id, role=Role.OWNER))
     await db.commit()
-    return RedirectResponse(f"/ui/t/{tenant.id}/agents", status_code=303)
+    return RedirectResponse(f"/ui/t/{tenant.id}/teams", status_code=303)
 
 
 async def _render_new_agent(

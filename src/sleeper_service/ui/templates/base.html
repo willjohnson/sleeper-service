@@ -20,6 +20,7 @@
       {% if tenant %}
       {{ nav('dashboard', '/ui/t/' ~ tenant.id, 'Dashboard') }}
       {{ nav('agents', '/ui/t/' ~ tenant.id ~ '/agents', 'Agents') }}
+      {{ nav('teams', '/ui/t/' ~ tenant.id ~ '/teams', 'Teams') }}
       {{ nav('inbox', '/ui/t/' ~ tenant.id ~ '/inbox', 'Inbox') }}
       {{ nav('connections', '/ui/t/' ~ tenant.id ~ '/connections', 'Connections') }}
       {{ nav('files', '/ui/t/' ~ tenant.id ~ '/files', 'Files') }}

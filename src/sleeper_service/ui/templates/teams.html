@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Teams · {{ tenant.name }} — Sleeper Service{% endblock %}
+{% block heading %}Teams · {{ tenant.name }}{% endblock %}
+{% block actions %}
+{% if can_create_team %}<a class="btn" href="/ui/t/{{ tenant.id }}/teams/new">New team</a>{% endif %}
+{% endblock %}
+{% block content %}
+<div class="panel">
+  {% if teams %}
+  <table>
+    <thead><tr><th scope="col">Team</th><th scope="col">Your role</th></tr></thead>
+    <tbody>
+      {% for team, role in teams %}
+      <tr>
+        <td><a href="/ui/teams/{{ team.id }}">{{ team.name }}</a>{% if team.is_org_team %} <span class="muted">(org-wide)</span>{% endif %}</td>
+        <td>{{ role }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No teams yet.</p>{% endif %}
+</div>
+{% endblock %}
