@@ -1160,6 +1160,36 @@ async def test_archive_is_owner_only(client: AsyncClient, risk_agent: dict) -> N
 ROOT = ("root@example.com", "root-password")
 
 
+async def test_teams_page_lists_visible_teams_even_without_agents(
+    client: AsyncClient, org: dict, bootstrap: Bootstrap
+) -> None:
+    tenant_id = org["tenant"]["id"]
+    url = f"/ui/t/{tenant_id}/teams"
+    other_tenant = await client.post(
+        "/v1/tenants", headers=auth(bootstrap.superuser_key), json={"name": "other-org"}
+    )
+    assert other_tenant.status_code == 201
+    other_tenant_id = other_tenant.json()["id"]
+
+    await _login(client, "carol@example.com")
+    agents = await client.get(f"/ui/t/{tenant_id}/agents")
+    assert f'href="{url}">Teams</a>' in agents.text
+    page = await client.get(url)
+    assert page.status_code == 200
+    assert f'href="/ui/teams/{org["team"]["id"]}">risk</a>' in page.text
+    assert "viewer" in page.text
+    assert "org-wide" not in page.text
+    assert f"{url}/new" not in page.text
+    denied = await client.get(f"/ui/t/{other_tenant_id}/teams", follow_redirects=False)
+    assert denied.status_code == 303
+
+    await _login(client, *ROOT)
+    page = await client.get(url)
+    assert page.status_code == 200
+    assert "org-wide" in page.text
+    assert f'href="{url}/new">New team</a>' in page.text
+
+
 async def test_create_team_via_ui(client: AsyncClient, org: dict, bootstrap: Bootstrap) -> None:
     tenant_id = org["tenant"]["id"]
     await _login(client, *ROOT)
@@ -1175,7 +1205,8 @@ async def test_create_team_via_ui(client: AsyncClient, org: dict, bootstrap: Boo
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert r.headers["location"] == f"/ui/t/{tenant_id}/agents"
+    assert r.headers["location"] == f"/ui/t/{tenant_id}/teams"
+    assert "compliance" in (await client.get(r.headers["location"])).text
 
     # Verified as the superuser: a team's creator is its only member, so the
     # other users in the tenant cannot see it yet.

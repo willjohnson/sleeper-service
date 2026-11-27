@@ -3,7 +3,7 @@
 {% block heading %}{{ team.name }}
   {% if team.is_org_team %}<span class="muted text-sm">· org-wide</span>{% endif %}
 {% endblock %}
-{% block actions %}<a class="btn subtle" href="/ui/t/{{ tenant.id }}/agents">Back to agents</a>{% endblock %}
+{% block actions %}<a class="btn subtle" href="/ui/t/{{ tenant.id }}/teams">Back to teams</a>{% endblock %}
 {% block content %}
 {% if plaintext %}
 <div class="panel">
